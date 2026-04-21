@@ -28,6 +28,10 @@ class pcie_tl_env extends uvm_env;
     pcie_tl_if_adapter         rc_adapter;
     pcie_tl_if_adapter         ep_adapter;
 
+    //--- Link Delay Models ---
+    pcie_tl_link_delay_model   rc2ep_delay;
+    pcie_tl_link_delay_model   ep2rc_delay;
+
     //--- Virtual Sequencer ---
     pcie_tl_virtual_sequencer  v_seqr;
 
@@ -58,6 +62,10 @@ class pcie_tl_env extends uvm_env;
         // 3. Create adapters
         rc_adapter = pcie_tl_if_adapter::type_id::create("rc_adapter", this);
         ep_adapter = pcie_tl_if_adapter::type_id::create("ep_adapter", this);
+
+        // 3b. Create link delay models
+        rc2ep_delay = pcie_tl_link_delay_model::type_id::create("rc2ep_delay", this);
+        ep2rc_delay = pcie_tl_link_delay_model::type_id::create("ep2rc_delay", this);
 
         // 4. Create agents
         if (cfg.rc_agent_enable) begin
@@ -167,7 +175,7 @@ class pcie_tl_env extends uvm_env;
         forever begin
             rc_adapter.tlm_tx_fifo.get(tlp);
             `uvm_info("ENV_LOOP", $sformatf("RC->EP: %s", tlp.convert2string()), UVM_HIGH)
-            ep_adapter.tlm_rx_fifo.put(tlp);
+            rc2ep_delay.forward(tlp, ep_adapter.tlm_rx_fifo);
             replenish_credits(tlp);
             if (cfg.ep_auto_response && ep_agent.ep_driver != null) begin
                 fork
@@ -188,7 +196,7 @@ class pcie_tl_env extends uvm_env;
         forever begin
             ep_adapter.tlm_tx_fifo.get(tlp);
             `uvm_info("ENV_LOOP", $sformatf("EP->RC: %s", tlp.convert2string()), UVM_HIGH)
-            rc_adapter.tlm_rx_fifo.put(tlp);
+            ep2rc_delay.forward(tlp, rc_adapter.tlm_rx_fifo);
             replenish_credits(tlp);
             if (tlp.get_category() == TLP_CAT_COMPLETION && rc_agent.rc_driver != null) begin
                 pcie_tl_cpl_tlp cpl;
@@ -271,6 +279,17 @@ class pcie_tl_env extends uvm_env;
         // Config space init
         cfg_mgr.init_type0_header();
         cfg_mgr.init_pcie_capability(8'h40, cfg.max_payload_size, cfg.max_read_request_size, cfg.read_completion_boundary);
+
+        // Link Delay
+        rc2ep_delay.enable          = cfg.link_delay_enable;
+        rc2ep_delay.latency_min_ns  = cfg.rc2ep_latency_min_ns;
+        rc2ep_delay.latency_max_ns  = cfg.rc2ep_latency_max_ns;
+        rc2ep_delay.update_interval = cfg.link_delay_update_interval;
+
+        ep2rc_delay.enable          = cfg.link_delay_enable;
+        ep2rc_delay.latency_min_ns  = cfg.ep2rc_latency_min_ns;
+        ep2rc_delay.latency_max_ns  = cfg.ep2rc_latency_max_ns;
+        ep2rc_delay.update_interval = cfg.link_delay_update_interval;
     endfunction
 
 endclass
