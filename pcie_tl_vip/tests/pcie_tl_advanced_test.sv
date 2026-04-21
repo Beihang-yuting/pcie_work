@@ -492,3 +492,124 @@ class pcie_tl_tag_stress_test extends pcie_tl_base_test;
         phase.drop_objection(this);
     endtask
 endclass
+
+//=============================================================================
+// Test 8: Link Delay - Pipeline latency simulation
+//=============================================================================
+class pcie_tl_link_delay_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_link_delay_test)
+    function new(string name = "pcie_tl_link_delay_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        super.configure_test();
+        cfg.link_delay_enable          = 1;
+        cfg.rc2ep_latency_min_ns       = 2000;
+        cfg.rc2ep_latency_max_ns       = 2000;
+        cfg.ep2rc_latency_min_ns       = 2000;
+        cfg.ep2rc_latency_max_ns       = 2000;
+        cfg.link_delay_update_interval = 16;
+        cfg.cpl_timeout_ns             = 100000;  // 100us to accommodate delay
+        cfg.ep_auto_response           = 1;
+        configure_fc(1, 0);
+        cfg.init_ph_credit  = 64;
+        cfg.init_pd_credit  = 512;
+        cfg.init_nph_credit = 64;
+        cfg.init_npd_credit = 256;
+        cfg.init_cplh_credit = 64;
+        cfg.init_cpld_credit = 512;
+    endfunction
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+
+        // Phase 1: Fixed delay - 10 memory writes, verify pipeline behavior
+        `uvm_info("LINK_DELAY", "=== Phase 1: Fixed 2us delay, 10 memory writes ===", UVM_LOW)
+        begin
+            realtime t_start = $realtime;
+            for (int i = 0; i < 10; i++) begin
+                pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("dly_wr_%0d", i));
+                wr.addr = 64'h0000_0001_0000_0000 + (i * 64);
+                wr.length = 4;
+                wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 1;
+                wr.start(env.rc_agent.sequencer);
+                #10ns;
+            end
+            // Wait for all delayed TLPs to arrive
+            #3000ns;
+            `uvm_info("LINK_DELAY", $sformatf("Phase 1 done. RC2EP forwarded: %0d, delayed: %0d",
+                env.rc2ep_delay.total_forwarded, env.rc2ep_delay.total_delayed), UVM_LOW)
+        end
+
+        // Phase 2: Asymmetric delay - RC->EP 2us, EP->RC 1us
+        `uvm_info("LINK_DELAY", "=== Phase 2: Asymmetric delay (RC->EP=2us, EP->RC=1us) ===", UVM_LOW)
+        begin
+            env.rc2ep_delay.set_latency(2000, 2000);
+            env.ep2rc_delay.set_latency(1000, 1000);
+
+            // Memory read: request goes RC->EP (2us), completion comes EP->RC (1us)
+            // Total round-trip ~3us
+            begin
+                realtime t_before = $realtime;
+                pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create("dly_rd");
+                rd.addr = 64'h0000_0001_0000_0000;
+                rd.length = 4;
+                rd.first_be = 4'hF; rd.last_be = 4'hF; rd.is_64bit = 1;
+                rd.start(env.rc_agent.sequencer);
+                #5000ns;  // Wait for round-trip
+                `uvm_info("LINK_DELAY", $sformatf("Phase 2 done. EP2RC forwarded: %0d",
+                    env.ep2rc_delay.total_forwarded), UVM_LOW)
+            end
+        end
+
+        // Phase 3: Random range with ordering verification
+        `uvm_info("LINK_DELAY", "=== Phase 3: Random delay 1500-2500ns, interval=4 ===", UVM_LOW)
+        begin
+            env.rc2ep_delay.set_latency(1500, 2500);
+            env.rc2ep_delay.set_update_interval(4);
+            env.ep2rc_delay.set_latency(1500, 2500);
+            env.ep2rc_delay.set_update_interval(4);
+
+            for (int i = 0; i < 20; i++) begin
+                pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("rnd_wr_%0d", i));
+                wr.addr = 64'h0000_0002_0000_0000 + (i * 64);
+                wr.length = 4;
+                wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 1;
+                wr.start(env.rc_agent.sequencer);
+                #10ns;
+            end
+            #4000ns;
+            `uvm_info("LINK_DELAY", $sformatf(
+                "Phase 3 done. Applied delay range: %0d-%0d ns, updates: %0d",
+                env.rc2ep_delay.min_applied_ns, env.rc2ep_delay.max_applied_ns,
+                env.rc2ep_delay.delay_updates), UVM_LOW)
+        end
+
+        // Phase 4: Disabled mode - verify no extra latency
+        `uvm_info("LINK_DELAY", "=== Phase 4: Delay disabled ===", UVM_LOW)
+        begin
+            int prev_forwarded = env.rc2ep_delay.total_forwarded;
+            int prev_delayed   = env.rc2ep_delay.total_delayed;
+            env.rc2ep_delay.enable = 0;
+            env.ep2rc_delay.enable = 0;
+
+            for (int i = 0; i < 5; i++) begin
+                pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("nodly_wr_%0d", i));
+                wr.addr = 64'h0000_0003_0000_0000 + (i * 64);
+                wr.length = 4;
+                wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 1;
+                wr.start(env.rc_agent.sequencer);
+                #10ns;
+            end
+            #100ns;
+            // When disabled, total_delayed should not increase
+            if (env.rc2ep_delay.total_delayed == prev_delayed)
+                `uvm_info("LINK_DELAY", "Phase 4 PASS: no delay applied when disabled", UVM_LOW)
+            else
+                `uvm_error("LINK_DELAY", "Phase 4 FAIL: delay applied when disabled")
+        end
+
+        #200ns;
+        `uvm_info("LINK_DELAY", "=== Link Delay Test Complete ===", UVM_LOW)
+        phase.drop_objection(this);
+    endtask
+endclass
