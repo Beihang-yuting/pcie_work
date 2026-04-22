@@ -119,13 +119,17 @@ class pcie_tl_switch extends uvm_component;
                 end
             end
             default: begin
+                // If routed back to ingress (e.g. completion with random requester_id
+                // matching own DSP bus), redirect to USP (requester must be upstream)
+                if (dst == ingress_port_id && ingress_port_id > 0)
+                    dst = SWITCH_ROUTE_USP;
                 if (dst >= 0 && dst < all_ports.size() && dst != ingress_port_id) begin
                     all_ports[dst].tx_fifo.put(tlp);
                     all_ports[dst].forwarded_count++;
                     total_routed++;
                     if (ingress_port_id > 0 && dst > 0)
                         total_p2p++;
-                end else begin
+                end else if (dst < 0 || dst >= all_ports.size()) begin
                     total_dropped++;
                     `uvm_warning("SWITCH", $sformatf("Bad route dst=%0d from port %0d",
                         dst, ingress_port_id))

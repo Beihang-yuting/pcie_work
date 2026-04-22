@@ -2281,18 +2281,11 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
             env.scb.matched, env.scb.mismatched, env.scb.unexpected), UVM_LOW)
         `uvm_info("SW_HEAVY", $sformatf("  Sim time: %0t", t_end - t_start), UVM_LOW)
 
-        // Under 20K+ heavy traffic, a small drop rate (<1%) from TLM FIFO contention
-        // is expected in the switch model. Key checks: data integrity + no unexpected completions.
-        begin
-            real drop_rate = (env.sw.total_routed > 0) ?
-                real'(env.sw.total_dropped) / real'(env.sw.total_routed + env.sw.total_dropped) * 100.0 : 0.0;
-            `uvm_info("SW_HEAVY", $sformatf("  Drop rate: %.2f%%", drop_rate), UVM_LOW)
-            if (env.scb.mismatched == 0 && env.scb.unexpected == 0 && drop_rate < 1.0)
-                `uvm_info("SW_HEAVY", "*** SWITCH 20K HEAVY TRAFFIC PASSED ***", UVM_LOW)
-            else
-                `uvm_error("SW_HEAVY", $sformatf("FAILED: drop_rate=%.2f%% mismatch=%0d unexpected=%0d",
-                    drop_rate, env.scb.mismatched, env.scb.unexpected))
-        end
+        if (env.sw.total_dropped == 0 && env.scb.mismatched == 0 && env.scb.unexpected == 0)
+            `uvm_info("SW_HEAVY", "*** SWITCH 20K HEAVY TRAFFIC PASSED — ZERO DROPS ***", UVM_LOW)
+        else
+            `uvm_error("SW_HEAVY", $sformatf("FAILED: dropped=%0d mismatch=%0d unexpected=%0d",
+                env.sw.total_dropped, env.scb.mismatched, env.scb.unexpected))
         `uvm_info("SW_HEAVY", "============================================================\n", UVM_LOW)
         phase.drop_objection(this);
     endtask
