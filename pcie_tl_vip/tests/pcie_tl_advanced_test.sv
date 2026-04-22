@@ -2044,3 +2044,249 @@ class pcie_tl_switch_cfg_space_test extends pcie_tl_base_test;
         phase.drop_objection(this);
     endtask
 endclass
+
+//=============================================================================
+// Test 22: Switch 20K Heavy Traffic — All directions full blast
+//
+// Total target: ~23,600 requests through switch
+//   Phase 1: RC->4EP  8000 writes (2000/EP)
+//   Phase 2: RC->4EP  2000 reads (500/EP, multi-CplD)
+//   Phase 3: 4EP->RC  4000 DMA writes (1000/EP upstream)
+//   Phase 4: P2P all-to-all 2400 writes (4EP x 3dst x 200)
+//   Phase 5: Full mix — RC wr+rd + EP DMA + P2P all concurrent ~7200
+//=============================================================================
+class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_heavy_traffic_test)
+
+    int p1_wr, p2_rd, p3_dma, p4_p2p;
+    int p5_rc_wr, p5_rc_rd, p5_ep_dma, p5_p2p;
+
+    function new(string name = "pcie_tl_switch_heavy_traffic_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable            = 1;
+        cfg.switch_cfg               = sw_cfg;
+        configure_fc(1, 1);
+        configure_tags(.extended(1), .phantom(0), .max_out(512));
+        cfg.max_payload_size         = MPS_128;
+        cfg.read_completion_boundary = RCB_64;
+        cfg.ep_auto_response         = 1;
+        cfg.response_delay_min       = 0;
+        cfg.response_delay_max       = 2;
+        cfg.cpl_timeout_ns           = 500000;
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        int grand_total;
+        realtime t_start, t_end;
+        phase.raise_objection(this);
+
+        `uvm_info("SW_HEAVY", "============================================================", UVM_LOW)
+        `uvm_info("SW_HEAVY", "=== Test 22: Switch 20K Heavy Traffic ===", UVM_LOW)
+        `uvm_info("SW_HEAVY", "============================================================", UVM_LOW)
+        t_start = $realtime;
+
+        // Phase 1: RC -> 4EP writes (8000)
+        `uvm_info("SW_HEAVY", "\n--- Phase 1: RC writes 8000 (2000/EP) ---", UVM_LOW)
+        p1_wr = 0;
+        fork
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < 2000; i++) begin
+                        pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                            $sformatf("p1_wr_e%0d_%0d", e, i));
+                        wr.addr     = cfg.switch_cfg.ds_mem_base[e] + (i * 64);
+                        wr.length   = 8 + (i % 24);
+                        wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+                        wr.start(env.rc_agent.sequencer);
+                        p1_wr++;
+                        #1ns;
+                    end
+                end join_none
+            end
+        join
+        #5000ns;
+        `uvm_info("SW_HEAVY", $sformatf("Phase 1 done: %0d writes, routed=%0d",
+            p1_wr, env.sw.total_routed), UVM_LOW)
+
+        // Phase 2: RC -> 4EP reads (2000, multi-CplD)
+        `uvm_info("SW_HEAVY", "\n--- Phase 2: RC reads 2000 (500/EP, multi-CplD) ---", UVM_LOW)
+        p2_rd = 0;
+        fork
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < 500; i++) begin
+                        pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
+                            $sformatf("p2_rd_e%0d_%0d", e, i));
+                        rd.addr     = cfg.switch_cfg.ds_mem_base[e] + ((i % 2000) * 64);
+                        rd.length   = 32 + (i % 3) * 32;
+                        rd.first_be = 4'hF; rd.last_be = 4'hF; rd.is_64bit = 0;
+                        rd.start(env.rc_agent.sequencer);
+                        p2_rd++;
+                        #2ns;
+                    end
+                end join_none
+            end
+        join
+        #20000ns;
+        `uvm_info("SW_HEAVY", $sformatf("Phase 2 done: %0d reads, matched=%0d cpl=%0d",
+            p2_rd, env.scb.matched, env.scb.total_completions), UVM_LOW)
+
+        // Phase 3: 4EP -> RC DMA writes (4000)
+        `uvm_info("SW_HEAVY", "\n--- Phase 3: 4EP DMA upstream 4000 (1000/EP) ---", UVM_LOW)
+        p3_dma = 0;
+        fork
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < 1000; i++) begin
+                        env.ep_agents[e].ep_driver.initiate_dma(
+                            64'h0000_0000_0100_0000 + (e * 64'h0100_0000) + (i * 64),
+                            64, 0);
+                        p3_dma++;
+                        #1ns;
+                    end
+                end join_none
+            end
+        join
+        #10000ns;
+        `uvm_info("SW_HEAVY", $sformatf("Phase 3 done: %0d EP DMA upstream", p3_dma), UVM_LOW)
+
+        // Phase 4: P2P all-to-all (2400)
+        `uvm_info("SW_HEAVY", "\n--- Phase 4: P2P all-to-all 2400 ---", UVM_LOW)
+        begin
+            int p2p_before = env.sw.total_p2p;
+            p4_p2p = 0;
+            fork
+                for (int src = 0; src < 4; src++) begin
+                    automatic int s = src;
+                    fork begin
+                        for (int dst = 0; dst < 4; dst++) begin
+                            if (dst == s) continue;
+                            for (int i = 0; i < 200; i++) begin
+                                env.ep_agents[s].ep_driver.initiate_dma(
+                                    cfg.switch_cfg.ds_mem_base[dst] + (s * 64'h1000) + (i * 64),
+                                    64, 0);
+                                p4_p2p++;
+                                #2ns;
+                            end
+                        end
+                    end join_none
+                end
+            join
+            #15000ns;
+            `uvm_info("SW_HEAVY", $sformatf("Phase 4 done: %0d P2P, switch P2P=%0d (new=%0d)",
+                p4_p2p, env.sw.total_p2p, env.sw.total_p2p - p2p_before), UVM_LOW)
+        end
+
+        // Phase 5: Full mix concurrent
+        `uvm_info("SW_HEAVY", "\n--- Phase 5: Full Mix 7200 (all concurrent) ---", UVM_LOW)
+        p5_rc_wr = 0; p5_rc_rd = 0; p5_ep_dma = 0; p5_p2p = 0;
+        fork
+            // RC writes: 3000
+            begin
+                for (int i = 0; i < 3000; i++) begin
+                    pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                        $sformatf("p5_wr_%0d", i));
+                    wr.addr     = cfg.switch_cfg.ds_mem_base[i % 4] + ((i / 4) * 64);
+                    wr.length   = 16; wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+                    wr.start(env.rc_agent.sequencer);
+                    p5_rc_wr++;
+                    #1ns;
+                end
+            end
+            // RC reads: 1000
+            begin
+                for (int i = 0; i < 1000; i++) begin
+                    pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
+                        $sformatf("p5_rd_%0d", i));
+                    rd.addr     = cfg.switch_cfg.ds_mem_base[i % 4] + ((i / 4) * 64);
+                    rd.length   = 8; rd.first_be = 4'hF; rd.last_be = 4'hF; rd.is_64bit = 0;
+                    rd.start(env.rc_agent.sequencer);
+                    p5_rc_rd++;
+                    #3ns;
+                end
+            end
+            // EP DMA upstream: 2000
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < 500; i++) begin
+                        env.ep_agents[e].ep_driver.initiate_dma(
+                            64'h0000_0000_0500_0000 + (e * 64'h0100_0000) + (i * 64),
+                            64, 0);
+                        p5_ep_dma++;
+                        #2ns;
+                    end
+                end join_none
+            end
+            // P2P ring: 1200
+            for (int src = 0; src < 4; src++) begin
+                automatic int s = src;
+                automatic int d = (src + 1) % 4;
+                fork begin
+                    for (int i = 0; i < 300; i++) begin
+                        env.ep_agents[s].ep_driver.initiate_dma(
+                            cfg.switch_cfg.ds_mem_base[d] + (s * 64'h1000) + (i * 64),
+                            64, 0);
+                        p5_p2p++;
+                        #3ns;
+                    end
+                end join_none
+            end
+            // Monitor
+            begin
+                for (int m = 0; m < 10; m++) begin
+                    #5000ns;
+                    `uvm_info("SW_HEAVY", $sformatf(
+                        "  [P5 @%0t] routed=%0d P2P=%0d dropped=%0d | SCB: req=%0d cpl=%0d",
+                        $realtime, env.sw.total_routed, env.sw.total_p2p,
+                        env.sw.total_dropped, env.scb.total_requests,
+                        env.scb.total_completions), UVM_LOW)
+                end
+            end
+        join
+        #30000ns;
+        t_end = $realtime;
+
+        // Report
+        grand_total = p1_wr + p2_rd + p3_dma + p4_p2p +
+                      p5_rc_wr + p5_rc_rd + p5_ep_dma + p5_p2p;
+        `uvm_info("SW_HEAVY", "\n============================================================", UVM_LOW)
+        `uvm_info("SW_HEAVY", "=== Switch 20K Heavy Traffic Summary ===", UVM_LOW)
+        `uvm_info("SW_HEAVY", "============================================================", UVM_LOW)
+        `uvm_info("SW_HEAVY", $sformatf("  Total requests:  %0d", grand_total), UVM_LOW)
+        `uvm_info("SW_HEAVY", $sformatf("  P1 RC wr: %0d  P2 RC rd: %0d  P3 DMA: %0d  P4 P2P: %0d",
+            p1_wr, p2_rd, p3_dma, p4_p2p), UVM_LOW)
+        `uvm_info("SW_HEAVY", $sformatf("  P5 mix: %0dW+%0dR+%0dDMA+%0dP2P = %0d",
+            p5_rc_wr, p5_rc_rd, p5_ep_dma, p5_p2p,
+            p5_rc_wr + p5_rc_rd + p5_ep_dma + p5_p2p), UVM_LOW)
+        `uvm_info("SW_HEAVY", $sformatf("  Switch: routed=%0d P2P=%0d dropped=%0d",
+            env.sw.total_routed, env.sw.total_p2p, env.sw.total_dropped), UVM_LOW)
+        `uvm_info("SW_HEAVY", $sformatf("  Per-DSP fwd: [%0d, %0d, %0d, %0d]",
+            env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count,
+            env.sw.dsp[2].forwarded_count, env.sw.dsp[3].forwarded_count), UVM_LOW)
+        `uvm_info("SW_HEAVY", $sformatf("  SCB: req=%0d cpl=%0d matched=%0d mismatch=%0d unexpected=%0d",
+            env.scb.total_requests, env.scb.total_completions,
+            env.scb.matched, env.scb.mismatched, env.scb.unexpected), UVM_LOW)
+        `uvm_info("SW_HEAVY", $sformatf("  Sim time: %0t", t_end - t_start), UVM_LOW)
+
+        if (env.sw.total_dropped <= 5 && env.scb.mismatched == 0 && env.scb.unexpected == 0)
+            `uvm_info("SW_HEAVY", "*** SWITCH 20K HEAVY TRAFFIC PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_HEAVY", $sformatf("FAILED: dropped=%0d mismatch=%0d unexpected=%0d",
+                env.sw.total_dropped, env.scb.mismatched, env.scb.unexpected))
+        `uvm_info("SW_HEAVY", "============================================================\n", UVM_LOW)
+        phase.drop_objection(this);
+    endtask
+endclass
