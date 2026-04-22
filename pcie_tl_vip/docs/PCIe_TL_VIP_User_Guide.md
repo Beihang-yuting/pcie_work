@@ -1,7 +1,7 @@
 # PCIe Transaction Layer VIP 用户手册
 
-> 版本: 1.0
-> 日期: 2026-04-20
+> 版本: 2.0
+> 日期: 2026-04-22
 > 基于 PCIe Base Specification Rev 5.0 事务层协议
 
 ---
@@ -51,6 +51,9 @@ PCIe Transaction Layer VIP 是一套基于 UVM 的 PCIe 事务层验证 IP，提
 | **Scoreboard** | 请求-完成匹配，多 Completion 追踪，数据完整性校验 |
 | **覆盖率** | TLP 基本属性, FC 状态, 标签使用, 排序交叉, 错误注入, MPS/MRRS/RCB |
 | **接口模式** | TLM 模式（纯事务级）和 SV Interface 模式（256-bit 数据通道） |
+| **链路延时** | 可配置 RC→EP / EP→RC 延时，随机范围，流水线保序 |
+| **PCIe Switch** | 参数化 1-16 端口，地址/ID/消息路由，P2P 直通，Type 1 配置空间，双配置模式(静态/枚举) |
+| **多 EP 支持** | Switch 模式下动态创建 N 个 EP Agent，独立 FC/Tag/地址空间 |
 
 ### 1.3 支持的 PCIe 规范要素
 
@@ -100,6 +103,22 @@ PCIe Transaction Layer VIP 是一套基于 UVM 的 PCIe 事务层验证 IP，提
          |                                          |
     -----+-------------- pcie_tl_if ----------------+-----
          tlp_data[255:0] / tlp_valid / tlp_ready / FC credits
+```
+
+**Switch 模式架构:**
+
+```
++------------------------------------------------------------------+
+|                        pcie_tl_env                                |
+|                                                                   |
+|  +-----------+     +---------------------------+    +-----------+ |
+|  | rc_agent  |     |      pcie_tl_switch       |    |ep_agent_0 | |
+|  |           |---->| USP --- Fabric --- DSP[0] |--->|           | |
+|  |           |<----|         |          DSP[1] |--->|ep_agent_1 | |
+|  +-----------+     |         |          DSP[2] |--->|ep_agent_2 | |
+|                     |         |          DSP[3] |--->|ep_agent_3 | |
+|                     +---------------------------+    +-----------+ |
++------------------------------------------------------------------+
 ```
 
 ### 2.2 数据流
@@ -253,9 +272,16 @@ pcie_tl_vip/
 |   |   |-- pcie_tl_tag_manager.sv  # 标签池管理
 |   |   |-- pcie_tl_ordering_engine.sv  # 排序引擎
 |   |   +-- pcie_tl_cfg_space_manager.sv # 配置空间建模
+|   |   +-- pcie_tl_link_delay_model.sv # 链路延时模型
 |   |
 |   |-- adapter/
 |   |   +-- pcie_tl_if_adapter.sv   # TLM / SV Interface 适配器
+|   |
+|   |-- switch/
+|   |   |-- pcie_tl_switch_config.sv    # Switch 配置 (端口数/地址窗口/P2P)
+|   |   |-- pcie_tl_switch_port.sv      # Switch 端口 (Type 1 配置空间/FC/延时)
+|   |   |-- pcie_tl_switch_fabric.sv    # 路由引擎 (地址/ID/消息路由)
+|   |   +-- pcie_tl_switch.sv           # Switch 顶层 (转发循环)
 |   |
 |   |-- agent/
 |   |   |-- pcie_tl_base_driver.sv  # 基类驱动 (7 步管线)
@@ -283,13 +309,13 @@ pcie_tl_vip/
 |   |-- pcie_tl_tb_top.sv           # Testbench 顶层模块
 |   |-- pcie_tl_base_test.sv        # 基类 Test
 |   |-- pcie_tl_smoke_test.sv       # 5 个 Smoke Test
-|   +-- pcie_tl_advanced_test.sv    # 7 个高级 Test
+|   +-- pcie_tl_advanced_test.sv    # 22 个高级 Test
 |
 +-- docs/
     +-- PCIe_TL_VIP_User_Guide.md   # 本文档
 ```
 
-**统计:** 49 个源文件, 10 种 TLP 类型, 6 个共享组件, 22 个 Sequence, 12 个 Test
+**统计:** 53 个源文件, 10 种 TLP 类型, 7 个共享组件, 22 个 Sequence, 27 个 Test
 
 ---
 
@@ -573,6 +599,27 @@ cfg_mgr.register_callback(12'h048, my_callback);
 | `RW` | 读写 |
 | `RW1C` | 写 1 清零 |
 
+### 6.7 链路延时模型 (pcie_tl_link_delay_model)
+
+模拟 PCIe 链路传播延时。
+
+```systemverilog
+// 配置
+cfg.link_delay_enable          = 1;
+cfg.rc2ep_latency_min_ns       = 200;   // RC→EP 最小延时
+cfg.rc2ep_latency_max_ns       = 500;   // RC→EP 最大延时
+cfg.ep2rc_latency_min_ns       = 200;   // EP→RC 最小延时
+cfg.ep2rc_latency_max_ns       = 500;   // EP→RC 最大延时
+cfg.link_delay_update_interval = 16;    // 每 16 个 TLP 重新随机延时
+```
+
+**特性:**
+- 可配置延时范围 (min/max ns)
+- 每 N 个 TLP 重新随机化延时值
+- 流水线保序：保证 TLP 到达顺序与发送顺序一致
+- 运行时可动态调整: `delay.set_latency(min, max)`
+- 支持禁用模式: `enable=0` 时零延时直通
+
 ---
 
 ## 7. Agent 架构
@@ -736,6 +783,32 @@ RC tx_fifo -> EP rx_fifo (环境转发)
 ```
 
 每次转发后自动返还 FC 信用 (`replenish_credits`)。
+
+### 8.4 Switch 模式
+
+当 `cfg.switch_enable = 1` 时，env 创建 PCIe Switch + 多个 EP Agent:
+
+```systemverilog
+// 测试中配置 Switch
+pcie_tl_switch_config sw_cfg = new("sw_cfg");
+sw_cfg.num_ds_ports = 4;     // 4 个下行端口
+sw_cfg.p2p_enable   = 1;     // 允许 P2P
+sw_cfg.init_defaults();       // 自动分配 bus/地址
+
+cfg.switch_enable = 1;
+cfg.switch_cfg    = sw_cfg;
+```
+
+**数据流:**
+```
+RC → rc_adapter → Switch USP → Fabric 路由 → DSP[i] → ep_adapter[i] → EP[i]
+EP[i] → ep_adapter[i] → DSP[i] → Fabric 路由 → USP → rc_adapter → RC
+EP[i] → DSP[i] → Fabric P2P → DSP[j] → EP[j]  (P2P 直通)
+```
+
+**路由优先级:** Completion (ID) > Config (ID) > Memory/IO (地址) > Message (类型) > 默认上行
+
+**Switch 统计:** `env.sw.total_routed`, `env.sw.total_p2p`, `env.sw.total_dropped`
 
 ---
 
@@ -1048,6 +1121,35 @@ unexp.start(env.rc_agent.sequencer);
 |------|------|--------|------|
 | `cpl_timeout_ns` | `int` | 50000 | Completion 超时 (ns) |
 
+#### 链路延时
+
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `link_delay_enable` | `bit` | 0 | 启用链路延时 |
+| `rc2ep_latency_min_ns` | `int` | 0 | RC→EP 最小延时 (ns) |
+| `rc2ep_latency_max_ns` | `int` | 0 | RC→EP 最大延时 (ns) |
+| `ep2rc_latency_min_ns` | `int` | 0 | EP→RC 最小延时 (ns) |
+| `ep2rc_latency_max_ns` | `int` | 0 | EP→RC 最大延时 (ns) |
+| `link_delay_update_interval` | `int` | 16 | 延时更新间隔 (TLP数) |
+
+#### Switch
+
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `switch_enable` | `bit` | 0 | 启用 Switch 模式 |
+| `switch_cfg` | `pcie_tl_switch_config` | null | Switch 配置对象 |
+
+**pcie_tl_switch_config 参数:**
+
+| 参数 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `num_ds_ports` | `int` | 4 | 下行端口数 (1-16) |
+| `switch_bdf` | `bit[15:0]` | 0x0100 | Switch BDF |
+| `enum_mode` | `bit` | 0 | 0=静态, 1=枚举 |
+| `p2p_enable` | `bit` | 1 | P2P 直通开关 |
+| `port_ph_credit` | `int` | 32 | 每端口 PH 信用 |
+| `port_pd_credit` | `int` | 256 | 每端口 PD 信用 |
+
 ### 13.2 Base Test 辅助方法
 
 ```systemverilog
@@ -1164,6 +1266,111 @@ endclass
 | Phase 1 | 快速发送 20 个读 (5ns 间隔) | 快速消耗标签池 |
 | Phase 2 | 30 个读 (50ns 间隔) | 标签回收后复用 |
 
+#### 14.2.8 链路延时测试 (pcie_tl_link_delay_test)
+
+**目标:** 验证链路延时模型的各种配置模式
+
+| 子测试 | 配置 | 描述 |
+|--------|------|------|
+| 固定延时 | min=max=300ns | RC→EP 和 EP→RC 均为 300ns |
+| 非对称延时 | RC→EP: 200-500ns, EP→RC: 100-200ns | 双向不同延时范围 |
+| 随机延时 | min=50ns, max=1000ns | 大范围随机 |
+| 禁用模式 | enable=0 | 零延时直通 |
+
+#### 14.2.9 双向流量测试 (pcie_tl_bidir_traffic_test)
+
+**目标:** RC-EP 双向 10K 大流量压力验证
+
+**配置:** 10000 次读写混合，RC 和 EP 同时发起流量
+
+#### 14.2.10 Switch 基本路由测试 (pcie_tl_switch_basic_test)
+
+**目标:** 验证 Switch 4EP 基本写读路由
+
+**配置:** 4 个下行端口，静态地址分配
+
+| 阶段 | 操作 | 预期 |
+|------|------|------|
+| Phase 1 | RC 写入 EP0-EP3 各自地址空间 | 路由到正确端口 |
+| Phase 2 | RC 读回 EP0-EP3 数据 | Completion 路由回 RC |
+
+#### 14.2.11 P2P 直通测试 (pcie_tl_switch_p2p_test)
+
+**目标:** P2P 直通功能 + P2P 禁用验证
+
+| 子测试 | p2p_enable | 操作 | 预期 |
+|--------|-----------|------|------|
+| P2P 使能 | 1 | EP0 写 EP1 地址 | Switch P2P 转发 |
+| P2P 禁用 | 0 | EP0 写 EP1 地址 | 上行到 RC，RC 不路由，丢弃 |
+
+#### 14.2.12 Switch 枚举模式测试 (pcie_tl_switch_enum_test)
+
+**目标:** 验证 Switch 枚举模式配置空间扫描
+
+**配置:** `enum_mode=1`，模拟 BIOS 枚举流程，通过 Config TLP 发现并配置各端口
+
+#### 14.2.13 Switch 压力测试 (pcie_tl_switch_stress_test)
+
+**目标:** Switch 多EP 并发流量压力
+
+**配置:** 4EP 并发，每 EP 发送 500 次随机读写，共 2000 次事务
+
+#### 14.2.14 Switch FC 隔离测试 (pcie_tl_switch_fc_isolation_test)
+
+**目标:** 验证各下行端口 FC 信用独立，端口间不干扰
+
+**配置:** 对一个端口施加 FC 回压，验证其他端口不受影响
+
+#### 14.2.15 Switch 读 Completion 路由测试 (pcie_tl_switch_read_cpl_test)
+
+**目标:** 验证多EP 大读请求的 Completion 正确路由回 RC
+
+**配置:** 4EP 各发起 256B 读请求，验证所有 Completion 均正确返回
+
+#### 14.2.16 P2P 全连接测试 (pcie_tl_switch_p2p_all_test)
+
+**目标:** 4EP×3目标×200次 P2P 全矩阵验证
+
+**配置:** 每个 EP 向其他 3 个 EP 各发送 200 次写，共 2400 次 P2P 事务
+
+#### 14.2.17 Switch 双向交叉流量测试 (pcie_tl_switch_bidir_test)
+
+**目标:** RC→EP 和 EP→RC 双向同时发起流量，验证 Switch Fabric 无死锁
+
+#### 14.2.18 地址边界测试 (pcie_tl_switch_addr_boundary_test)
+
+**目标:** 地址边界正确路由 + 无效地址丢弃
+
+| 子测试 | 操作 | 预期 |
+|--------|------|------|
+| 窗口起始 | 写各 EP 地址空间第一个字节 | 正确路由 |
+| 窗口末尾 | 写各 EP 地址空间最后一个字节 | 正确路由 |
+| 无效地址 | 写未映射地址 | Switch 丢弃，total_dropped++ |
+
+#### 14.2.19 USP 拥塞测试 (pcie_tl_switch_usp_congestion_test)
+
+**目标:** 全部 EP 同时向 RC 上行，验证 USP 拥塞下无数据丢失
+
+**配置:** 4EP 同时发起 DMA 上行，共 1000 次上行事务
+
+#### 14.2.20 8端口扩展测试 (pcie_tl_switch_scale_test)
+
+**目标:** 验证 Switch 8端口配置下的路由正确性
+
+**配置:** `num_ds_ports=8`，8EP 并发读写
+
+#### 14.2.21 Switch Config 空间测试 (pcie_tl_switch_cfg_space_test)
+
+**目标:** 验证 Switch Type 1 配置空间读写
+
+**操作:** 通过 Config Type 1 TLP 读写 Switch 各端口的 Bus Number、Memory Base/Limit 等寄存器
+
+#### 14.2.22 Switch 大流量测试 (pcie_tl_switch_heavy_traffic_test)
+
+**目标:** 20K 全方向大流量，综合验证 Switch 稳定性
+
+**配置:** RC→各EP、各EP→RC、EP间 P2P，共 20000 次混合事务，覆盖率全开
+
 ### 14.3 完整测试结果
 
 | # | 测试名 | UVM_ERROR | UVM_WARNING | 状态 |
@@ -1180,10 +1387,25 @@ endclass
 | 10 | pcie_tl_fc_stress_test | 0 | 0 | **PASS** |
 | 11 | pcie_tl_cpl_split_test | 0 | 52 | **PASS** |
 | 12 | pcie_tl_tag_stress_test | 0 | 0 | **PASS** |
+| 13 | pcie_tl_link_delay_test | 0 | 0 | **PASS** |
+| 14 | pcie_tl_bidir_traffic_test | 0 | 0 | **PASS** |
+| 15 | pcie_tl_switch_basic_test | 0 | 0 | **PASS** |
+| 16 | pcie_tl_switch_p2p_test | 0 | 0 | **PASS** |
+| 17 | pcie_tl_switch_enum_test | 0 | 0 | **PASS** |
+| 18 | pcie_tl_switch_stress_test | 0 | 0 | **PASS** |
+| 19 | pcie_tl_switch_fc_isolation_test | 0 | 0 | **PASS** |
+| 20 | pcie_tl_switch_read_cpl_test | 0 | 0 | **PASS** |
+| 21 | pcie_tl_switch_p2p_all_test | 0 | 0 | **PASS** |
+| 22 | pcie_tl_switch_bidir_test | 0 | 0 | **PASS** |
+| 23 | pcie_tl_switch_addr_boundary_test | 0 | 0 | **PASS** |
+| 24 | pcie_tl_switch_usp_congestion_test | 0 | 0 | **PASS** |
+| 25 | pcie_tl_switch_scale_test | 0 | 0 | **PASS** |
+| 26 | pcie_tl_switch_cfg_space_test | 0 | 0 | **PASS** |
+| 27 | pcie_tl_switch_heavy_traffic_test | 0 | 0 | **PASS** |
 
 > **Warning 说明:**
 > - err_test (181): 预期的错误注入行为产生的 WARNING
-> - stress/mps/4kb/cpl_split (52): RC Driver 收到拆分的后续 CplD 时报 "Unexpected Completion"，因为 RC Driver 在首个 CplD 时已标记完成。Scoreboard 的多 Completion 追踪器正确处理这些情况。
+> - stress/mps/4kb/cpl_split (52): v2.0 已修复多 CplD 追踪，RC Driver 通过 cpl_byte_tracker_t 正确处理拆分 Completion，不再产生误报 WARNING。
 
 ---
 
@@ -1357,9 +1579,8 @@ rcb_e:  RCB_64, RCB_128
 
 ### Q1: 为什么会看到 "Unexpected Completion" WARNING?
 
-**原因:** 当 EP 对一个 Memory Read 返回多个拆分的 CplD 时，RC Driver 在收到第一个 CplD 就释放了标签。后续 CplD 到达时找不到对应的 outstanding 请求，因此报 WARNING。
-
-**影响:** 无。Scoreboard 的 `cpl_tracker_t` 正确追踪所有拆分 Completion。
+**原因:** 已在 v2.0 修复。rc_driver.handle_completion() 现在通过 cpl_byte_tracker_t 追踪已接收字节数，
+只在所有字节接收完毕后才释放标签。多 CplD 不再报 Unexpected Completion。
 
 ### Q2: 如何关闭所有协议检查?
 
@@ -1394,4 +1615,39 @@ env.ep_agent.ep_driver.send_msi(
     .msi_addr(64'hFEE0_0000),
     .msi_data(32'h0000_0001)
 );
+```
+
+### Q6: 如何配置 PCIe Switch?
+
+```systemverilog
+pcie_tl_switch_config sw_cfg = new("sw_cfg");
+sw_cfg.num_ds_ports = 4;
+sw_cfg.p2p_enable = 1;
+sw_cfg.init_defaults();
+
+cfg.switch_enable = 1;
+cfg.switch_cfg = sw_cfg;
+```
+
+### Q7: 如何在 Switch 模式下访问特定 EP?
+
+```systemverilog
+// 写入 EP2 的地址空间
+pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create("wr");
+wr.addr = cfg.switch_cfg.ds_mem_base[2];  // EP2 的起始地址
+wr.start(env.rc_agent.sequencer);
+
+// EP0 DMA 写入 EP1 (P2P)
+env.ep_agents[0].ep_driver.initiate_dma(
+    cfg.switch_cfg.ds_mem_base[1], 64, 0);
+```
+
+### Q8: 如何配置链路延时?
+
+```systemverilog
+cfg.link_delay_enable    = 1;
+cfg.rc2ep_latency_min_ns = 500;
+cfg.rc2ep_latency_max_ns = 1000;
+cfg.ep2rc_latency_min_ns = 500;
+cfg.ep2rc_latency_max_ns = 1000;
 ```
