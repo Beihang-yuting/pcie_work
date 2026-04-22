@@ -32,6 +32,11 @@ class pcie_tl_env extends uvm_env;
     pcie_tl_link_delay_model   rc2ep_delay;
     pcie_tl_link_delay_model   ep2rc_delay;
 
+    //--- Multi-EP (switch mode) ---
+    pcie_tl_switch         sw;
+    pcie_tl_ep_agent       ep_agents[];
+    pcie_tl_if_adapter     ep_adapters[];
+
     //--- Virtual Sequencer ---
     pcie_tl_virtual_sequencer  v_seqr;
 
@@ -76,6 +81,26 @@ class pcie_tl_env extends uvm_env;
         if (cfg.ep_agent_enable) begin
             uvm_config_db#(uvm_active_passive_enum)::set(this, "ep_agent", "is_active", cfg.ep_is_active);
             ep_agent = pcie_tl_ep_agent::type_id::create("ep_agent", this);
+        end
+
+        // 4b. Switch mode: create switch + N EP agents
+        if (cfg.switch_enable && cfg.switch_cfg != null) begin
+            int n = cfg.switch_cfg.num_ds_ports;
+            cfg.switch_cfg.init_defaults();
+
+            sw = pcie_tl_switch::type_id::create("sw", this);
+            sw.sw_cfg = cfg.switch_cfg;
+
+            ep_agents  = new[n];
+            ep_adapters = new[n];
+            for (int i = 0; i < n; i++) begin
+                uvm_config_db#(uvm_active_passive_enum)::set(
+                    this, $sformatf("ep_agent_%0d", i), "is_active", cfg.ep_is_active);
+                ep_agents[i]  = pcie_tl_ep_agent::type_id::create(
+                    $sformatf("ep_agent_%0d", i), this);
+                ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
+                    $sformatf("ep_adapter_%0d", i), this);
+            end
         end
 
         // 5. Create verification components
@@ -153,17 +178,54 @@ class pcie_tl_env extends uvm_env;
         // 6. Coverage shared component references
         cov.fc_mgr  = fc_mgr;
         cov.tag_mgr = tag_mgr;
+
+        // 7. Switch mode wiring
+        if (cfg.switch_enable && sw != null) begin
+            for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
+                ep_agents[i].fc_mgr    = sw.dsp[i].fc_mgr;
+                ep_agents[i].tag_mgr   = tag_mgr;
+                ep_agents[i].ord_eng   = ord_eng;
+                ep_agents[i].cfg_mgr   = cfg_mgr;
+                ep_agents[i].bw_shaper = bw_shaper;
+                ep_agents[i].codec     = codec;
+                ep_agents[i].adapter   = ep_adapters[i];
+                ep_agents[i].inject_shared_components();
+                if (ep_agents[i].ep_driver != null) begin
+                    ep_agents[i].ep_driver.mps_bytes = int'(cfg.max_payload_size);
+                    ep_agents[i].ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
+                end
+                ep_adapters[i].mode   = cfg.if_mode;
+                ep_adapters[i].codec  = codec;
+                ep_adapters[i].fc_mgr = sw.dsp[i].fc_mgr;
+            end
+        end
     endfunction
 
     //=========================================================================
     // Run Phase: TLM loopback bridge
     //=========================================================================
     task run_phase(uvm_phase phase);
-        if (cfg.if_mode == TLM_MODE && rc_agent != null && ep_agent != null) begin
-            fork
-                tlm_loopback_rc_to_ep();
-                tlm_loopback_ep_to_rc();
-            join_none
+        if (cfg.if_mode == TLM_MODE && rc_agent != null) begin
+            if (cfg.switch_enable && sw != null) begin
+                // Switch mode: RC <-> Switch <-> EP[N]
+                fork
+                    rc_to_switch_loopback();
+                    switch_to_rc_loopback();
+                    for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
+                        automatic int idx = i;
+                        fork
+                            switch_to_ep_loopback(idx);
+                            ep_to_switch_loopback(idx);
+                        join_none
+                    end
+                join_none
+            end else if (ep_agent != null) begin
+                // Direct mode: RC <-> EP (existing)
+                fork
+                    tlm_loopback_rc_to_ep();
+                    tlm_loopback_ep_to_rc();
+                join_none
+            end
         end
     endtask
 
@@ -295,6 +357,71 @@ class pcie_tl_env extends uvm_env;
             remaining -= chunk;
             received  += chunk;
             cpl_idx++;
+        end
+    endtask
+
+    //=========================================================================
+    // Switch Mode Loopback Tasks
+    //=========================================================================
+
+    // RC tx -> Switch USP rx
+    protected task rc_to_switch_loopback();
+        pcie_tl_tlp tlp;
+        forever begin
+            rc_adapter.tlm_tx_fifo.get(tlp);
+            if (scb != null && tlp.requires_completion())
+                scb.register_pending(tlp);
+            sw.usp.rx_fifo.put(tlp);
+        end
+    endtask
+
+    // Switch USP tx -> RC rx
+    protected task switch_to_rc_loopback();
+        pcie_tl_tlp tlp;
+        forever begin
+            sw.usp.tx_fifo.get(tlp);
+            rc_adapter.tlm_rx_fifo.put(tlp);
+            replenish_credits(tlp);
+            if (tlp.get_category() == TLP_CAT_COMPLETION) begin
+                if (scb != null)
+                    scb.write_rc(tlp);
+                if (rc_agent.rc_driver != null) begin
+                    pcie_tl_cpl_tlp cpl;
+                    if ($cast(cpl, tlp))
+                        void'(rc_agent.rc_driver.handle_completion(cpl));
+                end
+            end
+        end
+    endtask
+
+    // Switch DSP[i] tx -> EP[i] rx (+ EP auto-response)
+    protected task switch_to_ep_loopback(int idx);
+        pcie_tl_tlp tlp;
+        forever begin
+            sw.dsp[idx].tx_fifo.get(tlp);
+            ep_adapters[idx].tlm_rx_fifo.put(tlp);
+            replenish_credits(tlp);
+            if (cfg.ep_auto_response && ep_agents[idx].ep_driver != null) begin
+                if (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
+                                     TLP_CFG_RD0, TLP_CFG_WR0, TLP_IO_RD, TLP_IO_WR}) begin
+                    fork
+                        begin
+                            automatic pcie_tl_tlp t = tlp;
+                            automatic int i = idx;
+                            ep_agents[i].ep_driver.handle_request(t);
+                        end
+                    join_none
+                end
+            end
+        end
+    endtask
+
+    // EP[i] tx -> Switch DSP[i] rx
+    protected task ep_to_switch_loopback(int idx);
+        pcie_tl_tlp tlp;
+        forever begin
+            ep_adapters[idx].tlm_tx_fifo.get(tlp);
+            sw.dsp[idx].rx_fifo.put(tlp);
         end
     endtask
 
