@@ -97,7 +97,22 @@ class pcie_tl_switch extends uvm_component;
     endtask
 
     protected task route_and_forward(pcie_tl_tlp tlp, int ingress_port_id);
-        int dst = fabric.route(tlp, ingress_port_id);
+        int dst;
+
+        // Skip null or empty TLPs (from monitor polling or uninitialized objects)
+        if (tlp == null || (tlp.length == 0 && tlp.payload.size() == 0 &&
+            tlp.kind == TLP_MEM_RD && tlp.requester_id == 0))
+            return;
+
+        dst = fabric.route(tlp, ingress_port_id);
+
+        // If routed back to ingress, redirect: DSP self-route → USP, USP self-route → drop
+        if (dst == ingress_port_id) begin
+            if (ingress_port_id > 0)
+                dst = SWITCH_ROUTE_USP;  // DSP→self: send upstream
+            else
+                dst = SWITCH_ROUTE_DROP; // USP→self: nowhere to go
+        end
 
         case (dst)
             SWITCH_ROUTE_LOCAL: begin
@@ -119,17 +134,13 @@ class pcie_tl_switch extends uvm_component;
                 end
             end
             default: begin
-                // If routed back to ingress (e.g. completion with random requester_id
-                // matching own DSP bus), redirect to USP (requester must be upstream)
-                if (dst == ingress_port_id && ingress_port_id > 0)
-                    dst = SWITCH_ROUTE_USP;
-                if (dst >= 0 && dst < all_ports.size() && dst != ingress_port_id) begin
+                if (dst >= 0 && dst < all_ports.size()) begin
                     all_ports[dst].tx_fifo.put(tlp);
                     all_ports[dst].forwarded_count++;
                     total_routed++;
                     if (ingress_port_id > 0 && dst > 0)
                         total_p2p++;
-                end else if (dst < 0 || dst >= all_ports.size()) begin
+                end else begin
                     total_dropped++;
                     `uvm_warning("SWITCH", $sformatf("Bad route dst=%0d from port %0d",
                         dst, ingress_port_id))
