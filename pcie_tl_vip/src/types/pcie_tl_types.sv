@@ -208,3 +208,30 @@ typedef enum bit [15:0] {
     EXT_CAP_ID_LTR     = 16'h0018,
     EXT_CAP_ID_VENDOR  = 16'h000B
 } ext_cap_id_e;
+
+// Switch port role
+typedef enum int {
+    SWITCH_USP,
+    SWITCH_DSP
+} switch_port_role_e;
+
+// Switch routing result
+typedef enum int {
+    SWITCH_ROUTE_USP    = 0,
+    SWITCH_ROUTE_LOCAL  = -1,
+    SWITCH_ROUTE_DROP   = -2,
+    SWITCH_ROUTE_BCAST  = -3
+} switch_route_special_e;
+
+// Switch route table entry (per port)
+typedef struct {
+    bit [7:0]  primary_bus;
+    bit [7:0]  secondary_bus;
+    bit [7:0]  subordinate_bus;
+    bit [31:0] mem_base;
+    bit [31:0] mem_limit;
+    bit [63:0] pref_base;
+    bit [63:0] pref_limit;
+    bit [15:0] io_base;
+    bit [15:0] io_limit;
+} switch_route_entry_t;
