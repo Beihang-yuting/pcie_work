@@ -1102,3 +1102,332 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
     endfunction
 
 endclass
+
+// ============================================================================
+// Test 10: Switch Basic Routing
+// ============================================================================
+class pcie_tl_switch_basic_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_basic_test)
+    function new(string name = "pcie_tl_switch_basic_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 100000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+        `uvm_info("SW_BASIC", "=== Test 10: Switch Basic Routing (4 EPs) ===", UVM_LOW)
+        // Phase 1: RC writes to each EP
+        for (int ep = 0; ep < 4; ep++) begin
+            for (int i = 0; i < 10; i++) begin
+                pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("wr_ep%0d_%0d", ep, i));
+                wr.addr     = cfg.switch_cfg.ds_mem_base[ep] + (i * 64);
+                wr.length   = 16;
+                wr.first_be = 4'hF;
+                wr.last_be  = 4'hF;
+                wr.is_64bit = 0;
+                wr.start(env.rc_agent.sequencer);
+                #10ns;
+            end
+        end
+        #2000ns;
+        // Phase 2: RC reads from each EP
+        for (int ep = 0; ep < 4; ep++) begin
+            for (int i = 0; i < 5; i++) begin
+                pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("rd_ep%0d_%0d", ep, i));
+                rd.addr     = cfg.switch_cfg.ds_mem_base[ep] + (i * 64);
+                rd.length   = 8;
+                rd.first_be = 4'hF;
+                rd.last_be  = 4'hF;
+                rd.is_64bit = 0;
+                rd.start(env.rc_agent.sequencer);
+                #20ns;
+            end
+        end
+        #5000ns;
+        `uvm_info("SW_BASIC", $sformatf("Switch routed=%0d, dropped=%0d, P2P=%0d",
+            env.sw.total_routed, env.sw.total_dropped, env.sw.total_p2p), UVM_LOW)
+        `uvm_info("SW_BASIC", $sformatf("Per-DSP fwd: [%0d, %0d, %0d, %0d]",
+            env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count,
+            env.sw.dsp[2].forwarded_count, env.sw.dsp[3].forwarded_count), UVM_LOW)
+        if (env.sw.total_dropped == 0 && env.scb.unexpected == 0)
+            `uvm_info("SW_BASIC", "*** SWITCH BASIC ROUTING PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_BASIC", "SWITCH BASIC ROUTING FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
+
+// ============================================================================
+// Test 11: P2P Direct Transfer
+// ============================================================================
+class pcie_tl_switch_p2p_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_p2p_test)
+    function new(string name = "pcie_tl_switch_p2p_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 100000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        int p2p_before;
+        phase.raise_objection(this);
+        `uvm_info("SW_P2P", "=== Test 11: P2P Direct Transfer ===", UVM_LOW)
+        // Phase 1: EP0 DMA writes to EP1 address space
+        p2p_before = env.sw.total_p2p;
+        for (int i = 0; i < 20; i++) begin
+            env.ep_agents[0].ep_driver.initiate_dma(
+                cfg.switch_cfg.ds_mem_base[1] + (i * 64), 64, 0);
+            #10ns;
+        end
+        #3000ns;
+        `uvm_info("SW_P2P", $sformatf("P2P count: %0d (new: %0d)",
+            env.sw.total_p2p, env.sw.total_p2p - p2p_before), UVM_LOW)
+        if (env.sw.total_p2p - p2p_before == 20)
+            `uvm_info("SW_P2P", "Phase 1 PASS: 20 P2P writes", UVM_LOW)
+        else
+            `uvm_error("SW_P2P", $sformatf("Phase 1 FAIL: expected 20, got %0d",
+                env.sw.total_p2p - p2p_before))
+        // Phase 2: P2P disabled
+        env.sw.fabric.p2p_enable = 0;
+        p2p_before = env.sw.total_p2p;
+        for (int i = 0; i < 10; i++) begin
+            env.ep_agents[0].ep_driver.initiate_dma(
+                cfg.switch_cfg.ds_mem_base[1] + (i * 64), 64, 0);
+            #10ns;
+        end
+        #3000ns;
+        if (env.sw.total_p2p == p2p_before)
+            `uvm_info("SW_P2P", "Phase 2 PASS: no P2P when disabled", UVM_LOW)
+        else
+            `uvm_error("SW_P2P", "Phase 2 FAIL: P2P occurred when disabled")
+        env.sw.fabric.p2p_enable = 1;
+        phase.drop_objection(this);
+    endtask
+endclass
+
+// ============================================================================
+// Test 12: Switch Enumeration
+// ============================================================================
+class pcie_tl_switch_enum_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_enum_test)
+    function new(string name = "pcie_tl_switch_enum_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 2;
+        sw_cfg.enum_mode    = 1;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 100000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+        `uvm_info("SW_ENUM", "=== Test 12: Switch Enumeration ===", UVM_LOW)
+        // Manually configure (simulating RC config writes)
+        env.sw.usp.route_entry.primary_bus     = 8'h00;
+        env.sw.usp.route_entry.secondary_bus   = 8'h01;
+        env.sw.usp.route_entry.subordinate_bus = 8'h03;
+        env.sw.dsp[0].route_entry.primary_bus     = 8'h01;
+        env.sw.dsp[0].route_entry.secondary_bus   = 8'h02;
+        env.sw.dsp[0].route_entry.subordinate_bus = 8'h02;
+        env.sw.dsp[0].route_entry.mem_base        = 32'h8000_0000;
+        env.sw.dsp[0].route_entry.mem_limit       = 32'h8FFF_FFFF;
+        env.sw.dsp[1].route_entry.primary_bus     = 8'h01;
+        env.sw.dsp[1].route_entry.secondary_bus   = 8'h03;
+        env.sw.dsp[1].route_entry.subordinate_bus = 8'h03;
+        env.sw.dsp[1].route_entry.mem_base        = 32'h9000_0000;
+        env.sw.dsp[1].route_entry.mem_limit       = 32'h9FFF_FFFF;
+        #100ns;
+        // Send traffic
+        for (int i = 0; i < 10; i++) begin
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("wr0_%0d", i));
+            wr.addr = 32'h8000_0000 + (i * 64); wr.length = 16;
+            wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+            wr.start(env.rc_agent.sequencer);
+            #10ns;
+        end
+        for (int i = 0; i < 10; i++) begin
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("wr1_%0d", i));
+            wr.addr = 32'h9000_0000 + (i * 64); wr.length = 16;
+            wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+            wr.start(env.rc_agent.sequencer);
+            #10ns;
+        end
+        #3000ns;
+        `uvm_info("SW_ENUM", $sformatf("DSP0 fwd=%0d, DSP1 fwd=%0d",
+            env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count), UVM_LOW)
+        if (env.sw.dsp[0].forwarded_count == 10 && env.sw.dsp[1].forwarded_count == 10)
+            `uvm_info("SW_ENUM", "*** SWITCH ENUMERATION PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_ENUM", "SWITCH ENUMERATION FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
+
+// ============================================================================
+// Test 13: Multi-EP Concurrent Stress
+// ============================================================================
+class pcie_tl_switch_stress_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_stress_test)
+    function new(string name = "pcie_tl_switch_stress_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        configure_tags(.extended(1), .phantom(0), .max_out(256));
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 200000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+        `uvm_info("SW_STRESS", "=== Test 13: Multi-EP Concurrent Stress ===", UVM_LOW)
+        // Phase 1: RC writes 500 per EP concurrently
+        fork
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < 500; i++) begin
+                        pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                            $sformatf("s_wr_e%0d_%0d", e, i));
+                        wr.addr     = cfg.switch_cfg.ds_mem_base[e] + (i * 64);
+                        wr.length   = 16;
+                        wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+                        wr.start(env.rc_agent.sequencer);
+                        #1ns;
+                    end
+                end join_none
+            end
+        join
+        #10000ns;
+        // Phase 2: All EPs DMA to RC
+        fork
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < 100; i++) begin
+                        env.ep_agents[e].ep_driver.initiate_dma(
+                            64'h0000_0000_1000_0000 + (e * 64'h1000) + (i * 64), 64, 0);
+                        #5ns;
+                    end
+                end join_none
+            end
+        join
+        #10000ns;
+        // Phase 3: P2P cross
+        fork
+            begin
+                for (int i = 0; i < 50; i++) begin
+                    env.ep_agents[0].ep_driver.initiate_dma(
+                        cfg.switch_cfg.ds_mem_base[1] + (i * 64), 64, 0);
+                    #5ns;
+                end
+            end
+            begin
+                for (int i = 0; i < 50; i++) begin
+                    env.ep_agents[2].ep_driver.initiate_dma(
+                        cfg.switch_cfg.ds_mem_base[3] + (i * 64), 64, 0);
+                    #5ns;
+                end
+            end
+        join
+        #10000ns;
+        `uvm_info("SW_STRESS", $sformatf("Switch: routed=%0d, P2P=%0d, dropped=%0d",
+            env.sw.total_routed, env.sw.total_p2p, env.sw.total_dropped), UVM_LOW)
+        if (env.sw.total_dropped == 0)
+            `uvm_info("SW_STRESS", "*** SWITCH STRESS PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_STRESS", "SWITCH STRESS FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
+
+// ============================================================================
+// Test 14: Per-Port FC Isolation
+// ============================================================================
+class pcie_tl_switch_fc_isolation_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_fc_isolation_test)
+    function new(string name = "pcie_tl_switch_fc_isolation_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports    = 4;
+        sw_cfg.p2p_enable      = 1;
+        sw_cfg.port_ph_credit  = 4;
+        sw_cfg.port_pd_credit  = 32;
+        sw_cfg.port_nph_credit = 4;
+        sw_cfg.port_npd_credit = 32;
+        sw_cfg.port_cplh_credit = 8;
+        sw_cfg.port_cpld_credit = 64;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);  // RC-side infinite
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 100000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        int dsp1_before;
+        phase.raise_objection(this);
+        `uvm_info("SW_FC", "=== Test 14: Per-Port FC Isolation ===", UVM_LOW)
+        // Exhaust DSP0 credits
+        env.sw.dsp[0].fc_mgr.force_credit_underflow();
+        // Send to DSP1
+        dsp1_before = env.sw.dsp[1].forwarded_count;
+        for (int i = 0; i < 20; i++) begin
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("fc_wr_%0d", i));
+            wr.addr     = cfg.switch_cfg.ds_mem_base[1] + (i * 64);
+            wr.length   = 16;
+            wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+            wr.start(env.rc_agent.sequencer);
+            #10ns;
+        end
+        #5000ns;
+        `uvm_info("SW_FC", $sformatf("DSP0 PH=%0d, DSP1 new fwd=%0d",
+            env.sw.dsp[0].fc_mgr.posted_header.current,
+            env.sw.dsp[1].forwarded_count - dsp1_before), UVM_LOW)
+        if (env.sw.dsp[1].forwarded_count - dsp1_before == 20)
+            `uvm_info("SW_FC", "*** FC ISOLATION PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_FC", "FC ISOLATION FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
