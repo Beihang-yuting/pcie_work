@@ -1431,3 +1431,612 @@ class pcie_tl_switch_fc_isolation_test extends pcie_tl_base_test;
         phase.drop_objection(this);
     endtask
 endclass
+
+//=============================================================================
+// Test 15: RC Multi-EP Read — Completion routing through switch
+//=============================================================================
+class pcie_tl_switch_read_cpl_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_read_cpl_test)
+    function new(string name = "pcie_tl_switch_read_cpl_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable        = 1;
+        cfg.switch_cfg           = sw_cfg;
+        cfg.max_payload_size     = MPS_128;  // Force multi-CplD splits
+        cfg.read_completion_boundary = RCB_64;
+        configure_fc(1, 1);
+        configure_tags(.extended(1), .phantom(0), .max_out(256));
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 100000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+        `uvm_info("SW_RD_CPL", "=== Test 15: RC Multi-EP Read with Completion Routing ===", UVM_LOW)
+
+        // Phase 1: Write known data to all EPs first
+        `uvm_info("SW_RD_CPL", "--- Phase 1: Write data to all EPs ---", UVM_LOW)
+        for (int ep = 0; ep < 4; ep++) begin
+            for (int i = 0; i < 20; i++) begin
+                pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("wr_e%0d_%0d", ep, i));
+                wr.addr     = cfg.switch_cfg.ds_mem_base[ep] + (i * 128);
+                wr.length   = 32;  // 128B
+                wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+                wr.start(env.rc_agent.sequencer);
+                #5ns;
+            end
+        end
+        #3000ns;
+
+        // Phase 2: Read back — large reads trigger multi-CplD (MPS=128, reads of 256-512B)
+        `uvm_info("SW_RD_CPL", "--- Phase 2: Large reads from each EP (multi-CplD) ---", UVM_LOW)
+        for (int ep = 0; ep < 4; ep++) begin
+            for (int i = 0; i < 10; i++) begin
+                pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("rd_e%0d_%0d", ep, i));
+                rd.addr     = cfg.switch_cfg.ds_mem_base[ep] + (i * 256);
+                rd.length   = 64 + (i % 3) * 32;  // 256B, 384B, 512B alternating
+                rd.first_be = 4'hF; rd.last_be = 4'hF; rd.is_64bit = 0;
+                rd.start(env.rc_agent.sequencer);
+                #20ns;
+            end
+        end
+        #10000ns;
+
+        // Phase 3: Concurrent reads to all EPs simultaneously
+        `uvm_info("SW_RD_CPL", "--- Phase 3: Concurrent reads to all EPs ---", UVM_LOW)
+        fork
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < 10; i++) begin
+                        pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("crd_e%0d_%0d", e, i));
+                        rd.addr     = cfg.switch_cfg.ds_mem_base[e] + (i * 128);
+                        rd.length   = 32;  // 128B = MPS, single CplD
+                        rd.first_be = 4'hF; rd.last_be = 4'hF; rd.is_64bit = 0;
+                        rd.start(env.rc_agent.sequencer);
+                        #10ns;
+                    end
+                end join_none
+            end
+        join
+        #10000ns;
+
+        `uvm_info("SW_RD_CPL", $sformatf("Switch: routed=%0d, dropped=%0d",
+            env.sw.total_routed, env.sw.total_dropped), UVM_LOW)
+        `uvm_info("SW_RD_CPL", $sformatf("SCB: req=%0d, cpl=%0d, matched=%0d, unexpected=%0d",
+            env.scb.total_requests, env.scb.total_completions,
+            env.scb.matched, env.scb.unexpected), UVM_LOW)
+
+        if (env.sw.total_dropped == 0 && env.scb.unexpected == 0 && env.scb.mismatched == 0)
+            `uvm_info("SW_RD_CPL", "*** SWITCH READ COMPLETION ROUTING PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_RD_CPL", "SWITCH READ COMPLETION ROUTING FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
+
+//=============================================================================
+// Test 16: P2P All-to-All — Every EP writes to every other EP
+//=============================================================================
+class pcie_tl_switch_p2p_all_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_p2p_all_test)
+    function new(string name = "pcie_tl_switch_p2p_all_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 100000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        int p2p_expected;
+        phase.raise_objection(this);
+        `uvm_info("SW_P2P_ALL", "=== Test 16: P2P All-to-All ===", UVM_LOW)
+
+        // Every EP sends 10 DMA writes to every OTHER EP
+        // 4 EPs x 3 targets x 10 = 120 P2P transfers
+        p2p_expected = 0;
+        fork
+            for (int src = 0; src < 4; src++) begin
+                automatic int s = src;
+                fork begin
+                    for (int dst = 0; dst < 4; dst++) begin
+                        if (dst == s) continue;
+                        for (int i = 0; i < 10; i++) begin
+                            env.ep_agents[s].ep_driver.initiate_dma(
+                                cfg.switch_cfg.ds_mem_base[dst] + (s * 64'h100) + (i * 64),
+                                64, 0);
+                            #5ns;
+                        end
+                    end
+                end join_none
+            end
+        join
+        p2p_expected = 4 * 3 * 10;  // 120
+        #10000ns;
+
+        `uvm_info("SW_P2P_ALL", $sformatf("P2P: expected=%0d, actual=%0d, dropped=%0d",
+            p2p_expected, env.sw.total_p2p, env.sw.total_dropped), UVM_LOW)
+        `uvm_info("SW_P2P_ALL", $sformatf("Per-DSP fwd: [%0d, %0d, %0d, %0d]",
+            env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count,
+            env.sw.dsp[2].forwarded_count, env.sw.dsp[3].forwarded_count), UVM_LOW)
+
+        if (env.sw.total_p2p == p2p_expected && env.sw.total_dropped == 0)
+            `uvm_info("SW_P2P_ALL", "*** P2P ALL-TO-ALL PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_P2P_ALL", "P2P ALL-TO-ALL FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
+
+//=============================================================================
+// Test 17: Bidirectional Crossover — RC reads + EP DMA writes simultaneously
+//=============================================================================
+class pcie_tl_switch_bidir_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_bidir_test)
+    function new(string name = "pcie_tl_switch_bidir_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        configure_tags(.extended(1), .phantom(0), .max_out(256));
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 200000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        int rc_wr, rc_rd, ep_dma;
+        phase.raise_objection(this);
+        `uvm_info("SW_BIDIR", "=== Test 17: Bidirectional Crossover through Switch ===", UVM_LOW)
+
+        rc_wr = 0; rc_rd = 0; ep_dma = 0;
+        fork
+            // RC writes to EP0 + EP1
+            begin
+                for (int i = 0; i < 200; i++) begin
+                    pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("bd_wr_%0d", i));
+                    wr.addr     = cfg.switch_cfg.ds_mem_base[i % 2] + (i * 64);
+                    wr.length   = 16; wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+                    wr.start(env.rc_agent.sequencer);
+                    rc_wr++;
+                    #2ns;
+                end
+            end
+            // RC reads from EP2 + EP3 (generates completions back through switch)
+            begin
+                for (int i = 0; i < 100; i++) begin
+                    pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("bd_rd_%0d", i));
+                    rd.addr     = cfg.switch_cfg.ds_mem_base[2 + (i % 2)] + (i * 64);
+                    rd.length   = 8; rd.first_be = 4'hF; rd.last_be = 4'hF; rd.is_64bit = 0;
+                    rd.start(env.rc_agent.sequencer);
+                    rc_rd++;
+                    #5ns;
+                end
+            end
+            // EP0 DMA writes to RC (upstream through USP)
+            begin
+                for (int i = 0; i < 100; i++) begin
+                    env.ep_agents[0].ep_driver.initiate_dma(
+                        64'h0000_0000_1000_0000 + (i * 64), 64, 0);
+                    ep_dma++;
+                    #3ns;
+                end
+            end
+            // EP2 DMA writes to RC
+            begin
+                for (int i = 0; i < 100; i++) begin
+                    env.ep_agents[2].ep_driver.initiate_dma(
+                        64'h0000_0000_2000_0000 + (i * 64), 64, 0);
+                    ep_dma++;
+                    #3ns;
+                end
+            end
+            // EP1 P2P writes to EP3 (cross-traffic)
+            begin
+                for (int i = 0; i < 50; i++) begin
+                    env.ep_agents[1].ep_driver.initiate_dma(
+                        cfg.switch_cfg.ds_mem_base[3] + (i * 64), 64, 0);
+                    #5ns;
+                end
+            end
+        join
+        #15000ns;
+
+        `uvm_info("SW_BIDIR", $sformatf("RC: %0d wr + %0d rd, EP DMA: %0d, P2P: %0d",
+            rc_wr, rc_rd, ep_dma, env.sw.total_p2p), UVM_LOW)
+        `uvm_info("SW_BIDIR", $sformatf("Switch: routed=%0d, dropped=%0d",
+            env.sw.total_routed, env.sw.total_dropped), UVM_LOW)
+
+        if (env.sw.total_dropped == 0 && env.scb.unexpected == 0)
+            `uvm_info("SW_BIDIR", "*** SWITCH BIDIRECTIONAL CROSSOVER PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_BIDIR", "SWITCH BIDIRECTIONAL CROSSOVER FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
+
+//=============================================================================
+// Test 18: Address Boundary + Invalid Address Routing
+//=============================================================================
+class pcie_tl_switch_addr_boundary_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_addr_boundary_test)
+    function new(string name = "pcie_tl_switch_addr_boundary_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 50000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        int dropped_before;
+        phase.raise_objection(this);
+        `uvm_info("SW_ADDR", "=== Test 18: Address Boundary + Invalid Address ===", UVM_LOW)
+
+        // Phase 1: Write to exact boundary of EP0 window (last valid address)
+        `uvm_info("SW_ADDR", "--- Phase 1: Exact boundary addresses ---", UVM_LOW)
+        begin
+            // EP0: [0x8000_0000, 0x8FFF_FFFF]
+            // Write to first byte
+            pcie_tl_mem_wr_seq wr0 = pcie_tl_mem_wr_seq::type_id::create("wr_first");
+            wr0.addr = cfg.switch_cfg.ds_mem_base[0]; // 0x8000_0000
+            wr0.length = 1; wr0.first_be = 4'hF; wr0.last_be = 4'h0; wr0.is_64bit = 0;
+            wr0.start(env.rc_agent.sequencer);
+            #10ns;
+
+            // Write to last valid address
+            begin
+                pcie_tl_mem_wr_seq wr1 = pcie_tl_mem_wr_seq::type_id::create("wr_last");
+                wr1.addr = cfg.switch_cfg.ds_mem_limit[0]; // 0x8FFF_FFFF
+                wr1.length = 1; wr1.first_be = 4'hF; wr1.last_be = 4'h0; wr1.is_64bit = 0;
+                wr1.start(env.rc_agent.sequencer);
+            end
+            #10ns;
+
+            // Write to boundary between EP0 and EP1
+            begin
+                pcie_tl_mem_wr_seq wr2 = pcie_tl_mem_wr_seq::type_id::create("wr_boundary_ep1");
+                wr2.addr = cfg.switch_cfg.ds_mem_base[1]; // 0x9000_0000 = EP1 start
+                wr2.length = 1; wr2.first_be = 4'hF; wr2.last_be = 4'h0; wr2.is_64bit = 0;
+                wr2.start(env.rc_agent.sequencer);
+            end
+            #10ns;
+        end
+        #2000ns;
+
+        `uvm_info("SW_ADDR", $sformatf("After boundaries: DSP0 fwd=%0d, DSP1 fwd=%0d",
+            env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count), UVM_LOW)
+
+        // Phase 2: Invalid address (not in any window) — should be dropped
+        `uvm_info("SW_ADDR", "--- Phase 2: Invalid address (outside all windows) ---", UVM_LOW)
+        dropped_before = env.sw.total_dropped;
+        begin
+            // Address 0x0000_1000 — below any EP window
+            pcie_tl_mem_wr_seq wr_bad = pcie_tl_mem_wr_seq::type_id::create("wr_invalid");
+            wr_bad.addr = 32'h0000_1000;
+            wr_bad.length = 1; wr_bad.first_be = 4'hF; wr_bad.last_be = 4'h0; wr_bad.is_64bit = 0;
+            wr_bad.start(env.rc_agent.sequencer);
+        end
+        #2000ns;
+
+        `uvm_info("SW_ADDR", $sformatf("Dropped: before=%0d, after=%0d (new=%0d)",
+            dropped_before, env.sw.total_dropped,
+            env.sw.total_dropped - dropped_before), UVM_LOW)
+
+        // Phase 3: Address in gap between EP3 limit and next possible range
+        `uvm_info("SW_ADDR", "--- Phase 3: Address in gap after last EP ---", UVM_LOW)
+        begin
+            pcie_tl_mem_wr_seq wr_gap = pcie_tl_mem_wr_seq::type_id::create("wr_gap");
+            wr_gap.addr = cfg.switch_cfg.ds_mem_limit[3] + 32'h100; // Just past EP3
+            wr_gap.length = 1; wr_gap.first_be = 4'hF; wr_gap.last_be = 4'h0; wr_gap.is_64bit = 0;
+            wr_gap.start(env.rc_agent.sequencer);
+        end
+        #2000ns;
+
+        begin
+            int total_new_drops = env.sw.total_dropped - dropped_before;
+            `uvm_info("SW_ADDR", $sformatf("Total new drops: %0d (expected 2)", total_new_drops), UVM_LOW)
+            if (env.sw.dsp[0].forwarded_count >= 2 && env.sw.dsp[1].forwarded_count >= 1 &&
+                total_new_drops >= 2)
+                `uvm_info("SW_ADDR", "*** ADDRESS BOUNDARY TEST PASSED ***", UVM_LOW)
+            else
+                `uvm_error("SW_ADDR", "ADDRESS BOUNDARY TEST FAILED")
+        end
+        phase.drop_objection(this);
+    endtask
+endclass
+
+//=============================================================================
+// Test 19: USP Congestion — All EPs DMA upstream simultaneously
+//=============================================================================
+class pcie_tl_switch_usp_congestion_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_usp_congestion_test)
+    function new(string name = "pcie_tl_switch_usp_congestion_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        configure_tags(.extended(1), .phantom(0), .max_out(256));
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 200000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        int per_ep_count = 200;
+        int total_expected;
+        phase.raise_objection(this);
+        `uvm_info("SW_USP_CONG", "=== Test 19: USP Congestion — All EPs Upstream ===", UVM_LOW)
+
+        // All 4 EPs blast DMA writes upstream to RC simultaneously
+        // Tests USP.tx_fifo contention + switch fabric fairness
+        total_expected = 4 * per_ep_count;
+        fork
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < per_ep_count; i++) begin
+                        env.ep_agents[e].ep_driver.initiate_dma(
+                            64'h0000_0000_0100_0000 + (e * 64'h0010_0000) + (i * 64),
+                            64, 0);
+                        #2ns;
+                    end
+                end join_none
+            end
+        join
+        #20000ns;
+
+        `uvm_info("SW_USP_CONG", $sformatf("Total upstream routed: %0d (expected %0d)",
+            env.sw.total_routed, total_expected), UVM_LOW)
+        `uvm_info("SW_USP_CONG", $sformatf("Per-DSP: [%0d, %0d, %0d, %0d] (rx into switch)",
+            env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count,
+            env.sw.dsp[2].forwarded_count, env.sw.dsp[3].forwarded_count), UVM_LOW)
+
+        // Also blast RC reads + writes downstream while EPs are uploading
+        `uvm_info("SW_USP_CONG", "--- Adding downstream pressure ---", UVM_LOW)
+        fork
+            // RC writes downstream
+            begin
+                for (int i = 0; i < 200; i++) begin
+                    pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("cong_wr_%0d", i));
+                    wr.addr     = cfg.switch_cfg.ds_mem_base[i % 4] + (i * 64);
+                    wr.length   = 16; wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+                    wr.start(env.rc_agent.sequencer);
+                    #2ns;
+                end
+            end
+            // All EPs continue upstream
+            for (int ep = 0; ep < 4; ep++) begin
+                automatic int e = ep;
+                fork begin
+                    for (int i = 0; i < 100; i++) begin
+                        env.ep_agents[e].ep_driver.initiate_dma(
+                            64'h0000_0000_0200_0000 + (e * 64'h0010_0000) + (i * 64),
+                            64, 0);
+                        #3ns;
+                    end
+                end join_none
+            end
+        join
+        #20000ns;
+
+        `uvm_info("SW_USP_CONG", $sformatf("Final: routed=%0d, dropped=%0d, P2P=%0d",
+            env.sw.total_routed, env.sw.total_dropped, env.sw.total_p2p), UVM_LOW)
+
+        if (env.sw.total_dropped == 0)
+            `uvm_info("SW_USP_CONG", "*** USP CONGESTION PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_USP_CONG", "USP CONGESTION FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
+
+//=============================================================================
+// Test 20: Scalability — 8-port and 16-port switch configurations
+//=============================================================================
+class pcie_tl_switch_scale_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_scale_test)
+    function new(string name = "pcie_tl_switch_scale_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        // Start with 8-port config
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 8;
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 100000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        int n;
+        phase.raise_objection(this);
+        n = cfg.switch_cfg.num_ds_ports;
+        `uvm_info("SW_SCALE", $sformatf("=== Test 20: Scalability — %0d-port Switch ===", n), UVM_LOW)
+
+        // Write 10 TLPs to each of the 8 EPs
+        for (int ep = 0; ep < n; ep++) begin
+            for (int i = 0; i < 10; i++) begin
+                pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("sc_wr_e%0d_%0d", ep, i));
+                wr.addr     = cfg.switch_cfg.ds_mem_base[ep] + (i * 64);
+                wr.length   = 16; wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
+                wr.start(env.rc_agent.sequencer);
+                #5ns;
+            end
+        end
+        #5000ns;
+
+        // P2P: EP0 writes to all other EPs
+        for (int dst = 1; dst < n; dst++) begin
+            for (int i = 0; i < 5; i++) begin
+                env.ep_agents[0].ep_driver.initiate_dma(
+                    cfg.switch_cfg.ds_mem_base[dst] + (i * 64), 64, 0);
+                #5ns;
+            end
+        end
+        #5000ns;
+
+        `uvm_info("SW_SCALE", $sformatf("Switch %0d-port: routed=%0d, P2P=%0d, dropped=%0d",
+            n, env.sw.total_routed, env.sw.total_p2p, env.sw.total_dropped), UVM_LOW)
+
+        // Verify all DSPs got traffic
+        begin
+            bit all_fwd = 1;
+            for (int i = 0; i < n; i++) begin
+                `uvm_info("SW_SCALE", $sformatf("  DSP%0d fwd=%0d", i, env.sw.dsp[i].forwarded_count), UVM_LOW)
+                if (env.sw.dsp[i].forwarded_count == 0) all_fwd = 0;
+            end
+            if (all_fwd && env.sw.total_dropped == 0)
+                `uvm_info("SW_SCALE", $sformatf("*** %0d-PORT SCALABILITY PASSED ***", n), UVM_LOW)
+            else
+                `uvm_error("SW_SCALE", $sformatf("%0d-PORT SCALABILITY FAILED", n))
+        end
+        phase.drop_objection(this);
+    endtask
+endclass
+
+//=============================================================================
+// Test 21: Switch Config Space Read/Write Verification
+//=============================================================================
+class pcie_tl_switch_cfg_space_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_switch_cfg_space_test)
+    function new(string name = "pcie_tl_switch_cfg_space_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    virtual function void configure_test();
+        pcie_tl_switch_config sw_cfg;
+        super.configure_test();
+        sw_cfg = new("sw_cfg");
+        sw_cfg.num_ds_ports = 4;
+        sw_cfg.enum_mode    = 1;  // Enumeration mode for config access
+        sw_cfg.p2p_enable   = 1;
+        sw_cfg.init_defaults();
+        cfg.switch_enable    = 1;
+        cfg.switch_cfg       = sw_cfg;
+        configure_fc(1, 1);
+        cfg.ep_auto_response = 1;
+        cfg.cpl_timeout_ns   = 100000;
+    endfunction
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+        `uvm_info("SW_CFG", "=== Test 21: Switch Config Space Access ===", UVM_LOW)
+
+        // Phase 1: Write bus numbers to each DSP via direct port config
+        `uvm_info("SW_CFG", "--- Phase 1: Configure bus numbers ---", UVM_LOW)
+        env.sw.usp.route_entry.primary_bus     = 8'h00;
+        env.sw.usp.route_entry.secondary_bus   = 8'h01;
+        env.sw.usp.route_entry.subordinate_bus = 8'h05;
+
+        for (int i = 0; i < 4; i++) begin
+            env.sw.dsp[i].route_entry.primary_bus     = 8'h01;
+            env.sw.dsp[i].route_entry.secondary_bus   = 8'h02 + i;
+            env.sw.dsp[i].route_entry.subordinate_bus = 8'h02 + i;
+        end
+
+        // Phase 2: Write memory windows with different sizes
+        `uvm_info("SW_CFG", "--- Phase 2: Configure asymmetric memory windows ---", UVM_LOW)
+        // EP0: 16MB [0xA000_0000, 0xA0FF_FFFF]
+        env.sw.dsp[0].route_entry.mem_base  = 32'hA000_0000;
+        env.sw.dsp[0].route_entry.mem_limit = 32'hA0FF_FFFF;
+        // EP1: 64MB [0xA400_0000, 0xA7FF_FFFF]
+        env.sw.dsp[1].route_entry.mem_base  = 32'hA400_0000;
+        env.sw.dsp[1].route_entry.mem_limit = 32'hA7FF_FFFF;
+        // EP2: 256MB [0xB000_0000, 0xBFFF_FFFF]
+        env.sw.dsp[2].route_entry.mem_base  = 32'hB000_0000;
+        env.sw.dsp[2].route_entry.mem_limit = 32'hBFFF_FFFF;
+        // EP3: 1MB [0xC000_0000, 0xC00F_FFFF]
+        env.sw.dsp[3].route_entry.mem_base  = 32'hC000_0000;
+        env.sw.dsp[3].route_entry.mem_limit = 32'hC00F_FFFF;
+        #100ns;
+
+        // Phase 3: Verify cfg_read returns correct values
+        `uvm_info("SW_CFG", "--- Phase 3: Verify cfg_read ---", UVM_LOW)
+        begin
+            bit [31:0] bus_data;
+            bit pass = 1;
+            for (int i = 0; i < 4; i++) begin
+                bus_data = env.sw.dsp[i].cfg_read(12'h018);
+                `uvm_info("SW_CFG", $sformatf("DSP%0d bus reg: 0x%08h (sub=%0d sec=%0d pri=%0d)",
+                    i, bus_data, bus_data[31:24], bus_data[23:16], bus_data[15:8]), UVM_LOW)
+                if (bus_data[23:16] != (8'h02 + i)) pass = 0;
+            end
+            if (!pass)
+                `uvm_error("SW_CFG", "Config read mismatch on bus numbers")
+        end
+
+        // Phase 4: Route traffic through asymmetric windows
+        `uvm_info("SW_CFG", "--- Phase 4: Traffic through asymmetric windows ---", UVM_LOW)
+        begin
+            pcie_tl_mem_wr_seq wr;
+            // EP0 window
+            wr = pcie_tl_mem_wr_seq::type_id::create("wr_a0");
+            wr.addr = 32'hA000_0000; wr.length = 1; wr.first_be = 4'hF; wr.last_be = 4'h0; wr.is_64bit = 0;
+            wr.start(env.rc_agent.sequencer); #10ns;
+            // EP1 window
+            wr = pcie_tl_mem_wr_seq::type_id::create("wr_a4");
+            wr.addr = 32'hA400_0000; wr.length = 1; wr.first_be = 4'hF; wr.last_be = 4'h0; wr.is_64bit = 0;
+            wr.start(env.rc_agent.sequencer); #10ns;
+            // EP2 window
+            wr = pcie_tl_mem_wr_seq::type_id::create("wr_b0");
+            wr.addr = 32'hB000_0000; wr.length = 1; wr.first_be = 4'hF; wr.last_be = 4'h0; wr.is_64bit = 0;
+            wr.start(env.rc_agent.sequencer); #10ns;
+            // EP3 window
+            wr = pcie_tl_mem_wr_seq::type_id::create("wr_c0");
+            wr.addr = 32'hC000_0000; wr.length = 1; wr.first_be = 4'hF; wr.last_be = 4'h0; wr.is_64bit = 0;
+            wr.start(env.rc_agent.sequencer); #10ns;
+        end
+        #3000ns;
+
+        `uvm_info("SW_CFG", $sformatf("DSP fwd: [%0d, %0d, %0d, %0d]",
+            env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count,
+            env.sw.dsp[2].forwarded_count, env.sw.dsp[3].forwarded_count), UVM_LOW)
+
+        if (env.sw.dsp[0].forwarded_count >= 1 && env.sw.dsp[1].forwarded_count >= 1 &&
+            env.sw.dsp[2].forwarded_count >= 1 && env.sw.dsp[3].forwarded_count >= 1 &&
+            env.sw.total_dropped == 0)
+            `uvm_info("SW_CFG", "*** SWITCH CONFIG SPACE TEST PASSED ***", UVM_LOW)
+        else
+            `uvm_error("SW_CFG", "SWITCH CONFIG SPACE TEST FAILED")
+        phase.drop_objection(this);
+    endtask
+endclass
