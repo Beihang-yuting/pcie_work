@@ -534,6 +534,10 @@ class pcie_tl_env extends uvm_env;
         ep2rc_delay.latency_min_ns  = cfg.ep2rc_latency_min_ns;
         ep2rc_delay.latency_max_ns  = cfg.ep2rc_latency_max_ns;
         ep2rc_delay.update_interval = cfg.link_delay_update_interval;
+
+        // Completion timeout
+        if (rc_agent != null && rc_agent.rc_driver != null)
+            rc_agent.rc_driver.cpl_timeout_ns = cfg.cpl_timeout_ns;
     endfunction
 
 endclass

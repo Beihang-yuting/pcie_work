@@ -2114,7 +2114,7 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
                 end join_none
             end
         join
-        #5000ns;
+        #20000ns;
         `uvm_info("SW_HEAVY", $sformatf("Phase 1 done: %0d writes, routed=%0d",
             p1_wr, env.sw.total_routed), UVM_LOW)
 
@@ -2138,7 +2138,7 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
                 end join_none
             end
         join
-        #20000ns;
+        #50000ns;
         `uvm_info("SW_HEAVY", $sformatf("Phase 2 done: %0d reads, matched=%0d cpl=%0d",
             p2_rd, env.scb.matched, env.scb.total_completions), UVM_LOW)
 
@@ -2256,7 +2256,7 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
                 end
             end
         join
-        #30000ns;
+        #100000ns;  // 100us drain for heavy traffic completions
         t_end = $realtime;
 
         // Report
