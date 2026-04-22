@@ -23,6 +23,12 @@ package pcie_tl_pkg;
     //--- Adapter ---
     `include "adapter/pcie_tl_if_adapter.sv"
 
+    //--- Switch ---
+    `include "switch/pcie_tl_switch_config.sv"
+    `include "switch/pcie_tl_switch_port.sv"
+    `include "switch/pcie_tl_switch_fabric.sv"
+    `include "switch/pcie_tl_switch.sv"
+
     //--- Agent ---
     `include "agent/pcie_tl_base_driver.sv"
     `include "agent/pcie_tl_base_monitor.sv"

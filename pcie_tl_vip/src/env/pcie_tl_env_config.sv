@@ -75,6 +75,10 @@ class pcie_tl_env_config extends uvm_object;
     int                       ep2rc_latency_max_ns           = 0;
     int                       link_delay_update_interval     = 16;
 
+    //--- Switch ---
+    bit                    switch_enable = 0;
+    pcie_tl_switch_config  switch_cfg;
+
     function new(string name = "pcie_tl_env_config");
         super.new(name);
     endfunction
