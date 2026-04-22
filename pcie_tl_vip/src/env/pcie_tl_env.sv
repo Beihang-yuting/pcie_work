@@ -371,6 +371,7 @@ class pcie_tl_env extends uvm_env;
             rc_adapter.tlm_tx_fifo.get(tlp);
             if (scb != null && tlp.requires_completion())
                 scb.register_pending(tlp);
+            replenish_credits(tlp);  // Return RC-side FC credits (TLP delivered to switch)
             sw.usp.rx_fifo.put(tlp);
         end
     endtask
@@ -421,6 +422,8 @@ class pcie_tl_env extends uvm_env;
         pcie_tl_tlp tlp;
         forever begin
             ep_adapters[idx].tlm_tx_fifo.get(tlp);
+            // Replenish EP's per-port FC credits (TLP delivered to switch)
+            replenish_port_credits(sw.dsp[idx].fc_mgr, tlp);
             sw.dsp[idx].rx_fifo.put(tlp);
         end
     endtask
@@ -444,6 +447,29 @@ class pcie_tl_env extends uvm_env;
             TLP_CAT_COMPLETION: begin
                 fc_mgr.return_credit(FC_CPL_HDR, 1);
                 fc_mgr.return_credit(FC_CPL_DATA, data_credits);
+            end
+        endcase
+    endfunction
+
+    //=========================================================================
+    // Replenish per-port FC credits (for switch mode)
+    //=========================================================================
+    protected function void replenish_port_credits(pcie_tl_fc_manager port_fc, pcie_tl_tlp tlp);
+        int data_credits;
+        if (!port_fc.fc_enable || port_fc.infinite_credit) return;
+        data_credits = tlp.get_data_credits();
+        case (tlp.get_category())
+            TLP_CAT_POSTED: begin
+                port_fc.return_credit(FC_POSTED_HDR, 1);
+                port_fc.return_credit(FC_POSTED_DATA, data_credits);
+            end
+            TLP_CAT_NON_POSTED: begin
+                port_fc.return_credit(FC_NONPOSTED_HDR, 1);
+                port_fc.return_credit(FC_NONPOSTED_DATA, data_credits);
+            end
+            TLP_CAT_COMPLETION: begin
+                port_fc.return_credit(FC_CPL_HDR, 1);
+                port_fc.return_credit(FC_CPL_DATA, data_credits);
             end
         endcase
     endfunction
