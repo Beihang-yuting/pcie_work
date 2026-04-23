@@ -37,6 +37,9 @@ class pcie_tl_env extends uvm_env;
     pcie_tl_ep_agent       ep_agents[];
     pcie_tl_if_adapter     ep_adapters[];
 
+    //--- Function Manager (SR-IOV) ---
+    pcie_tl_func_manager   func_mgr_sriov;
+
     //--- Virtual Sequencer ---
     pcie_tl_virtual_sequencer  v_seqr;
 
@@ -81,6 +84,17 @@ class pcie_tl_env extends uvm_env;
         if (cfg.ep_agent_enable) begin
             uvm_config_db#(uvm_active_passive_enum)::set(this, "ep_agent", "is_active", cfg.ep_is_active);
             ep_agent = pcie_tl_ep_agent::type_id::create("ep_agent", this);
+        end
+
+        // 4c. SR-IOV mode: create function manager
+        if (cfg.sriov_enable) begin
+            func_mgr_sriov = pcie_tl_func_manager::type_id::create("func_mgr_sriov");
+            func_mgr_sriov.build(cfg.num_pfs, cfg.max_vfs_per_pf,
+                                  cfg.pf_vendor_id, cfg.pf_device_id, cfg.vf_device_id);
+            if (cfg.default_num_vfs > 0) begin
+                for (int pf = 0; pf < cfg.num_pfs; pf++)
+                    func_mgr_sriov.enable_vfs(pf, cfg.default_num_vfs);
+            end
         end
 
         // 4b. Switch mode: create switch + N EP agents
@@ -146,6 +160,10 @@ class pcie_tl_env extends uvm_env;
             if (ep_agent.ep_driver != null) begin
                 ep_agent.ep_driver.mps_bytes = int'(cfg.max_payload_size);
                 ep_agent.ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
+                if (cfg.sriov_enable && func_mgr_sriov != null) begin
+                    ep_agent.func_manager = func_mgr_sriov;
+                    ep_agent.ep_driver.func_manager = func_mgr_sriov;
+                end
             end
         end
 
@@ -193,6 +211,8 @@ class pcie_tl_env extends uvm_env;
                 if (ep_agents[i].ep_driver != null) begin
                     ep_agents[i].ep_driver.mps_bytes = int'(cfg.max_payload_size);
                     ep_agents[i].ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
+                    if (cfg.sriov_enable && func_mgr_sriov != null)
+                        ep_agents[i].ep_driver.func_manager = func_mgr_sriov;
                 end
                 ep_adapters[i].mode   = cfg.if_mode;
                 ep_adapters[i].codec  = codec;
