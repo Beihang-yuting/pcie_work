@@ -18,11 +18,23 @@ class pcie_tl_codec extends uvm_object;
         bit [31:0] ecrc;
         int idx = 0;
 
+        // Encode prefix DWs first
+        int prefix_bytes = tlp.prefixes.size() * 4;
+
         // Build header DWords
         build_header(tlp, header);
 
-        // Total bytes = header + payload + optional ECRC(4 bytes)
-        bytes = new[(header.size() * 4) + tlp.payload.size() + (tlp.td ? 4 : 0)];
+        // Total bytes = prefixes + header + payload + optional ECRC(4 bytes)
+        bytes = new[prefix_bytes + (header.size() * 4) + tlp.payload.size() + (tlp.td ? 4 : 0)];
+
+        // Pack prefix DWs (big-endian)
+        foreach (tlp.prefixes[i]) begin
+            bit [31:0] pdw = tlp.prefixes[i].raw_dw;
+            bytes[idx++] = pdw[31:24];
+            bytes[idx++] = pdw[23:16];
+            bytes[idx++] = pdw[15:8];
+            bytes[idx++] = pdw[7:0];
+        end
 
         // Pack header into byte stream (big-endian per PCIe spec)
         foreach (header[i]) begin
@@ -63,24 +75,36 @@ class pcie_tl_codec extends uvm_object;
     //=========================================================================
     function pcie_tl_tlp decode(bit [7:0] bytes[]);
         pcie_tl_tlp tlp;
+        pcie_tl_prefix tlp_prefixes[$];
         bit [31:0] dw0, dw1, dw2, dw3;
         tlp_fmt_e  fmt;
         tlp_type_e type_f;
         int hdr_len;
         int payload_start;
         int payload_len;
+        int offset;
 
-        // Parse first DW
-        dw0 = {bytes[0], bytes[1], bytes[2], bytes[3]};
-        dw1 = {bytes[4], bytes[5], bytes[6], bytes[7]};
-        dw2 = {bytes[8], bytes[9], bytes[10], bytes[11]};
+        // Scan for TLP Prefix DWs (Fmt[2:0] == 100b in byte 0 bits [7:5])
+        offset = 0;
+        while (offset + 4 <= bytes.size() && bytes[offset][7:5] == 3'b100) begin
+            pcie_tl_prefix pfx = new($sformatf("prefix_%0d", tlp_prefixes.size()));
+            pfx.raw_dw = {bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]};
+            pfx.prefix_type = tlp_prefix_type_e'(pfx.raw_dw[31:24]);
+            tlp_prefixes.push_back(pfx);
+            offset += 4;
+        end
+
+        // Parse first DW of main TLP header (starts at offset)
+        dw0 = {bytes[offset+0], bytes[offset+1], bytes[offset+2], bytes[offset+3]};
+        dw1 = {bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]};
+        dw2 = {bytes[offset+8], bytes[offset+9], bytes[offset+10], bytes[offset+11]};
 
         fmt    = tlp_fmt_e'(dw0[31:29]);
         type_f = tlp_type_e'(dw0[28:24]);
 
         hdr_len = (fmt == FMT_4DW_NO_DATA || fmt == FMT_4DW_WITH_DATA) ? 16 : 12;
         if (hdr_len == 16)
-            dw3 = {bytes[12], bytes[13], bytes[14], bytes[15]};
+            dw3 = {bytes[offset+12], bytes[offset+13], bytes[offset+14], bytes[offset+15]};
 
         // Determine TLP kind and create appropriate derived class
         tlp = create_tlp_by_type(fmt, type_f);
@@ -98,7 +122,7 @@ class pcie_tl_codec extends uvm_object;
         tlp.tag[7:0]     = dw1[15:8];
 
         // Payload
-        payload_start = hdr_len;
+        payload_start = offset + hdr_len;
         if (fmt == FMT_3DW_WITH_DATA || fmt == FMT_4DW_WITH_DATA) begin
             bit [9:0] len_dw = (tlp.length == 0) ? 10'd1024 : tlp.length;
             payload_len = len_dw * 4;
@@ -115,6 +139,9 @@ class pcie_tl_codec extends uvm_object;
 
         // Fill type-specific fields
         fill_type_specific(tlp, dw1, dw2, dw3, hdr_len);
+
+        tlp.prefixes = tlp_prefixes;
+        tlp.has_prefix = (tlp_prefixes.size() > 0);
 
         return tlp;
     endfunction
