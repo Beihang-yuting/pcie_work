@@ -58,6 +58,7 @@ class pcie_tl_fc_manager extends uvm_object;
     //=========================================================================
     function void consume_credit(pcie_tl_tlp tlp);
         int data_needed;
+        int prefix_dw, base_dw, hdr_credits;
         fc_credit_t hdr_credit, data_credit;
 
         if (!fc_enable) return;
@@ -66,9 +67,9 @@ class pcie_tl_fc_manager extends uvm_object;
         data_needed = tlp.get_data_credits();
         get_credit_ref(tlp.get_category(), hdr_credit, data_credit);
 
-        int prefix_dw = tlp.prefixes.size();
-        int base_dw = tlp.is_4dw() ? 4 : 3;
-        int hdr_credits = (base_dw + prefix_dw + 3) / 4;
+        prefix_dw = tlp.prefixes.size();
+        base_dw = tlp.is_4dw() ? 4 : 3;
+        hdr_credits = (base_dw + prefix_dw + 3) / 4;
 
         hdr_credit.current  -= hdr_credits;
         data_credit.current -= data_needed;

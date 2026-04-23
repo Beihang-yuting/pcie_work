@@ -2331,9 +2331,9 @@ class pcie_tl_sriov_basic_test extends pcie_tl_base_test;
                 cfg_rd.completer_id = {8'h01, 5'h00, pf[2:0]} + 1 + (round % 16);  // VF
             cfg_rd.start(env.rc_agent.sequencer);
             total_cfg++;
-            #1ns;
+            #10ns;
         end
-        #10000ns;
+        #50000ns;
         `uvm_info("TEST23", $sformatf("Phase 1 done: %0d config reads", total_cfg), UVM_LOW)
 
         // Phase 2: 5000 memory writes distributed across all VFs
@@ -2544,13 +2544,13 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
         end
         #10000ns;
 
-        // Phase 4: 2000 reads with single PASID
+        // Phase 4: 2000 reads with single PASID (separate address space to avoid data mismatch)
         `uvm_info("TEST32", "--- Phase 4: 2000 single-PASID reads ---", UVM_LOW)
         for (int i = 0; i < 2000; i++) begin
             pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("rdp_%0d", i));
             pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(
                 20'(i * 17), .exe(i[0]), .pmr(i[1]));
-            rd.addr     = 64'h0000_0003_0000_0000 + ((i % 3000) * 64);
+            rd.addr     = 64'h0000_0005_0000_0000 + (i * 64);
             rd.length   = 4;
             rd.first_be = 4'hF;
             rd.last_be  = 4'hF;

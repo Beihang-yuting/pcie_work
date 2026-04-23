@@ -9,8 +9,8 @@ package pcie_tl_pkg;
 
     //--- Types ---
     `include "types/pcie_tl_types.sv"
-    `include "types/pcie_tl_tlp.sv"
     `include "types/pcie_tl_prefix.sv"
+    `include "types/pcie_tl_tlp.sv"
 
     //--- Shared Components ---
     `include "shared/pcie_tl_codec.sv"
