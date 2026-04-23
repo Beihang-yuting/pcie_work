@@ -37,7 +37,9 @@ class pcie_tl_fc_manager extends uvm_object;
     // Check if enough credit to send TLP
     //=========================================================================
     function bit check_credit(pcie_tl_tlp tlp);
-        int hdr_needed = 1;
+        int prefix_dw = tlp.prefixes.size();
+        int base_dw = tlp.is_4dw() ? 4 : 3;
+        int hdr_needed = (base_dw + prefix_dw + 3) / 4;
         int data_needed;
         fc_credit_t hdr_credit, data_credit;
 
@@ -64,7 +66,11 @@ class pcie_tl_fc_manager extends uvm_object;
         data_needed = tlp.get_data_credits();
         get_credit_ref(tlp.get_category(), hdr_credit, data_credit);
 
-        hdr_credit.current  -= 1;
+        int prefix_dw = tlp.prefixes.size();
+        int base_dw = tlp.is_4dw() ? 4 : 3;
+        int hdr_credits = (base_dw + prefix_dw + 3) / 4;
+
+        hdr_credit.current  -= hdr_credits;
         data_credit.current -= data_needed;
 
         set_credit(tlp.get_category(), hdr_credit, data_credit);
