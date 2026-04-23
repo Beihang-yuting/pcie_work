@@ -532,12 +532,15 @@ class pcie_tl_env extends uvm_env;
         cov.tag_usage_enable    = cfg.tag_usage_cov;
         cov.ordering_enable     = cfg.ordering_cov;
         cov.error_inject_enable = cfg.error_inject_cov;
+        cov.sriov_enable      = cfg.sriov_enable;
+        cov.prefix_cov_enable = cfg.prefix_enable;
 
         // Scoreboard
         if (scb != null) begin
             scb.ordering_check_enable   = cfg.ordering_check_enable;
             scb.completion_check_enable = cfg.completion_check_enable;
             scb.data_integrity_enable   = cfg.data_integrity_enable;
+            scb.prefix_check_enable = cfg.prefix_enable;
         end
 
         // Adapter mode
