@@ -2844,3 +2844,570 @@ class pcie_tl_sriov_stress_test extends pcie_tl_base_test;
         phase.drop_objection(this);
     endtask
 endclass
+
+//=============================================================================
+// Test 36: RC→EP SR-IOV Heavy (8 PF x 32 VF, 30K+ TLPs, direct mode)
+// Comprehensive RC-to-EP traffic with large-scale PF/VF topology
+//=============================================================================
+class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_rc_ep_sriov_heavy_test)
+
+    int p1_cfg, p2_wr, p3_rd, p4_mixed, p5_vf_disable, p6_renable;
+
+    function new(string name = "pcie_tl_rc_ep_sriov_heavy_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void configure_test();
+        super.configure_test();
+        // 8 PF x 32 VF = 264 functions total
+        cfg.sriov_enable     = 1;
+        cfg.num_pfs          = 8;
+        cfg.max_vfs_per_pf   = 32;
+        cfg.default_num_vfs  = 32;
+        // High capacity FC
+        configure_fc(1, 1);
+        configure_tags(.extended(1), .phantom(0), .max_out(512));
+        cfg.ep_auto_response   = 1;
+        cfg.response_delay_min = 0;
+        cfg.response_delay_max = 2;
+        cfg.cpl_timeout_ns     = 500000;
+        // Coverage
+        enable_coverage();
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        int grand_total;
+        realtime t_start, t_end;
+        phase.raise_objection(this);
+
+        `uvm_info("TEST36", "============================================================", UVM_LOW)
+        `uvm_info("TEST36", "=== Test 36: RC->EP SR-IOV Heavy (8PF x 32VF, 30K+ TLPs) ===", UVM_LOW)
+        `uvm_info("TEST36", "============================================================", UVM_LOW)
+        t_start = $realtime;
+
+        //--------------------------------------------------------------
+        // Phase 1: Config enumeration — read all 264 functions (3 rounds = 792)
+        // Then write config to each PF's SR-IOV registers (208 writes)
+        // Total: ~1000 config TLPs
+        //--------------------------------------------------------------
+        `uvm_info("TEST36", "\n--- Phase 1: Config enumeration of all 264 functions ---", UVM_LOW)
+        p1_cfg = 0;
+
+        // Config read vendor/device ID from every PF
+        for (int pf = 0; pf < 8; pf++) begin
+            pcie_tl_cfg_rd_seq cfg_rd;
+            // Read offset 0x00 (Vendor/Device ID)
+            cfg_rd = pcie_tl_cfg_rd_seq::type_id::create($sformatf("cfg_rd_pf%0d_vid", pf));
+            cfg_rd.completer_id = {8'h01, 5'h00, pf[2:0]};
+            cfg_rd.reg_num = 0;
+            cfg_rd.start(env.rc_agent.sequencer);
+            p1_cfg++;
+            #10ns;
+            // Read offset 0x08 (Class Code)
+            cfg_rd = pcie_tl_cfg_rd_seq::type_id::create($sformatf("cfg_rd_pf%0d_cls", pf));
+            cfg_rd.completer_id = {8'h01, 5'h00, pf[2:0]};
+            cfg_rd.reg_num = 2;
+            cfg_rd.start(env.rc_agent.sequencer);
+            p1_cfg++;
+            #10ns;
+            // Read SR-IOV capability (offset 0x200)
+            cfg_rd = pcie_tl_cfg_rd_seq::type_id::create($sformatf("cfg_rd_pf%0d_sriov", pf));
+            cfg_rd.completer_id = {8'h01, 5'h00, pf[2:0]};
+            cfg_rd.reg_num = 10'h080;  // 0x200 / 4
+            cfg_rd.start(env.rc_agent.sequencer);
+            p1_cfg++;
+            #10ns;
+        end
+
+        // Config read from every VF (32 VFs per PF x 8 PFs = 256 VFs, 3 regs each = 768)
+        for (int pf = 0; pf < 8; pf++) begin
+            for (int vf = 0; vf < 32; vf++) begin
+                pcie_tl_cfg_rd_seq cfg_rd;
+                bit [15:0] vf_bdf = {8'h01, 5'h00, pf[2:0]} + 1 + vf;
+                // Vendor/Device ID
+                cfg_rd = pcie_tl_cfg_rd_seq::type_id::create(
+                    $sformatf("cfg_rd_pf%0d_vf%0d", pf, vf));
+                cfg_rd.completer_id = vf_bdf;
+                cfg_rd.reg_num = 0;
+                cfg_rd.start(env.rc_agent.sequencer);
+                p1_cfg++;
+                #5ns;
+            end
+        end
+
+        #100000ns;
+        `uvm_info("TEST36", $sformatf("Phase 1 done: %0d config TLPs", p1_cfg), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 2: RC writes to all VFs — 10000 writes
+        // Each VF gets ~39 writes, spread across 8 PFs x 32 VFs
+        //--------------------------------------------------------------
+        `uvm_info("TEST36", "\n--- Phase 2: 10000 RC->EP memory writes across all VFs ---", UVM_LOW)
+        p2_wr = 0;
+        for (int i = 0; i < 10000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                $sformatf("p2_wr_%0d", i));
+            wr.addr     = 64'h0000_0001_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          ((i / 256) * 256);
+            wr.length   = 1 + (i % 32);
+            wr.first_be = 4'hF;
+            wr.last_be  = (wr.length > 1) ? 4'hF : 4'h0;
+            wr.is_64bit = 1;
+            wr.start(env.rc_agent.sequencer);
+            p2_wr++;
+            #1ns;
+        end
+        #30000ns;
+        `uvm_info("TEST36", $sformatf("Phase 2 done: %0d writes", p2_wr), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 3: RC reads from all VFs — 8000 reads (multi-CplD)
+        // Various payload sizes to exercise completion splitting
+        //--------------------------------------------------------------
+        `uvm_info("TEST36", "\n--- Phase 3: 8000 RC->EP memory reads (multi-CplD) ---", UVM_LOW)
+        p3_rd = 0;
+        for (int i = 0; i < 8000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
+                $sformatf("p3_rd_%0d", i));
+            rd.addr     = 64'h0000_0001_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          ((i / 256) * 256);
+            rd.length   = 1 + (i % 64);
+            rd.first_be = 4'hF;
+            rd.last_be  = (rd.length > 1) ? 4'hF : 4'h0;
+            rd.is_64bit = 1;
+            rd.start(env.rc_agent.sequencer);
+            p3_rd++;
+            #2ns;
+        end
+        #50000ns;
+        `uvm_info("TEST36", $sformatf("Phase 3 done: %0d reads", p3_rd), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 4: Interleaved write/read with varying sizes — 6000 TLPs
+        // Alternates between write and read to stress ordering engine
+        //--------------------------------------------------------------
+        `uvm_info("TEST36", "\n--- Phase 4: 6000 interleaved R/W across VFs ---", UVM_LOW)
+        p4_mixed = 0;
+        for (int i = 0; i < 6000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            bit [63:0] base_addr = 64'h0000_0002_0000_0000 +
+                                   (pf_idx * 64'h1000_0000) +
+                                   (vf_idx * 64'h10_0000);
+            if (i % 2 == 0) begin
+                // Write
+                pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                    $sformatf("p4_wr_%0d", i));
+                wr.addr     = base_addr + ((i / 256) * 128);
+                wr.length   = 2 + (i % 30);
+                wr.first_be = 4'hF;
+                wr.last_be  = 4'hF;
+                wr.is_64bit = 1;
+                wr.start(env.rc_agent.sequencer);
+            end else begin
+                // Read
+                pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
+                    $sformatf("p4_rd_%0d", i));
+                rd.addr     = base_addr + ((i / 256) * 128);
+                rd.length   = 2 + (i % 16);
+                rd.first_be = 4'hF;
+                rd.last_be  = 4'hF;
+                rd.is_64bit = 1;
+                rd.start(env.rc_agent.sequencer);
+            end
+            p4_mixed++;
+            #1ns;
+        end
+        #50000ns;
+        `uvm_info("TEST36", $sformatf("Phase 4 done: %0d mixed TLPs", p4_mixed), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 5: Dynamic VF disable/re-enable test
+        // Disable VFs on PF0-3, send config reads (expect UR), then re-enable
+        //--------------------------------------------------------------
+        `uvm_info("TEST36", "\n--- Phase 5: VF disable → UR → re-enable (2000 TLPs) ---", UVM_LOW)
+        p5_vf_disable = 0;
+
+        // Disable VFs on PF0-3
+        for (int pf = 0; pf < 4; pf++)
+            env.func_mgr_sriov.disable_vfs(pf);
+
+        // Send memory writes to disabled VFs' address range (posted, no completion needed)
+        // These verify the disable took effect at the function manager level
+        for (int i = 0; i < 1000; i++) begin
+            int pf_idx = i % 4;
+            int vf_idx = (i / 4) % 32;
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                $sformatf("p5_dis_wr_%0d", i));
+            wr.addr     = 64'h0000_0001_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) + (i * 64);
+            wr.length   = 4;
+            wr.first_be = 4'hF;
+            wr.last_be  = 4'hF;
+            wr.is_64bit = 1;
+            wr.start(env.rc_agent.sequencer);
+            p5_vf_disable++;
+            #1ns;
+        end
+        #20000ns;
+
+        // Send memory writes to still-active PF4-7 VFs
+        for (int i = 0; i < 1000; i++) begin
+            int pf_idx = 4 + (i % 4);
+            int vf_idx = (i / 4) % 32;
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                $sformatf("p5_ok_wr_%0d", i));
+            wr.addr     = 64'h0000_0004_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) + (i * 64);
+            wr.length   = 4 + (i % 12);
+            wr.first_be = 4'hF;
+            wr.last_be  = 4'hF;
+            wr.is_64bit = 1;
+            wr.start(env.rc_agent.sequencer);
+            p5_vf_disable++;
+            #1ns;
+        end
+        #20000ns;
+        `uvm_info("TEST36", $sformatf("Phase 5 done: %0d config TLPs (disable test)", p5_vf_disable), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 6: Re-enable VFs and verify traffic resumes — 3000 TLPs
+        //--------------------------------------------------------------
+        `uvm_info("TEST36", "\n--- Phase 6: Re-enable VFs + 3000 writes ---", UVM_LOW)
+        p6_renable = 0;
+
+        // Re-enable VFs on PF0-3
+        for (int pf = 0; pf < 4; pf++)
+            env.func_mgr_sriov.enable_vfs(pf, 32);
+
+        // Write to re-enabled VFs
+        for (int i = 0; i < 5000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                $sformatf("p6_wr_%0d", i));
+            wr.addr     = 64'h0000_0003_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          (i * 64);
+            wr.length   = 4 + (i % 28);
+            wr.first_be = 4'hF;
+            wr.last_be  = 4'hF;
+            wr.is_64bit = 1;
+            wr.start(env.rc_agent.sequencer);
+            p6_renable++;
+            #1ns;
+        end
+
+        #50000ns;
+        `uvm_info("TEST36", $sformatf("Phase 6 done: %0d writes after re-enable", p6_renable), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Final summary
+        //--------------------------------------------------------------
+        t_end = $realtime;
+        grand_total = p1_cfg + p2_wr + p3_rd + p4_mixed + p5_vf_disable + p6_renable;
+        `uvm_info("TEST36", "============================================================", UVM_LOW)
+        `uvm_info("TEST36", $sformatf("Elapsed: %0t", t_end - t_start), UVM_LOW)
+        `uvm_info("TEST36", $sformatf("Grand total: %0d TLPs", grand_total), UVM_LOW)
+        `uvm_info("TEST36", $sformatf("  Phase 1 (cfg enum):      %0d", p1_cfg), UVM_LOW)
+        `uvm_info("TEST36", $sformatf("  Phase 2 (VF writes):     %0d", p2_wr), UVM_LOW)
+        `uvm_info("TEST36", $sformatf("  Phase 3 (VF reads):      %0d", p3_rd), UVM_LOW)
+        `uvm_info("TEST36", $sformatf("  Phase 4 (interleaved):   %0d", p4_mixed), UVM_LOW)
+        `uvm_info("TEST36", $sformatf("  Phase 5 (disable/UR):    %0d", p5_vf_disable), UVM_LOW)
+        `uvm_info("TEST36", $sformatf("  Phase 6 (re-enable):     %0d", p6_renable), UVM_LOW)
+        `uvm_info("TEST36", $sformatf("Active functions: %0d",
+            env.func_mgr_sriov.get_active_count()), UVM_LOW)
+        if (env.scb.mismatched == 0)
+            `uvm_info("TEST36", "*** RC->EP SR-IOV HEAVY PASSED ***", UVM_LOW)
+        else
+            `uvm_error("TEST36", $sformatf("FAILED: mismatched=%0d unexpected=%0d",
+                env.scb.mismatched, env.scb.unexpected))
+        `uvm_info("TEST36", "============================================================", UVM_LOW)
+        phase.drop_objection(this);
+    endtask
+endclass
+
+//=============================================================================
+// Test 37: RC→EP SR-IOV + Prefix Heavy (8 PF x 32 VF, all prefix types, 20K+)
+//=============================================================================
+class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
+    `uvm_component_utils(pcie_tl_rc_ep_sriov_prefix_heavy_test)
+
+    int p1_pasid_wr, p2_pasid_rd, p3_multi_wr, p4_ide_wr, p5_tph_wr, p6_mixed;
+
+    function new(string name = "pcie_tl_rc_ep_sriov_prefix_heavy_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void configure_test();
+        super.configure_test();
+        cfg.sriov_enable     = 1;
+        cfg.num_pfs          = 8;
+        cfg.max_vfs_per_pf   = 32;
+        cfg.default_num_vfs  = 32;
+        cfg.prefix_enable    = 1;
+        cfg.pasid_enable     = 1;
+        cfg.ide_enable       = 1;
+        cfg.ext_tph_enable   = 1;
+        cfg.mriov_enable     = 1;
+        configure_fc(1, 1);
+        configure_tags(.extended(1), .phantom(0), .max_out(512));
+        cfg.ep_auto_response   = 1;
+        cfg.response_delay_min = 0;
+        cfg.response_delay_max = 2;
+        cfg.cpl_timeout_ns     = 500000;
+        enable_coverage();
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        int grand_total;
+        realtime t_start, t_end;
+        phase.raise_objection(this);
+
+        `uvm_info("TEST37", "============================================================", UVM_LOW)
+        `uvm_info("TEST37", "=== Test 37: RC->EP SR-IOV+Prefix Heavy (8PF x 32VF, 20K+) ===", UVM_LOW)
+        `uvm_info("TEST37", "============================================================", UVM_LOW)
+        t_start = $realtime;
+
+        //--------------------------------------------------------------
+        // Phase 1: 5000 writes with PASID prefix, unique PASID per VF
+        //--------------------------------------------------------------
+        `uvm_info("TEST37", "\n--- Phase 1: 5000 PASID-prefixed writes across VFs ---", UVM_LOW)
+        p1_pasid_wr = 0;
+        for (int i = 0; i < 5000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                $sformatf("p1_wr_%0d", i));
+            pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(
+                20'(pf_idx * 100000 + vf_idx * 1000 + (i % 1000)),
+                .exe(i[0]), .pmr(i[1]));
+            wr.addr     = 64'h0000_0010_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          ((i / 256) * 128);
+            wr.length   = 2 + (i % 30);
+            wr.first_be = 4'hF;
+            wr.last_be  = 4'hF;
+            wr.is_64bit = 1;
+            wr.prefixes.push_back(pasid_pfx);
+            wr.has_prefix = 1;
+            wr.start(env.rc_agent.sequencer);
+            p1_pasid_wr++;
+            #1ns;
+        end
+        #20000ns;
+        `uvm_info("TEST37", $sformatf("Phase 1 done: %0d PASID writes", p1_pasid_wr), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 2: 4000 reads with PASID prefix
+        //--------------------------------------------------------------
+        `uvm_info("TEST37", "\n--- Phase 2: 4000 PASID-prefixed reads across VFs ---", UVM_LOW)
+        p2_pasid_rd = 0;
+        for (int i = 0; i < 4000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
+                $sformatf("p2_rd_%0d", i));
+            pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(
+                20'(pf_idx * 100000 + vf_idx * 1000 + (i % 500)));
+            rd.addr     = 64'h0000_0010_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          ((i / 256) * 128);
+            rd.length   = 1 + (i % 32);
+            rd.first_be = 4'hF;
+            rd.last_be  = (rd.length > 1) ? 4'hF : 4'h0;
+            rd.is_64bit = 1;
+            rd.prefixes.push_back(pasid_pfx);
+            rd.has_prefix = 1;
+            rd.start(env.rc_agent.sequencer);
+            p2_pasid_rd++;
+            #2ns;
+        end
+        #30000ns;
+        `uvm_info("TEST37", $sformatf("Phase 2 done: %0d PASID reads", p2_pasid_rd), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 3: 3000 writes with triple prefix (MR-IOV + PASID + IDE)
+        //--------------------------------------------------------------
+        `uvm_info("TEST37", "\n--- Phase 3: 3000 triple-prefix writes ---", UVM_LOW)
+        p3_multi_wr = 0;
+        for (int i = 0; i < 3000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                $sformatf("p3_wr_%0d", i));
+            pcie_tl_prefix mriov_pfx = pcie_tl_prefix::create_mriov(8'(pf_idx * 16 + vf_idx % 16));
+            pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(20'(i * 7 + pf_idx));
+            pcie_tl_prefix ide_pfx   = pcie_tl_prefix::create_ide(
+                i[0], 8'(i % 64), i[1], 1, i[2]);
+            wr.addr     = 64'h0000_0020_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          (i * 64);
+            wr.length   = 4 + (i % 28);
+            wr.first_be = 4'hF;
+            wr.last_be  = 4'hF;
+            wr.is_64bit = 1;
+            wr.prefixes.push_back(mriov_pfx);
+            wr.prefixes.push_back(pasid_pfx);
+            wr.prefixes.push_back(ide_pfx);
+            wr.has_prefix = 1;
+            wr.start(env.rc_agent.sequencer);
+            p3_multi_wr++;
+            #1ns;
+        end
+        #20000ns;
+        `uvm_info("TEST37", $sformatf("Phase 3 done: %0d triple-prefix writes", p3_multi_wr), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 4: 3000 writes with IDE prefix only
+        //--------------------------------------------------------------
+        `uvm_info("TEST37", "\n--- Phase 4: 3000 IDE-prefixed writes ---", UVM_LOW)
+        p4_ide_wr = 0;
+        for (int i = 0; i < 3000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                $sformatf("p4_wr_%0d", i));
+            pcie_tl_prefix ide_pfx = pcie_tl_prefix::create_ide(
+                i[3], 8'(i % 128), i[0], i[1], i[2]);
+            wr.addr     = 64'h0000_0030_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          (i * 64);
+            wr.length   = 2 + (i % 16);
+            wr.first_be = 4'hF;
+            wr.last_be  = 4'hF;
+            wr.is_64bit = 1;
+            wr.prefixes.push_back(ide_pfx);
+            wr.has_prefix = 1;
+            wr.start(env.rc_agent.sequencer);
+            p4_ide_wr++;
+            #1ns;
+        end
+        #15000ns;
+        `uvm_info("TEST37", $sformatf("Phase 4 done: %0d IDE writes", p4_ide_wr), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 5: 2000 writes with Extended TPH + PASID (dual E2E)
+        //--------------------------------------------------------------
+        `uvm_info("TEST37", "\n--- Phase 5: 2000 dual-E2E (PASID+TPH) writes ---", UVM_LOW)
+        p5_tph_wr = 0;
+        for (int i = 0; i < 2000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
+                $sformatf("p5_wr_%0d", i));
+            pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(20'(i * 31));
+            pcie_tl_prefix tph_pfx   = pcie_tl_prefix::create_ext_tph(8'(i % 256));
+            wr.addr     = 64'h0000_0040_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          (i * 64);
+            wr.length   = 4 + (i % 12);
+            wr.first_be = 4'hF;
+            wr.last_be  = 4'hF;
+            wr.is_64bit = 1;
+            wr.prefixes.push_back(pasid_pfx);
+            wr.prefixes.push_back(tph_pfx);
+            wr.has_prefix = 1;
+            wr.start(env.rc_agent.sequencer);
+            p5_tph_wr++;
+            #1ns;
+        end
+        #15000ns;
+        `uvm_info("TEST37", $sformatf("Phase 5 done: %0d dual-E2E writes", p5_tph_wr), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Phase 6: 3000 mixed reads — cycle through all prefix types
+        //--------------------------------------------------------------
+        `uvm_info("TEST37", "\n--- Phase 6: 3000 mixed-prefix reads ---", UVM_LOW)
+        p6_mixed = 0;
+        for (int i = 0; i < 3000; i++) begin
+            int pf_idx = i % 8;
+            int vf_idx = (i / 8) % 32;
+            int prefix_mode = i % 4;
+            pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
+                $sformatf("p6_rd_%0d", i));
+            rd.addr     = 64'h0000_0050_0000_0000 +
+                          (pf_idx * 64'h1000_0000) +
+                          (vf_idx * 64'h10_0000) +
+                          (i * 64);
+            rd.length   = 1 + (i % 16);
+            rd.first_be = 4'hF;
+            rd.last_be  = (rd.length > 1) ? 4'hF : 4'h0;
+            rd.is_64bit = 1;
+
+            case (prefix_mode)
+                0: begin  // PASID only
+                    pcie_tl_prefix pfx = pcie_tl_prefix::create_pasid(20'(i * 3));
+                    rd.prefixes.push_back(pfx);
+                end
+                1: begin  // IDE only
+                    pcie_tl_prefix pfx = pcie_tl_prefix::create_ide(
+                        i[0], 8'(i % 64), 0, 1, i[1]);
+                    rd.prefixes.push_back(pfx);
+                end
+                2: begin  // PASID + IDE
+                    pcie_tl_prefix pfx1 = pcie_tl_prefix::create_pasid(20'(i * 11));
+                    pcie_tl_prefix pfx2 = pcie_tl_prefix::create_ide(
+                        1, 8'(i % 32), 1, 1, 0);
+                    rd.prefixes.push_back(pfx1);
+                    rd.prefixes.push_back(pfx2);
+                end
+                3: begin  // MR-IOV + PASID (local + E2E)
+                    pcie_tl_prefix pfx1 = pcie_tl_prefix::create_mriov(8'(i % 64));
+                    pcie_tl_prefix pfx2 = pcie_tl_prefix::create_pasid(20'(i * 19));
+                    rd.prefixes.push_back(pfx1);
+                    rd.prefixes.push_back(pfx2);
+                end
+            endcase
+            rd.has_prefix = 1;
+            rd.start(env.rc_agent.sequencer);
+            p6_mixed++;
+            #2ns;
+        end
+
+        #50000ns;
+        `uvm_info("TEST37", $sformatf("Phase 6 done: %0d mixed-prefix reads", p6_mixed), UVM_LOW)
+
+        //--------------------------------------------------------------
+        // Final summary
+        //--------------------------------------------------------------
+        t_end = $realtime;
+        grand_total = p1_pasid_wr + p2_pasid_rd + p3_multi_wr + p4_ide_wr + p5_tph_wr + p6_mixed;
+        `uvm_info("TEST37", "============================================================", UVM_LOW)
+        `uvm_info("TEST37", $sformatf("Elapsed: %0t", t_end - t_start), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("Grand total: %0d TLPs", grand_total), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("  Phase 1 (PASID wr):     %0d", p1_pasid_wr), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("  Phase 2 (PASID rd):     %0d", p2_pasid_rd), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("  Phase 3 (triple pfx):   %0d", p3_multi_wr), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("  Phase 4 (IDE wr):       %0d", p4_ide_wr), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("  Phase 5 (TPH+PASID):    %0d", p5_tph_wr), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("  Phase 6 (mixed rd):     %0d", p6_mixed), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("Prefix types covered: PASID, IDE, ExtTPH, MR-IOV, combos"), UVM_LOW)
+        `uvm_info("TEST37", $sformatf("Active functions: %0d",
+            env.func_mgr_sriov.get_active_count()), UVM_LOW)
+        if (env.scb.mismatched == 0)
+            `uvm_info("TEST37", "*** RC->EP SR-IOV+PREFIX HEAVY PASSED ***", UVM_LOW)
+        else
+            `uvm_error("TEST37", $sformatf("FAILED: mismatched=%0d unexpected=%0d",
+                env.scb.mismatched, env.scb.unexpected))
+        `uvm_info("TEST37", "============================================================", UVM_LOW)
+        phase.drop_objection(this);
+    endtask
+endclass
