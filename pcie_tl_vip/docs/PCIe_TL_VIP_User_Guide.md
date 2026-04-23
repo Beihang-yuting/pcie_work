@@ -1,7 +1,7 @@
 # PCIe Transaction Layer VIP 用户手册
 
-> 版本: 2.0
-> 日期: 2026-04-22
+> 版本: 3.0
+> 日期: 2026-04-23
 > 基于 PCIe Base Specification Rev 5.0 事务层协议
 
 ---
@@ -23,6 +23,8 @@
 13. [配置参考](#13-配置参考)
 14. [测试用例参考](#14-测试用例参考)
 15. [扩展指南](#15-扩展指南)
+16. [SR-IOV PF/VF 管理](#16-sr-iov-pfvf-管理)
+17. [TLP Prefix 支持](#17-tlp-prefix-支持)
 
 ---
 
@@ -54,6 +56,9 @@ PCIe Transaction Layer VIP 是一套基于 UVM 的 PCIe 事务层验证 IP，提
 | **链路延时** | 可配置 RC→EP / EP→RC 延时，随机范围，流水线保序 |
 | **PCIe Switch** | 参数化 1-16 端口，地址/ID/消息路由，P2P 直通，Type 1 配置空间，双配置模式(静态/枚举) |
 | **多 EP 支持** | Switch 模式下动态创建 N 个 EP Agent，独立 FC/Tag/地址空间 |
+| **SR-IOV** | 完整 SR-IOV Extended Capability 建模，运行时可配 1-8 PF / 1-256 VF，BDF 自动计算，VF Enable/Disable 动态管理，per-Function 独立配置空间 |
+| **TLP Prefix** | Local (MR-IOV) + End-to-End (PASID, Extended TPH, IDE, Vendor-Defined)，最多 4 个 Prefix，FC 信用自动包含 Prefix 开销 |
+| **Function Manager** | 集中式 PF/VF 管理，BDF 查找表，Config 请求按 BDF 分派，VF 动态启停，UR Completion 自动返回 |
 
 ### 1.3 支持的 PCIe 规范要素
 
@@ -65,6 +70,9 @@ PCIe Transaction Layer VIP 是一套基于 UVM 的 PCIe 事务层验证 IP，提
 - Completion 拆分规则 (MPS/RCB)
 - 排序规则 (Table 2-40)
 - ECRC 生成与校验
+- SR-IOV Extended Capability (Cap ID 0x0010)
+- TLP Prefix (Local + End-to-End, PCIe 5.0 Section 2.2.10)
+- PASID Extended Capability (Cap ID 0x001B)
 
 ---
 
@@ -263,7 +271,8 @@ pcie_tl_vip/
 |   |
 |   |-- types/
 |   |   |-- pcie_tl_types.sv        # 枚举、结构体、抽象回调类
-|   |   +-- pcie_tl_tlp.sv          # TLP 事务对象层次 (8 个类)
+|   |   |-- pcie_tl_tlp.sv          # TLP 事务对象层次 (8 个类)
+|   |   +-- pcie_tl_prefix.sv       # TLP Prefix 类，字段解析，工厂方法
 |   |
 |   |-- shared/
 |   |   |-- pcie_tl_codec.sv        # TLP 编解码器 + ECRC
@@ -271,8 +280,10 @@ pcie_tl_vip/
 |   |   |-- pcie_tl_bw_shaper.sv    # 令牌桶带宽整形
 |   |   |-- pcie_tl_tag_manager.sv  # 标签池管理
 |   |   |-- pcie_tl_ordering_engine.sv  # 排序引擎
-|   |   +-- pcie_tl_cfg_space_manager.sv # 配置空间建模
-|   |   +-- pcie_tl_link_delay_model.sv # 链路延时模型
+|   |   |-- pcie_tl_cfg_space_manager.sv # 配置空间建模
+|   |   |-- pcie_tl_link_delay_model.sv # 链路延时模型
+|   |   |-- pcie_tl_sriov_cap.sv    # SR-IOV Extended Capability 寄存器模型
+|   |   +-- pcie_tl_func_manager.sv # Function Manager，PF/VF Context，BDF 查找
 |   |
 |   |-- adapter/
 |   |   +-- pcie_tl_if_adapter.sv   # TLM / SV Interface 适配器
@@ -1150,6 +1161,33 @@ unexp.start(env.rc_agent.sequencer);
 | `port_ph_credit` | `int` | 32 | 每端口 PH 信用 |
 | `port_pd_credit` | `int` | 256 | 每端口 PD 信用 |
 
+### 13.4 SR-IOV 配置
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `sriov_enable` | bit | 0 | SR-IOV 功能总开关 |
+| `num_pfs` | int | 1 | Physical Function 数量 (1-8) |
+| `max_vfs_per_pf` | int | 256 | 每 PF 最大 Virtual Function 数 |
+| `default_num_vfs` | int | 0 | 启动时默认激活的 VF 数 (0=不激活) |
+| `pf_vendor_id` | bit[15:0] | 16'hABCD | PF Vendor ID |
+| `pf_device_id` | bit[15:0] | 16'h1234 | PF Device ID |
+| `vf_device_id` | bit[15:0] | 16'h1235 | VF Device ID |
+| `ari_enable` | bit | 0 | ARI (Alternative Routing-ID) 使能 |
+
+### 13.5 TLP Prefix 配置
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `prefix_enable` | bit | 0 | TLP Prefix 功能总开关 |
+| `pasid_enable` | bit | 0 | PASID Prefix 使能 |
+| `pasid_width` | int | 20 | PASID 位宽 (1-20) |
+| `pasid_exe_supported` | bit | 0 | PASID Execute Permission 支持 |
+| `pasid_priv_supported` | bit | 0 | PASID Privilege Mode 支持 |
+| `ext_tph_enable` | bit | 0 | Extended TPH Prefix 使能 |
+| `ide_enable` | bit | 0 | IDE Prefix 使能 |
+| `mriov_enable` | bit | 0 | MR-IOV Local Prefix 使能 |
+| `max_e2e_prefix` | int | 4 | 最大 E2E Prefix 数 (1-4) |
+
 ### 13.2 Base Test 辅助方法
 
 ```systemverilog
@@ -1403,6 +1441,18 @@ endclass
 | 26 | pcie_tl_switch_cfg_space_test | 0 | 0 | **PASS** |
 | 27 | pcie_tl_switch_heavy_traffic_test | 0 | 0 | **PASS** |
 
+### 14.4 SR-IOV 与 TLP Prefix 测试 (Tests 23-37)
+
+| 编号 | 测试类名 | 验证目标 | TLP 数量 |
+|------|---------|---------|---------|
+| 23 | `pcie_tl_sriov_basic_test` | SR-IOV 基础：4PF×16VF Config 枚举 + Memory R/W | 10,000 |
+| 28 | `pcie_tl_pasid_prefix_test` | PASID Prefix 重流量：6000 写 + 4000 读，覆盖 Exe/PMR 组合 | 10,000 |
+| 32 | `pcie_tl_multi_prefix_test` | Multi-Prefix 组合：三前缀 + 双 E2E + 单 IDE + 单 PASID | 10,000 |
+| 33 | `pcie_tl_vf_pasid_test` | VF + PASID 联合：4PF×16VF，每 VF 唯一 PASID 范围 | 10,000 |
+| 35 | `pcie_tl_sriov_stress_test` | Switch + SR-IOV + Prefix：4DSP 并发，5 阶段全场景 | 21,000 |
+| 36 | `pcie_tl_rc_ep_sriov_heavy_test` | RC→EP SR-IOV 重流量：8PF×32VF (264 func)，6 阶段含 VF disable/re-enable | 31,280 |
+| 37 | `pcie_tl_rc_ep_sriov_prefix_heavy_test` | RC→EP SR-IOV + 全 Prefix：8PF×32VF，6 阶段覆盖所有 Prefix 类型及组合 | 20,000 |
+
 > **Warning 说明:**
 > - err_test (181): 预期的错误注入行为产生的 WARNING
 > - stress/mps/4kb/cpl_split (52): v2.0 已修复多 CplD 追踪，RC Driver 通过 cpl_byte_tracker_t 正确处理拆分 Completion，不再产生误报 WARNING。
@@ -1532,6 +1582,235 @@ endfunction
 
 ---
 
+## 16. SR-IOV PF/VF 管理
+
+### 16.1 概述
+
+VIP 实现了完整的 SR-IOV (Single Root I/O Virtualization) Extended Capability 建模，支持 EP 侧的多 PF/VF 管理。所有 SR-IOV 功能默认关闭 (`sriov_enable=0`)，不影响现有测试。
+
+### 16.2 架构
+
+```
+pcie_tl_func_manager
+├── pf_ctx[0..N-1]                    # PF Context 数组
+│   ├── cfg_mgr (cfg_space_manager)   # 独立 4KB 配置空间
+│   ├── bar_base/size[6]              # BAR 地址空间
+│   └── sriov_cap                     # SR-IOV Extended Capability
+│       ├── total_vfs / num_vfs
+│       ├── first_vf_offset / vf_stride
+│       └── vf_bar[6]
+└── vf_ctx[pf][0..M-1]               # VF Context 二维数组
+    ├── cfg_mgr                       # 独立配置空间
+    ├── bdf (自动计算)                # PF_BDF + offset + vf_idx * stride
+    └── enabled                       # 由 VF Enable 控制
+```
+
+Function Manager 位于 EP Agent 内部，通过 BDF 查找表 (`bdf_lut`) 实现 O(1) 的 Function 定位。
+
+### 16.3 BDF 计算规则
+
+```
+PF BDF = {pf_base_bus, pf_base_dev, pf_index[2:0]}
+VF BDF = PF_BDF + first_vf_offset + vf_index × vf_stride
+```
+
+默认: `pf_base_bus=8'h01`, `pf_base_dev=5'h00`, `first_vf_offset=1`, `vf_stride=1`
+
+示例 (2 PF, 每 PF 4 VF):
+- PF0 = 01:00.0 (0x0100), VF0=0x0101, VF1=0x0102, VF2=0x0103, VF3=0x0104
+- PF1 = 01:00.1 (0x0108), VF0=0x0109, VF1=0x010A, VF2=0x010B, VF3=0x010C
+
+### 16.4 SR-IOV Extended Capability 寄存器
+
+`pcie_tl_sriov_cap` 建模了完整的 SR-IOV 寄存器集 (64 字节, Cap ID 0x0010):
+
+| 偏移 | 寄存器 | 字段 |
+|------|--------|------|
+| +0x04 | SR-IOV Capabilities | VF Migration Capable, ARI Capable Hierarchy |
+| +0x08 | SR-IOV Control | VF Enable, VF Migration Enable, ARI Capable, VF MSE |
+| +0x0A | SR-IOV Status | VF Migration Status |
+| +0x0C | InitialVFs | 初始 VF 数 |
+| +0x0E | TotalVFs | 最大 VF 数 |
+| +0x10 | NumVFs | 当前激活 VF 数 |
+| +0x14 | First VF Offset | 第一个 VF 的 RID 偏移 |
+| +0x16 | VF Stride | VF 间 RID 步长 |
+| +0x1A | VF Device ID | VF 的 Device ID |
+| +0x1C | Supported Page Sizes | 支持的页面大小 |
+| +0x20 | System Page Size | 系统页面大小 |
+| +0x24 | VF BAR[0..5] | VF BAR 寄存器 (6 × 4 字节) |
+
+### 16.5 使用示例
+
+```systemverilog
+// 在测试的 configure_test() 中启用 SR-IOV
+virtual function void configure_test();
+    super.configure_test();
+    cfg.sriov_enable     = 1;
+    cfg.num_pfs          = 4;       // 4 个 PF
+    cfg.max_vfs_per_pf   = 16;     // 每 PF 最多 16 VF
+    cfg.default_num_vfs  = 8;      // 启动时激活 8 个 VF
+endfunction
+
+// 运行时动态管理 VF
+task run_phase(uvm_phase phase);
+    // 为 PF0 额外启用到 16 个 VF
+    env.func_mgr_sriov.enable_vfs(0, 16);
+
+    // 禁用 PF1 的所有 VF
+    env.func_mgr_sriov.disable_vfs(1);
+
+    // 查询活跃 Function 数
+    $display("Active functions: %0d", env.func_mgr_sriov.get_active_count());
+endtask
+```
+
+### 16.6 Config 请求路由
+
+当 `sriov_enable=1` 时，EP Driver 的 Config 请求处理流程：
+
+1. 从 Config TLP 提取目标 BDF (`completer_id`)
+2. 在 `func_manager.bdf_lut` 中查找对应 Function Context
+3. 如果找到且 `enabled=1`：读写该 Function 的独立配置空间
+4. 如果未找到或 `enabled=0`：返回 UR (Unsupported Request) Completion
+
+### 16.7 与 Switch 集成
+
+Switch 模式下无需额外配置。VF 的 BDF 落在 DSP 的 bus number 范围内，Switch 现有的 ID-based routing 和 address-based routing 自然覆盖 VF 流量。
+
+---
+
+## 17. TLP Prefix 支持
+
+### 17.1 概述
+
+VIP 支持 PCIe 5.0 定义的全部 TLP Prefix 类型，包括 Local Prefix 和 End-to-End Prefix。所有 Prefix 功能默认关闭 (`prefix_enable=0`)。
+
+### 17.2 支持的 Prefix 类型
+
+| Fmt/Type Byte | 名称 | 类别 | 用途 |
+|---------------|------|------|------|
+| 0x80 | MR-IOV Routing ID | Local | 多根虚拟化的 Virtual Hierarchy ID |
+| 0x8E | Local Vendor-Defined | Local | 厂商自定义 Local Prefix |
+| 0x90 | Extended TPH | E2E | 16-bit Steering Tag 的高 8 位 |
+| 0x91 | PASID | E2E | 20-bit 进程地址空间 ID |
+| 0x92 | IDE | E2E | 数据完整性与加密 (Stream ID, MAC, PCRC) |
+| 0x9E | E2E Vendor-Defined | E2E | 厂商自定义 E2E Prefix |
+
+### 17.3 Prefix DW 位域
+
+**PASID (0x91):**
+- [31:24] Fmt/Type, [22] PMR, [21] Exe, [19:0] PASID (20-bit)
+
+**Extended TPH (0x90):**
+- [31:24] Fmt/Type, [23:16] ST Upper (Steering Tag 高 8 位)
+
+**MR-IOV (0x80):**
+- [31:24] Fmt/Type, [15:8] VHID (Virtual Hierarchy ID)
+
+**IDE (0x92):**
+- [31:24] Fmt/Type, [23] TEE, [21:14] Stream ID, [12] PCRC, [11] MAC, [10] Key Set
+
+### 17.4 Prefix 规则
+
+1. 每个 TLP 最多 4 个 Prefix DW
+2. Local Prefix 最多 1 个，且必须在 E2E Prefix 之前
+3. Prefix 不改变主 TLP Header 的 Fmt 字段
+4. FC 信用核算自动包含 Prefix DW 开销
+
+### 17.5 pcie_tl_prefix 类
+
+```systemverilog
+class pcie_tl_prefix extends uvm_object;
+    rand tlp_prefix_type_e  prefix_type;   // 0x80/0x8E/0x90/0x91/0x92/0x9E
+    rand bit [31:0]         raw_dw;        // 原始 32-bit Prefix DW
+
+    // 类型查询
+    function bit is_local();     // Type[4] == 0
+    function bit is_e2e();       // Type[4] == 1
+
+    // 字段解析 (按 prefix_type 使用)
+    function bit [19:0] get_pasid();
+    function bit        get_pasid_exe();
+    function bit        get_pasid_pmr();
+    function bit [7:0]  get_tph_st_upper();
+    function bit [7:0]  get_mriov_vhid();
+    function bit [7:0]  get_ide_stream_id();
+    function bit        get_ide_tee();
+    function bit        get_ide_mac();
+    function bit        get_ide_pcrc();
+    function bit        get_ide_keyset();
+
+    // 工厂方法
+    static function pcie_tl_prefix create_pasid(bit [19:0] pasid, bit exe=0, bit pmr=0);
+    static function pcie_tl_prefix create_mriov(bit [7:0] vhid);
+    static function pcie_tl_prefix create_ext_tph(bit [7:0] st_upper);
+    static function pcie_tl_prefix create_ide(bit tee, bit [7:0] stream_id, bit pcrc, bit mac, bit keyset);
+endclass
+```
+
+### 17.6 使用示例
+
+```systemverilog
+// 发送携带 PASID Prefix 的 Memory Write
+pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create("wr");
+pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(20'h12345, .exe(1), .pmr(0));
+wr.addr     = 64'h0000_0001_0000_0000;
+wr.length   = 8;
+wr.first_be = 4'hF;
+wr.last_be  = 4'hF;
+wr.is_64bit = 1;
+wr.prefixes.push_back(pasid_pfx);
+wr.has_prefix = 1;
+wr.start(env.rc_agent.sequencer);
+
+// 发送携带多个 Prefix 的 TLP (Local + E2E)
+pcie_tl_mem_wr_seq wr2 = pcie_tl_mem_wr_seq::type_id::create("wr2");
+pcie_tl_prefix mriov = pcie_tl_prefix::create_mriov(8'h05);     // Local, 必须在前
+pcie_tl_prefix pasid = pcie_tl_prefix::create_pasid(20'hABCDE);  // E2E
+pcie_tl_prefix ide   = pcie_tl_prefix::create_ide(1, 8'h0A, 0, 1, 0);  // E2E
+wr2.prefixes.push_back(mriov);   // Local 在前
+wr2.prefixes.push_back(pasid);   // E2E
+wr2.prefixes.push_back(ide);     // E2E
+wr2.has_prefix = 1;
+```
+
+### 17.7 Scoreboard Prefix 检查
+
+当 `prefix_enable=1` 时，Scoreboard 自动执行:
+
+- **格式合法性**: Prefix 数量 ≤ 4，Local ≤ 1，Local 在 E2E 前
+- **E2E 完整性**: E2E Prefix 经过 Switch 后内容不变
+
+### 17.8 Coverage
+
+`prefix_cg` 覆盖率组包含:
+
+- `cp_prefix_count`: Prefix 数量 (0-4)
+- `cp_has_local` / `cp_has_e2e`: 是否含 Local/E2E
+- `cp_prefix_type`: 各 Prefix 类型覆盖
+- `cx_type_count`: 类型 × 数量交叉覆盖
+
+### 17.9 Codec 处理
+
+- **编码**: Prefix DW 在主 TLP Header 之前输出 (big-endian)
+- **解码**: 逐 DW 扫描 `Fmt[2:0]==100b`，识别为 Prefix；第一个非 Prefix DW 为主 Header 起始
+- 主 TLP 的 `fmt` 字段**不受 Prefix 影响**
+
+### 17.10 与 SR-IOV 联合使用
+
+Prefix 与 SR-IOV 是松耦合设计，可独立或联合使用:
+
+```systemverilog
+cfg.sriov_enable  = 1;    // 启用 SR-IOV
+cfg.prefix_enable = 1;    // 启用 Prefix
+cfg.pasid_enable  = 1;    // 启用 PASID
+```
+
+VIP 负责 Prefix 的搬运和校验，不负责 PASID 语义解释（如地址翻译）。
+用户可在 test sequence 中自由组合 VF 和 PASID 值。
+
+---
+
 ## 附录 A: 枚举类型速查
 
 ### TLP Kind
@@ -1572,6 +1851,24 @@ mps_e:  MPS_128, MPS_256, MPS_512, MPS_1024, MPS_2048, MPS_4096
 mrrs_e: MRRS_128, MRRS_256, MRRS_512, MRRS_1024, MRRS_2048, MRRS_4096
 rcb_e:  RCB_64, RCB_128
 ```
+
+### TLP Prefix 类型 (tlp_prefix_type_e)
+
+| 枚举值 | 编码 | 说明 |
+|--------|------|------|
+| `PREFIX_MRIOV` | 8'h80 | Local: MR-IOV Routing ID |
+| `PREFIX_LOCAL_VENDOR` | 8'h8E | Local: Vendor-Defined |
+| `PREFIX_EXT_TPH` | 8'h90 | E2E: Extended TPH |
+| `PREFIX_PASID` | 8'h91 | E2E: PASID |
+| `PREFIX_IDE` | 8'h92 | E2E: IDE |
+| `PREFIX_E2E_VENDOR` | 8'h9E | E2E: Vendor-Defined |
+
+### Extended Capability IDs (ext_cap_id_e) — 新增
+
+| 枚举值 | 编码 | 说明 |
+|--------|------|------|
+| `EXT_CAP_ID_PASID` | 16'h001B | PASID Extended Capability |
+| `EXT_CAP_ID_TPH` | 16'h0017 | TPH Requester Extended Capability |
 
 ---
 
