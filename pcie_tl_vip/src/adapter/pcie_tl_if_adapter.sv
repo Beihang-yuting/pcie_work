@@ -87,17 +87,21 @@ class pcie_tl_if_adapter extends uvm_component;
         total_beats = (bytes.size() + 31) / 32;  // 256-bit bus = 32 bytes
 
         for (int i = 0; i < total_beats; i++) begin
-            vif.tlp_valid <= 1;
-            vif.tlp_sop   <= (i == 0);
-            vif.tlp_eop   <= (i == total_beats - 1);
-            vif.tlp_data  <= pack_beat(bytes, i);
-            vif.tlp_strb  <= calc_strb(bytes, i, total_beats);
+            // 在 negedge 用 blocking 赋值驱动，避免 NBA 与外部
+            // always_ff 之间的 delta-cycle race（back-to-back TLP 被丢）
+            @(negedge vif.clk);
+            vif.tlp_valid = 1;
+            vif.tlp_sop   = (i == 0);
+            vif.tlp_eop   = (i == total_beats - 1);
+            vif.tlp_data  = pack_beat(bytes, i);
+            vif.tlp_strb  = calc_strb(bytes, i, total_beats);
             @(posedge vif.clk);
             while (!vif.tlp_ready) @(posedge vif.clk);
         end
-        vif.tlp_valid <= 0;
-        vif.tlp_sop   <= 0;
-        vif.tlp_eop   <= 0;
+        @(negedge vif.clk);
+        vif.tlp_valid = 0;
+        vif.tlp_sop   = 0;
+        vif.tlp_eop   = 0;
     endtask
 
     //=========================================================================

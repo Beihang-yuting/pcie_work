@@ -11,6 +11,9 @@ class pcie_tl_ep_agent extends pcie_tl_base_agent;
     //--- Function Manager (set by env when sriov_enable=1) ---
     pcie_tl_func_manager  func_manager;
 
+    //--- Config Space Bypass Proxy (默认创建，+BYPASS_CONFIG=1 启用) ---
+    pcie_tl_config_proxy  config_proxy;
+
     function new(string name = "pcie_tl_ep_agent", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -22,12 +25,16 @@ class pcie_tl_ep_agent extends pcie_tl_base_agent;
                 pcie_tl_ep_driver::get_type(), "driver", this);
         end
 
+        // Config proxy（默认创建，通过 +BYPASS_CONFIG=1 启用）
+        config_proxy = pcie_tl_config_proxy::type_id::create("config_proxy", this);
+
         super.build_phase(phase);
 
         if (get_is_active() == UVM_ACTIVE) begin
             $cast(ep_driver, driver);
             if (func_manager != null)
                 ep_driver.func_manager = func_manager;
+            ep_driver.config_proxy = config_proxy;
         end
     endfunction
 
