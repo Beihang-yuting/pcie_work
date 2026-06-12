@@ -229,6 +229,18 @@ class pcie_tl_env extends uvm_env;
         // 8. Completion timeout
         if (rc_agent != null && rc_agent.rc_driver != null)
             rc_agent.rc_driver.cpl_timeout_ns = cfg.cpl_timeout_ns;
+
+        // 9. RC driver unified-memory injection (symmetric to EP driver injection above)
+        if (rc_agent != null && rc_agent.rc_driver != null) begin
+            rc_agent.rc_driver.mps_bytes       = int'(cfg.max_payload_size);
+            rc_agent.rc_driver.rcb_bytes       = int'(cfg.read_completion_boundary);
+            rc_agent.rc_driver.use_unified_mem = cfg.use_unified_mem;
+            if (cfg.use_unified_mem) begin
+                host_mem_api m;
+                if (uvm_config_db#(host_mem_api)::get(this, "", "mem", m))
+                    rc_agent.rc_driver.mem = m;
+            end
+        end
     endfunction
 
     //=========================================================================
@@ -313,12 +325,23 @@ class pcie_tl_env extends uvm_env;
                 // Register in scoreboard for completion matching (before delay/tag reuse)
                 if (scb != null)
                     scb.register_pending(tlp);
-                fork
-                    begin
-                        pcie_tl_tlp req_copy = tlp;
-                        rc_auto_respond(req_copy);
-                    end
-                join_none
+                if (cfg.use_unified_mem && rc_agent != null && rc_agent.rc_driver != null) begin
+                    // Unified-memory path: rc_driver.handle_request reads/writes host_mem
+                    // and sends completions through the normal send_tlp pipeline
+                    fork
+                        begin
+                            pcie_tl_tlp req_copy = tlp;
+                            rc_agent.rc_driver.handle_request(req_copy);
+                        end
+                    join_none
+                end else begin
+                    fork
+                        begin
+                            pcie_tl_tlp req_copy = tlp;
+                            rc_auto_respond(req_copy);
+                        end
+                    join_none
+                end
             end
         end
     endtask
