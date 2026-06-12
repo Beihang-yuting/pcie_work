@@ -43,6 +43,10 @@ class pcie_tl_env extends uvm_env;
     //--- Virtual Sequencer ---
     pcie_tl_virtual_sequencer  v_seqr;
 
+    //--- Unified Memory handles (host_mem_api base; populated from config_db when use_unified_mem=1) ---
+    host_mem_api    host_mem;
+    host_mem_api    dev_mem[16];
+
     function new(string name = "pcie_tl_env", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -161,11 +165,7 @@ class pcie_tl_env extends uvm_env;
                 ep_agent.ep_driver.mps_bytes = int'(cfg.max_payload_size);
                 ep_agent.ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
                 ep_agent.ep_driver.use_unified_mem = cfg.use_unified_mem;
-                if (cfg.use_unified_mem) begin
-                    host_mem_api m;
-                    if (uvm_config_db#(host_mem_api)::get(this, "", "mem", m))
-                        ep_agent.ep_driver.mem = m;
-                end
+                // mem assignment deferred to unified-mem distribution block below
                 if (cfg.sriov_enable && func_mgr_sriov != null) begin
                     ep_agent.func_manager = func_mgr_sriov;
                     ep_agent.ep_driver.func_manager = func_mgr_sriov;
@@ -215,8 +215,10 @@ class pcie_tl_env extends uvm_env;
                 ep_agents[i].adapter   = ep_adapters[i];
                 ep_agents[i].inject_shared_components();
                 if (ep_agents[i].ep_driver != null) begin
-                    ep_agents[i].ep_driver.mps_bytes = int'(cfg.max_payload_size);
-                    ep_agents[i].ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
+                    ep_agents[i].ep_driver.mps_bytes        = int'(cfg.max_payload_size);
+                    ep_agents[i].ep_driver.rcb_bytes        = int'(cfg.read_completion_boundary);
+                    ep_agents[i].ep_driver.use_unified_mem  = cfg.use_unified_mem;
+                    // mem handle assigned in unified-mem distribution block below
                     if (cfg.sriov_enable && func_mgr_sriov != null)
                         ep_agents[i].ep_driver.func_manager = func_mgr_sriov;
                 end
@@ -230,15 +232,48 @@ class pcie_tl_env extends uvm_env;
         if (rc_agent != null && rc_agent.rc_driver != null)
             rc_agent.rc_driver.cpl_timeout_ns = cfg.cpl_timeout_ns;
 
-        // 9. RC driver unified-memory injection (symmetric to EP driver injection above)
+        // 9. RC driver scalar injection
         if (rc_agent != null && rc_agent.rc_driver != null) begin
             rc_agent.rc_driver.mps_bytes       = int'(cfg.max_payload_size);
             rc_agent.rc_driver.rcb_bytes       = int'(cfg.read_completion_boundary);
             rc_agent.rc_driver.use_unified_mem = cfg.use_unified_mem;
-            if (cfg.use_unified_mem) begin
-                host_mem_api m;
-                if (uvm_config_db#(host_mem_api)::get(this, "", "mem", m))
-                    rc_agent.rc_driver.mem = m;
+        end
+
+        // 10. Unified-memory distribution: correct per-agent handles from config_db
+        //     Gated by use_unified_mem (default 0) — OFF path leaves mem=null (unchanged)
+        if (cfg.use_unified_mem) begin
+            int nep;
+            nep = (cfg.switch_enable && cfg.switch_cfg != null)
+                  ? cfg.switch_cfg.num_ds_ports : 1;
+
+            // RC ← host_mem
+            if (uvm_config_db#(host_mem_api)::get(this, "", "host_mem", host_mem)) begin
+                host_mem.init_region(64'h0, 64'hFFFF_FFFF,
+                                     cfg.mem_alloc_mode, cfg.mem_granule);
+                if (cfg.mem_access_mode == PCIE_TL_MEM_PREMAP)
+                    void'(host_mem.alloc(cfg.premap_size, cfg.mem_granule));
+                if (rc_agent != null && rc_agent.rc_driver != null)
+                    rc_agent.rc_driver.mem = host_mem;
+            end
+
+            // EP[i] ← dev_mem[i]
+            for (int i = 0; i < nep; i++) begin
+                host_mem_api dm;
+                if (uvm_config_db#(host_mem_api)::get(this, "",
+                                                       $sformatf("dev_mem_%0d", i), dm)) begin
+                    dm.init_region(64'h0, 64'hFFFF_FFFF,
+                                   cfg.mem_alloc_mode, cfg.mem_granule);
+                    if (cfg.mem_access_mode == PCIE_TL_MEM_PREMAP)
+                        void'(dm.alloc(cfg.premap_size, cfg.mem_granule));
+                    dev_mem[i] = dm;
+                    if (cfg.switch_enable) begin
+                        if (ep_agents[i] != null && ep_agents[i].ep_driver != null)
+                            ep_agents[i].ep_driver.mem = dm;
+                    end else if (i == 0) begin
+                        if (ep_agent != null && ep_agent.ep_driver != null)
+                            ep_agent.ep_driver.mem = dm;
+                    end
+                end
             end
         end
     endfunction
