@@ -160,6 +160,12 @@ class pcie_tl_env extends uvm_env;
             if (ep_agent.ep_driver != null) begin
                 ep_agent.ep_driver.mps_bytes = int'(cfg.max_payload_size);
                 ep_agent.ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
+                ep_agent.ep_driver.use_unified_mem = cfg.use_unified_mem;
+                if (cfg.use_unified_mem) begin
+                    host_mem_api m;
+                    if (uvm_config_db#(host_mem_api)::get(this, "", "mem", m))
+                        ep_agent.ep_driver.mem = m;
+                end
                 if (cfg.sriov_enable && func_mgr_sriov != null) begin
                     ep_agent.func_manager = func_mgr_sriov;
                     ep_agent.ep_driver.func_manager = func_mgr_sriov;
