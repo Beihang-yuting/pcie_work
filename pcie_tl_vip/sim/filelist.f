@@ -33,6 +33,7 @@
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_smoke_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_advanced_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_unified_mem_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_switch_unified_mem_test.sv
 
 // ---- testbench top module ----
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_tb_top.sv

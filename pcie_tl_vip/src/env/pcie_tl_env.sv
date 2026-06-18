@@ -354,29 +354,31 @@ class pcie_tl_env extends uvm_env;
                         void'(rc_agent.rc_driver.handle_completion(cpl));
                 end
             end
-            // RC auto-response for EP-originated non-posted requests (DMA reads)
-            // Symmetric to EP auto-response in tlm_loopback_rc_to_ep
-            else if (tlp.requires_completion()) begin
-                // Register in scoreboard for completion matching (before delay/tag reuse)
+            // RC auto-response for EP-originated requests.
+            // Unified-memory path: handle MRd/MRdLk/Atomic AND posted MWr (the posted-MWr
+            // gap fix: MWr is not requires_completion() so the old branch silently dropped it).
+            // Legacy path: rc_auto_respond for requires_completion() only (unchanged).
+            else if (cfg.use_unified_mem && rc_agent != null && rc_agent.rc_driver != null &&
+                     (tlp.requires_completion() || tlp.kind == TLP_MEM_WR)) begin
+                // Register in scoreboard only for non-posted (completion will be matched)
+                if (scb != null && tlp.requires_completion())
+                    scb.register_pending(tlp);
+                fork
+                    begin
+                        pcie_tl_tlp req_copy = tlp;
+                        rc_agent.rc_driver.handle_request(req_copy);
+                    end
+                join_none
+            end else if (tlp.requires_completion()) begin
+                // Legacy (non-unified) path: rc_auto_respond for EP DMA reads
                 if (scb != null)
                     scb.register_pending(tlp);
-                if (cfg.use_unified_mem && rc_agent != null && rc_agent.rc_driver != null) begin
-                    // Unified-memory path: rc_driver.handle_request reads/writes host_mem
-                    // and sends completions through the normal send_tlp pipeline
-                    fork
-                        begin
-                            pcie_tl_tlp req_copy = tlp;
-                            rc_agent.rc_driver.handle_request(req_copy);
-                        end
-                    join_none
-                end else begin
-                    fork
-                        begin
-                            pcie_tl_tlp req_copy = tlp;
-                            rc_auto_respond(req_copy);
-                        end
-                    join_none
-                end
+                fork
+                    begin
+                        pcie_tl_tlp req_copy = tlp;
+                        rc_auto_respond(req_copy);
+                    end
+                join_none
             end
         end
     endtask
@@ -479,6 +481,17 @@ class pcie_tl_env extends uvm_env;
                     if ($cast(cpl, tlp))
                         void'(rc_agent.rc_driver.handle_completion(cpl));
                 end
+            end
+            // Unified-memory path: route EP->host memory requests to RC responder.
+            // Gated by use_unified_mem (default 0) — legacy/OFF behavior is unchanged.
+            else if (cfg.use_unified_mem && rc_agent != null && rc_agent.rc_driver != null &&
+                     (tlp.kind inside {TLP_MEM_WR, TLP_MEM_RD, TLP_MEM_RD_LK,
+                                       TLP_ATOMIC_FETCHADD, TLP_ATOMIC_SWAP, TLP_ATOMIC_CAS})) begin
+                if (scb != null && tlp.requires_completion())
+                    scb.register_pending(tlp);
+                fork
+                    begin pcie_tl_tlp req_copy = tlp; rc_agent.rc_driver.handle_request(req_copy); end
+                join_none
             end
         end
     endtask
