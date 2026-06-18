@@ -4,12 +4,55 @@ import host_mem_pkg::*;
 `include "uvm_macros.svh"
 
 //=============================================================================
+// Helper sequence: drive a single atomic TLP with caller-supplied payload.
+// Used for Swap and CAS so that operand/compare/swap bytes can be pinned.
+//
+// We use start_item / randomize() with / finish_item so we can overwrite
+// the payload BEFORE finish_item sends the item to the driver.
+//=============================================================================
+class pcie_tl_atomic_fixed_seq extends uvm_sequence #(pcie_tl_tlp);
+    `uvm_object_utils(pcie_tl_atomic_fixed_seq)
+
+    bit [63:0]       addr;
+    bit              is_64bit;
+    tlp_kind_e       op_kind;
+    atomic_op_size_e op_size;
+    byte             payload_bytes[];   // caller sets full payload before start()
+
+    function new(string name = "pcie_tl_atomic_fixed_seq"); super.new(name); endfunction
+
+    task body();
+        pcie_tl_atomic_tlp tlp;
+        tlp = pcie_tl_atomic_tlp::type_id::create("atm_fixed_tlp");
+        start_item(tlp);
+        if (!tlp.randomize() with {
+            tlp.kind     == local::op_kind;
+            tlp.addr     == local::addr;
+            tlp.is_64bit == local::is_64bit;
+            tlp.op_size  == local::op_size;
+            tlp.constraint_mode_sel == CONSTRAINT_LEGAL;
+        })
+            `uvm_fatal("ATOMIC_FIXED_SEQ", "randomize() failed")
+        // Overwrite payload with pinned bytes BEFORE finish_item sends the TLP
+        begin
+            int psz = payload_bytes.size();
+            tlp.payload = new[psz];
+            for (int i = 0; i < psz; i++) tlp.payload[i] = payload_bytes[i];
+        end
+        finish_item(tlp);
+    endtask
+endclass
+
+//=============================================================================
 // Unified-Memory Demo Test
 //
 // Exercises the use_unified_mem=1 path end-to-end:
 //   1. EP->host roundtrip  (EP reads from host_mem; EP writes to host_mem)
 //   2. RC->dev  roundtrip  (RC writes to dev_mem[0]; RC reads from dev_mem[0])
 //   3. Atomic FetchAdd     (EP FetchAdd on host_mem address)
+//   3a. Atomic Swap        (EP Swap on host_mem address; verify new=operand, CplD=old)
+//   3b. Atomic CAS match   (compare matches; verify memory updated to swap value)
+//   3c. Atomic CAS no-match(compare mismatches; verify memory unchanged)
 //   4. Leak checks         (both host_mem and dev_mem[0])
 //=============================================================================
 
@@ -274,6 +317,189 @@ class pcie_tl_unified_mem_test extends pcie_tl_base_test;
             // but at minimum the write-back executed without fatal — check no error)
             `uvm_info("UM_TEST", "Phase 3: FetchAdd completed without error -- OK", UVM_LOW)
             env.host_mem.free(c);
+        end
+
+        //=====================================================================
+        // Phase 3a -- Atomic Swap (EP -> host_mem via rc_driver)
+        //
+        // rc_driver Swap semantics: new_data[i] = payload[i]  (payload = new value)
+        // Returns CplD with old value; memory updated to new value.
+        //
+        // old  = 32'h1111_2222
+        // new  = 32'hAAAA_BBBB  (payload = operand = new value, little-endian)
+        // expected memory after: 32'hAAAA_BBBB
+        //=====================================================================
+        `uvm_info("UM_TEST", "--- Phase 3a: Atomic Swap (EP seq -> host_mem) ---", UVM_LOW)
+        begin
+            bit [63:0] sa;
+            byte init_sa[];
+            byte rd_sa[];
+            pcie_tl_atomic_fixed_seq sw_seq;
+            bit [31:0] old_sa   = 32'h1111_2222;
+            bit [31:0] new_sa   = 32'hAAAA_BBBB;
+            bit [31:0] rb_sa;
+
+            sa = env.host_mem.alloc(4, 8);
+
+            // Pre-seed old value (little-endian)
+            init_sa    = new[4];
+            init_sa[0] = old_sa[7:0];
+            init_sa[1] = old_sa[15:8];
+            init_sa[2] = old_sa[23:16];
+            init_sa[3] = old_sa[31:24];
+            env.host_mem.write_mem(sa, init_sa);
+
+            // Build and drive Swap sequence with pinned operand (= new value)
+            sw_seq              = pcie_tl_atomic_fixed_seq::type_id::create("ep_swap");
+            sw_seq.addr         = sa;
+            sw_seq.is_64bit     = (sa[63:32] != 0);
+            sw_seq.op_kind      = TLP_ATOMIC_SWAP;
+            sw_seq.op_size      = ATOMIC_SIZE_32;
+            // Swap payload = 4 bytes of new value, little-endian
+            sw_seq.payload_bytes    = new[4];
+            sw_seq.payload_bytes[0] = new_sa[7:0];
+            sw_seq.payload_bytes[1] = new_sa[15:8];
+            sw_seq.payload_bytes[2] = new_sa[23:16];
+            sw_seq.payload_bytes[3] = new_sa[31:24];
+            sw_seq.start(env.ep_agent.sequencer);
+            #2us;
+
+            // Verify memory holds new value
+            env.host_mem.read_mem(sa, 4, rd_sa);
+            rb_sa = {rd_sa[3], rd_sa[2], rd_sa[1], rd_sa[0]};
+            if (rb_sa !== new_sa)
+                `uvm_error("3a:SWAP",
+                    $sformatf("FAIL: mem=0x%08h expected new=0x%08h", rb_sa, new_sa))
+            else
+                `uvm_info("3a:SWAP",
+                    $sformatf("OK: mem after Swap=0x%08h (old was 0x%08h)", rb_sa, old_sa),
+                    UVM_LOW)
+            env.host_mem.free(sa);
+        end
+
+        //=====================================================================
+        // Phase 3b -- Atomic CAS match (EP -> host_mem; compare hits)
+        //
+        // rc_driver CAS semantics:
+        //   payload[0..sz-1]    = compare bytes
+        //   payload[sz..2*sz-1] = swap bytes
+        //   new = (old == compare) ? swap : old
+        //
+        // old     = 32'hDEAD_BEEF
+        // compare = 32'hDEAD_BEEF  (matches)
+        // swap    = 32'hCAFE_BABE
+        // expected memory after: 32'hCAFE_BABE
+        //=====================================================================
+        `uvm_info("UM_TEST", "--- Phase 3b: Atomic CAS match (EP seq -> host_mem) ---", UVM_LOW)
+        begin
+            bit [63:0] ca;
+            byte init_ca[];
+            byte rd_ca[];
+            pcie_tl_atomic_fixed_seq cas_m_seq;
+            bit [31:0] old_ca     = 32'hDEAD_BEEF;
+            bit [31:0] compare_ca = 32'hDEAD_BEEF;
+            bit [31:0] swap_ca    = 32'hCAFE_BABE;
+            bit [31:0] rb_ca;
+
+            ca = env.host_mem.alloc(4, 8);
+
+            // Pre-seed old value
+            init_ca    = new[4];
+            init_ca[0] = old_ca[7:0];
+            init_ca[1] = old_ca[15:8];
+            init_ca[2] = old_ca[23:16];
+            init_ca[3] = old_ca[31:24];
+            env.host_mem.write_mem(ca, init_ca);
+
+            // Build CAS sequence: payload = compare[4] || swap[4] (little-endian each)
+            cas_m_seq              = pcie_tl_atomic_fixed_seq::type_id::create("ep_cas_match");
+            cas_m_seq.addr         = ca;
+            cas_m_seq.is_64bit     = (ca[63:32] != 0);
+            cas_m_seq.op_kind      = TLP_ATOMIC_CAS;
+            cas_m_seq.op_size      = ATOMIC_SIZE_32;
+            // 8-byte payload: compare[0..3] then swap[0..3]
+            cas_m_seq.payload_bytes    = new[8];
+            cas_m_seq.payload_bytes[0] = compare_ca[7:0];
+            cas_m_seq.payload_bytes[1] = compare_ca[15:8];
+            cas_m_seq.payload_bytes[2] = compare_ca[23:16];
+            cas_m_seq.payload_bytes[3] = compare_ca[31:24];
+            cas_m_seq.payload_bytes[4] = swap_ca[7:0];
+            cas_m_seq.payload_bytes[5] = swap_ca[15:8];
+            cas_m_seq.payload_bytes[6] = swap_ca[23:16];
+            cas_m_seq.payload_bytes[7] = swap_ca[31:24];
+            cas_m_seq.start(env.ep_agent.sequencer);
+            #2us;
+
+            // Verify memory updated to swap value
+            env.host_mem.read_mem(ca, 4, rd_ca);
+            rb_ca = {rd_ca[3], rd_ca[2], rd_ca[1], rd_ca[0]};
+            if (rb_ca !== swap_ca)
+                `uvm_error("3b:CAS_MATCH",
+                    $sformatf("FAIL: mem=0x%08h expected swap=0x%08h", rb_ca, swap_ca))
+            else
+                `uvm_info("3b:CAS_MATCH",
+                    $sformatf("OK: mem after CAS(match)=0x%08h", rb_ca), UVM_LOW)
+            env.host_mem.free(ca);
+        end
+
+        //=====================================================================
+        // Phase 3c -- Atomic CAS no-match (EP -> host_mem; compare misses)
+        //
+        // old     = 32'h1234_5678
+        // compare = 32'hFFFF_FFFF  (does NOT match old)
+        // swap    = 32'h0000_0000
+        // expected memory after: 32'h1234_5678  (UNCHANGED)
+        //=====================================================================
+        `uvm_info("UM_TEST", "--- Phase 3c: Atomic CAS no-match (EP seq -> host_mem) ---", UVM_LOW)
+        begin
+            bit [63:0] cn;
+            byte init_cn[];
+            byte rd_cn[];
+            pcie_tl_atomic_fixed_seq cas_n_seq;
+            bit [31:0] old_cn     = 32'h1234_5678;
+            bit [31:0] compare_cn = 32'hFFFF_FFFF;  // mismatch
+            bit [31:0] swap_cn    = 32'h0000_0000;
+            bit [31:0] rb_cn;
+
+            cn = env.host_mem.alloc(4, 8);
+
+            // Pre-seed old value
+            init_cn    = new[4];
+            init_cn[0] = old_cn[7:0];
+            init_cn[1] = old_cn[15:8];
+            init_cn[2] = old_cn[23:16];
+            init_cn[3] = old_cn[31:24];
+            env.host_mem.write_mem(cn, init_cn);
+
+            // Build CAS sequence with mismatching compare
+            cas_n_seq              = pcie_tl_atomic_fixed_seq::type_id::create("ep_cas_nomatch");
+            cas_n_seq.addr         = cn;
+            cas_n_seq.is_64bit     = (cn[63:32] != 0);
+            cas_n_seq.op_kind      = TLP_ATOMIC_CAS;
+            cas_n_seq.op_size      = ATOMIC_SIZE_32;
+            // 8-byte payload: compare[0..3] then swap[0..3]
+            cas_n_seq.payload_bytes    = new[8];
+            cas_n_seq.payload_bytes[0] = compare_cn[7:0];
+            cas_n_seq.payload_bytes[1] = compare_cn[15:8];
+            cas_n_seq.payload_bytes[2] = compare_cn[23:16];
+            cas_n_seq.payload_bytes[3] = compare_cn[31:24];
+            cas_n_seq.payload_bytes[4] = swap_cn[7:0];
+            cas_n_seq.payload_bytes[5] = swap_cn[15:8];
+            cas_n_seq.payload_bytes[6] = swap_cn[23:16];
+            cas_n_seq.payload_bytes[7] = swap_cn[31:24];
+            cas_n_seq.start(env.ep_agent.sequencer);
+            #2us;
+
+            // Verify memory is UNCHANGED (no-match => no write-back)
+            env.host_mem.read_mem(cn, 4, rd_cn);
+            rb_cn = {rd_cn[3], rd_cn[2], rd_cn[1], rd_cn[0]};
+            if (rb_cn !== old_cn)
+                `uvm_error("3c:CAS_NOMATCH",
+                    $sformatf("FAIL: mem=0x%08h expected old(unchanged)=0x%08h", rb_cn, old_cn))
+            else
+                `uvm_info("3c:CAS_NOMATCH",
+                    $sformatf("OK: mem unchanged=0x%08h after CAS(no-match)", rb_cn), UVM_LOW)
+            env.host_mem.free(cn);
         end
 
         //=====================================================================
