@@ -35,6 +35,9 @@
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_unified_mem_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_switch_unified_mem_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_multi_root_route_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_cross_root_isolation_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_uneven_ownership_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_per_root_tag_test.sv
 
 // ---- testbench top module ----
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_tb_top.sv
