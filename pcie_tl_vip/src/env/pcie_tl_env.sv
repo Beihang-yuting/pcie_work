@@ -9,23 +9,32 @@ class pcie_tl_env extends uvm_env;
     pcie_tl_env_config     cfg;
 
     //--- Agents ---
-    pcie_tl_rc_agent       rc_agent;
+    pcie_tl_rc_agent       rc_agent;     // alias -> rc_agents[0]
     pcie_tl_ep_agent       ep_agent;
 
-    //--- Shared components ---
+    //--- Per-root agents/managers/scoreboards (multi-USP). [0] aliases above. ---
+    pcie_tl_rc_agent          rc_agents[];
+    pcie_tl_if_adapter        rc_adapters[];
+    pcie_tl_tag_manager       tag_mgrs[];
+    pcie_tl_fc_manager        fc_mgrs[];
+    pcie_tl_ordering_engine   ord_engs[];
+    pcie_tl_cfg_space_manager cfg_mgrs[];
+    pcie_tl_scoreboard        scbs[];
+
+    //--- Shared components (codec/bw_shaper stay single/shared) ---
     pcie_tl_codec              codec;
-    pcie_tl_fc_manager         fc_mgr;
-    pcie_tl_tag_manager        tag_mgr;
-    pcie_tl_ordering_engine    ord_eng;
-    pcie_tl_cfg_space_manager  cfg_mgr;
+    pcie_tl_fc_manager         fc_mgr;    // alias -> fc_mgrs[0]
+    pcie_tl_tag_manager        tag_mgr;   // alias -> tag_mgrs[0]
+    pcie_tl_ordering_engine    ord_eng;   // alias -> ord_engs[0]
+    pcie_tl_cfg_space_manager  cfg_mgr;   // alias -> cfg_mgrs[0]
     pcie_tl_bw_shaper          bw_shaper;
 
     //--- Verification components ---
-    pcie_tl_scoreboard         scb;
+    pcie_tl_scoreboard         scb;       // alias -> scbs[0]
     pcie_tl_coverage_collector cov;
 
     //--- Adapters ---
-    pcie_tl_if_adapter         rc_adapter;
+    pcie_tl_if_adapter         rc_adapter;  // alias -> rc_adapters[0]
     pcie_tl_if_adapter         ep_adapter;
 
     //--- Link Delay Models ---
@@ -55,6 +64,7 @@ class pcie_tl_env extends uvm_env;
     // Build Phase
     //=========================================================================
     function void build_phase(uvm_phase phase);
+        int nu;
         super.build_phase(phase);
 
         // 1. Get or create config
@@ -63,26 +73,55 @@ class pcie_tl_env extends uvm_env;
             `uvm_info("ENV", "No config found in config_db, using defaults", UVM_MEDIUM)
         end
 
-        // 2. Create shared components
+        // 2pre. Switch enabled: init switch_cfg defaults FIRST so num_usp/dsp_owner
+        //       are valid before per-root managers/agents are created below.
+        if (cfg.switch_enable && cfg.switch_cfg != null)
+            cfg.switch_cfg.init_defaults();
+
+        // num_usp (number of roots). Non-switch / null cfg => 1 (alias path).
+        nu = (cfg.switch_enable && cfg.switch_cfg != null) ? cfg.switch_cfg.num_usp : 1;
+
+        // 2. Create shared components (codec/bw_shaper single; managers per-root below)
         codec     = pcie_tl_codec::type_id::create("codec");
-        fc_mgr    = pcie_tl_fc_manager::type_id::create("fc_mgr");
-        tag_mgr   = pcie_tl_tag_manager::type_id::create("tag_mgr");
-        ord_eng   = pcie_tl_ordering_engine::type_id::create("ord_eng");
-        cfg_mgr   = pcie_tl_cfg_space_manager::type_id::create("cfg_mgr");
         bw_shaper = pcie_tl_bw_shaper::type_id::create("bw_shaper", this);
 
-        // 3. Create adapters
-        rc_adapter = pcie_tl_if_adapter::type_id::create("rc_adapter", this);
+        // 2b. Per-root managers + RC adapters (+ aliases assigned after the loop)
+        tag_mgrs    = new[nu];
+        fc_mgrs     = new[nu];
+        ord_engs    = new[nu];
+        cfg_mgrs    = new[nu];
+        rc_adapters = new[nu];
+        for (int r = 0; r < nu; r++) begin
+            tag_mgrs[r] = pcie_tl_tag_manager::type_id::create($sformatf("tag_mgr_%0d", r));
+            fc_mgrs[r]  = pcie_tl_fc_manager::type_id::create($sformatf("fc_mgr_%0d", r));
+            ord_engs[r] = pcie_tl_ordering_engine::type_id::create($sformatf("ord_eng_%0d", r));
+            cfg_mgrs[r] = pcie_tl_cfg_space_manager::type_id::create($sformatf("cfg_mgr_%0d", r));
+            rc_adapters[r] = pcie_tl_if_adapter::type_id::create($sformatf("rc_adapter_%0d", r), this);
+        end
+        // Aliases -> [0] (back-compat for run_phase loopback + apply_config + connect)
+        tag_mgr    = tag_mgrs[0];
+        fc_mgr     = fc_mgrs[0];
+        ord_eng    = ord_engs[0];
+        cfg_mgr    = cfg_mgrs[0];
+        rc_adapter = rc_adapters[0];
+
+        // 3. Create EP adapter (single direct-mode EP path)
         ep_adapter = pcie_tl_if_adapter::type_id::create("ep_adapter", this);
 
         // 3b. Create link delay models
         rc2ep_delay = pcie_tl_link_delay_model::type_id::create("rc2ep_delay", this);
         ep2rc_delay = pcie_tl_link_delay_model::type_id::create("ep2rc_delay", this);
 
-        // 4. Create agents
+        // 4. Create RC agents (one per root). Alias rc_agent -> rc_agents[0].
         if (cfg.rc_agent_enable) begin
-            uvm_config_db#(uvm_active_passive_enum)::set(this, "rc_agent", "is_active", cfg.rc_is_active);
-            rc_agent = pcie_tl_rc_agent::type_id::create("rc_agent", this);
+            rc_agents = new[nu];
+            for (int r = 0; r < nu; r++) begin
+                uvm_config_db#(uvm_active_passive_enum)::set(
+                    this, $sformatf("rc_agent_%0d", r), "is_active", cfg.rc_is_active);
+                rc_agents[r] = pcie_tl_rc_agent::type_id::create(
+                    $sformatf("rc_agent_%0d", r), this);
+            end
+            rc_agent = rc_agents[0];
         end
 
         if (cfg.ep_agent_enable) begin
@@ -104,7 +143,7 @@ class pcie_tl_env extends uvm_env;
         // 4b. Switch mode: create switch + N EP agents
         if (cfg.switch_enable && cfg.switch_cfg != null) begin
             int n = cfg.switch_cfg.num_ds_ports;
-            cfg.switch_cfg.init_defaults();
+            // init_defaults() already called at top of build_phase (2pre).
 
             sw = pcie_tl_switch::type_id::create("sw", this);
             sw.sw_cfg = cfg.switch_cfg;
@@ -121,9 +160,13 @@ class pcie_tl_env extends uvm_env;
             end
         end
 
-        // 5. Create verification components
-        if (cfg.scb_enable)
-            scb = pcie_tl_scoreboard::type_id::create("scb", this);
+        // 5. Create verification components (one scoreboard per root; alias scb -> scbs[0])
+        if (cfg.scb_enable) begin
+            scbs = new[nu];
+            for (int r = 0; r < nu; r++)
+                scbs[r] = pcie_tl_scoreboard::type_id::create($sformatf("scb_%0d", r), this);
+            scb = scbs[0];
+        end
 
         cov = pcie_tl_coverage_collector::type_id::create("cov", this);
 
@@ -140,16 +183,17 @@ class pcie_tl_env extends uvm_env;
     function void connect_phase(uvm_phase phase);
         super.connect_phase(phase);
 
-        // 1. Inject shared components into agents
-        if (rc_agent != null) begin
-            rc_agent.fc_mgr    = fc_mgr;
-            rc_agent.tag_mgr   = tag_mgr;
-            rc_agent.ord_eng   = ord_eng;
-            rc_agent.cfg_mgr   = cfg_mgr;
-            rc_agent.bw_shaper = bw_shaper;
-            rc_agent.codec     = codec;
-            rc_agent.adapter   = rc_adapter;
-            rc_agent.inject_shared_components();
+        // 1. Inject shared components into RC agents (one per root, indexed managers/adapters)
+        foreach (rc_agents[r]) begin
+            if (rc_agents[r] == null) continue;
+            rc_agents[r].fc_mgr    = fc_mgrs[r];
+            rc_agents[r].tag_mgr   = tag_mgrs[r];
+            rc_agents[r].ord_eng   = ord_engs[r];
+            rc_agents[r].cfg_mgr   = cfg_mgrs[r];
+            rc_agents[r].bw_shaper = bw_shaper;
+            rc_agents[r].codec     = codec;
+            rc_agents[r].adapter   = rc_adapters[r];
+            rc_agents[r].inject_shared_components();
         end
 
         if (ep_agent != null) begin
@@ -173,29 +217,35 @@ class pcie_tl_env extends uvm_env;
             end
         end
 
-        // 2. Adapter codec injection
-        rc_adapter.codec  = codec;
-        rc_adapter.fc_mgr = fc_mgr;
+        // 2. Adapter codec injection (per-root RC adapter; single EP adapter)
+        foreach (rc_adapters[r]) begin
+            rc_adapters[r].codec  = codec;
+            rc_adapters[r].fc_mgr = fc_mgrs[r];
+        end
         ep_adapter.codec  = codec;
         ep_adapter.fc_mgr = fc_mgr;
 
-        // 3. Monitor -> Scoreboard
-        if (rc_agent != null && scb != null)
-            rc_agent.monitor.tlp_ap.connect(scb.rc_imp);
+        // 3. RC monitor -> per-root scoreboard + coverage; v_seqr per-root arrays
+        foreach (rc_agents[r]) begin
+            if (rc_agents[r] == null) continue;
+            if (scbs.size() > r && scbs[r] != null)
+                rc_agents[r].monitor.tlp_ap.connect(scbs[r].rc_imp);
+            rc_agents[r].monitor.tlp_ap.connect(cov.analysis_export);
+            v_seqr.rc_seqr_arr.push_back(rc_agents[r].sequencer);
+        end
+        if (rc_agents.size() > 0 && rc_agents[0] != null)
+            v_seqr.rc_seqr = rc_agents[0].sequencer;
+
+        // 4. Direct-mode EP monitor -> scb[0] + coverage (non-switch path)
         if (ep_agent != null && scb != null)
             ep_agent.monitor.tlp_ap.connect(scb.ep_imp);
-
-        // 4. Monitor -> Coverage
-        if (rc_agent != null)
-            rc_agent.monitor.tlp_ap.connect(cov.analysis_export);
-        if (ep_agent != null)
+        if (ep_agent != null) begin
             ep_agent.monitor.tlp_ap.connect(cov.analysis_export);
-
-        // 5. Virtual sequencer bindings
-        if (rc_agent != null)
-            v_seqr.rc_seqr = rc_agent.sequencer;
-        if (ep_agent != null)
+            v_seqr.ep_seqr_arr.push_back(ep_agent.sequencer);
             v_seqr.ep_seqr = ep_agent.sequencer;
+        end
+
+        // 5. Virtual sequencer shared refs (alias managers -> root 0)
         v_seqr.fc_mgr  = fc_mgr;
         v_seqr.tag_mgr = tag_mgr;
 
@@ -203,13 +253,15 @@ class pcie_tl_env extends uvm_env;
         cov.fc_mgr  = fc_mgr;
         cov.tag_mgr = tag_mgr;
 
-        // 7. Switch mode wiring
+        // 7. Switch mode wiring: each EP[i] uses the managers of its owning root,
+        //    and its monitor feeds the owning root's scoreboard.
         if (cfg.switch_enable && sw != null) begin
             for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
+                int owner = cfg.switch_cfg.dsp_owner[i];   // owning USP/root index
                 ep_agents[i].fc_mgr    = sw.dsp[i].fc_mgr;
-                ep_agents[i].tag_mgr   = tag_mgr;
-                ep_agents[i].ord_eng   = ord_eng;
-                ep_agents[i].cfg_mgr   = cfg_mgr;
+                ep_agents[i].tag_mgr   = tag_mgrs[owner];
+                ep_agents[i].ord_eng   = ord_engs[owner];
+                ep_agents[i].cfg_mgr   = cfg_mgrs[owner];
                 ep_agents[i].bw_shaper = bw_shaper;
                 ep_agents[i].codec     = codec;
                 ep_agents[i].adapter   = ep_adapters[i];
@@ -225,18 +277,26 @@ class pcie_tl_env extends uvm_env;
                 ep_adapters[i].mode   = cfg.if_mode;
                 ep_adapters[i].codec  = codec;
                 ep_adapters[i].fc_mgr = sw.dsp[i].fc_mgr;
+
+                // EP[i] monitor -> owning root's scoreboard + coverage; v_seqr ep arr
+                if (scbs.size() > owner && scbs[owner] != null)
+                    ep_agents[i].monitor.tlp_ap.connect(scbs[owner].ep_imp);
+                ep_agents[i].monitor.tlp_ap.connect(cov.analysis_export);
+                v_seqr.ep_seqr_arr.push_back(ep_agents[i].sequencer);
             end
         end
 
-        // 8. Completion timeout
-        if (rc_agent != null && rc_agent.rc_driver != null)
-            rc_agent.rc_driver.cpl_timeout_ns = cfg.cpl_timeout_ns;
+        // 8. Completion timeout (per-root RC drivers)
+        foreach (rc_agents[r])
+            if (rc_agents[r] != null && rc_agents[r].rc_driver != null)
+                rc_agents[r].rc_driver.cpl_timeout_ns = cfg.cpl_timeout_ns;
 
-        // 9. RC driver scalar injection
-        if (rc_agent != null && rc_agent.rc_driver != null) begin
-            rc_agent.rc_driver.mps_bytes       = int'(cfg.max_payload_size);
-            rc_agent.rc_driver.rcb_bytes       = int'(cfg.read_completion_boundary);
-            rc_agent.rc_driver.use_unified_mem = cfg.use_unified_mem;
+        // 9. RC driver scalar injection (per-root)
+        foreach (rc_agents[r]) begin
+            if (rc_agents[r] == null || rc_agents[r].rc_driver == null) continue;
+            rc_agents[r].rc_driver.mps_bytes       = int'(cfg.max_payload_size);
+            rc_agents[r].rc_driver.rcb_bytes       = int'(cfg.read_completion_boundary);
+            rc_agents[r].rc_driver.use_unified_mem = cfg.use_unified_mem;
         end
 
         // 10. Unified-memory distribution: correct per-agent handles from config_db
@@ -579,28 +639,34 @@ class pcie_tl_env extends uvm_env;
     // Apply configuration to all components
     //=========================================================================
     function void apply_config();
-        // FC
-        fc_mgr.fc_enable       = cfg.fc_enable;
-        fc_mgr.infinite_credit = cfg.infinite_credit;
-        fc_mgr.init_credits(cfg.init_ph_credit, cfg.init_pd_credit,
-                            cfg.init_nph_credit, cfg.init_npd_credit,
-                            cfg.init_cplh_credit, cfg.init_cpld_credit);
+        // FC (per-root)
+        foreach (fc_mgrs[r]) begin
+            fc_mgrs[r].fc_enable       = cfg.fc_enable;
+            fc_mgrs[r].infinite_credit = cfg.infinite_credit;
+            fc_mgrs[r].init_credits(cfg.init_ph_credit, cfg.init_pd_credit,
+                                    cfg.init_nph_credit, cfg.init_npd_credit,
+                                    cfg.init_cplh_credit, cfg.init_cpld_credit);
+        end
 
-        // BW Shaper
+        // BW Shaper (shared)
         bw_shaper.shaper_enable = cfg.shaper_enable;
         bw_shaper.avg_rate      = cfg.avg_rate;
         bw_shaper.burst_size    = cfg.burst_size;
 
-        // Tag
-        tag_mgr.extended_tag_enable = cfg.extended_tag_enable;
-        tag_mgr.phantom_func_enable = cfg.phantom_func_enable;
-        tag_mgr.max_outstanding     = cfg.max_outstanding;
-        tag_mgr.init_pool(0, cfg.extended_tag_enable, cfg.phantom_func_enable);
+        // Tag (per-root)
+        foreach (tag_mgrs[r]) begin
+            tag_mgrs[r].extended_tag_enable = cfg.extended_tag_enable;
+            tag_mgrs[r].phantom_func_enable = cfg.phantom_func_enable;
+            tag_mgrs[r].max_outstanding     = cfg.max_outstanding;
+            tag_mgrs[r].init_pool(0, cfg.extended_tag_enable, cfg.phantom_func_enable);
+        end
 
-        // Ordering
-        ord_eng.relaxed_ordering_enable  = cfg.relaxed_ordering_enable;
-        ord_eng.id_based_ordering_enable = cfg.id_based_ordering_enable;
-        ord_eng.bypass_ordering          = cfg.bypass_ordering;
+        // Ordering (per-root)
+        foreach (ord_engs[r]) begin
+            ord_engs[r].relaxed_ordering_enable  = cfg.relaxed_ordering_enable;
+            ord_engs[r].id_based_ordering_enable = cfg.id_based_ordering_enable;
+            ord_engs[r].bypass_ordering          = cfg.bypass_ordering;
+        end
 
         // Coverage
         cov.cov_enable          = cfg.cov_enable;
@@ -612,21 +678,25 @@ class pcie_tl_env extends uvm_env;
         cov.sriov_enable      = cfg.sriov_enable;
         cov.prefix_cov_enable = cfg.prefix_enable;
 
-        // Scoreboard
-        if (scb != null) begin
-            scb.ordering_check_enable   = cfg.ordering_check_enable;
-            scb.completion_check_enable = cfg.completion_check_enable;
-            scb.data_integrity_enable   = cfg.data_integrity_enable;
-            scb.prefix_check_enable = cfg.prefix_enable;
+        // Scoreboard (per-root)
+        foreach (scbs[r]) begin
+            if (scbs[r] == null) continue;
+            scbs[r].ordering_check_enable   = cfg.ordering_check_enable;
+            scbs[r].completion_check_enable = cfg.completion_check_enable;
+            scbs[r].data_integrity_enable   = cfg.data_integrity_enable;
+            scbs[r].prefix_check_enable     = cfg.prefix_enable;
         end
 
-        // Adapter mode
-        rc_adapter.mode = cfg.if_mode;
+        // Adapter mode (per-root RC; single EP)
+        foreach (rc_adapters[r])
+            rc_adapters[r].mode = cfg.if_mode;
         ep_adapter.mode = cfg.if_mode;
 
-        // Config space init
-        cfg_mgr.init_type0_header();
-        cfg_mgr.init_pcie_capability(8'h40, cfg.max_payload_size, cfg.max_read_request_size, cfg.read_completion_boundary);
+        // Config space init (per-root)
+        foreach (cfg_mgrs[r]) begin
+            cfg_mgrs[r].init_type0_header();
+            cfg_mgrs[r].init_pcie_capability(8'h40, cfg.max_payload_size, cfg.max_read_request_size, cfg.read_completion_boundary);
+        end
 
         // Link Delay
         rc2ep_delay.enable          = cfg.link_delay_enable;
