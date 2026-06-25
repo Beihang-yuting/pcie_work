@@ -344,10 +344,15 @@ class pcie_tl_env extends uvm_env;
     task run_phase(uvm_phase phase);
         if (cfg.if_mode == TLM_MODE && rc_agent != null) begin
             if (cfg.switch_enable && sw != null) begin
-                // Switch mode: RC <-> Switch <-> EP[N]
+                // Switch mode: RC[r] <-> Switch <-> EP[N]
                 fork
-                    rc_to_switch_loopback();
-                    switch_to_rc_loopback();
+                    for (int r = 0; r < rc_agents.size(); r++) begin
+                        automatic int rr = r;
+                        fork
+                            rc_to_switch_loopback(rr);
+                            switch_to_rc_loopback(rr);
+                        join_none
+                    end
                     for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
                         automatic int idx = i;
                         fork
@@ -514,43 +519,43 @@ class pcie_tl_env extends uvm_env;
     // Switch Mode Loopback Tasks
     //=========================================================================
 
-    // RC tx -> Switch USP rx
-    protected task rc_to_switch_loopback();
+    // RC[r] tx -> Switch USP[r] rx
+    protected task rc_to_switch_loopback(int r);
         pcie_tl_tlp tlp;
         forever begin
-            rc_adapter.tlm_tx_fifo.get(tlp);
-            if (scb != null && tlp.requires_completion())
-                scb.register_pending(tlp);
+            rc_adapters[r].tlm_tx_fifo.get(tlp);
+            if (scbs[r] != null && tlp.requires_completion())
+                scbs[r].register_pending(tlp);
             replenish_credits(tlp);  // Return RC-side FC credits (TLP delivered to switch)
-            sw.usp.rx_fifo.put(tlp);
+            sw.usps[r].rx_fifo.put(tlp);
         end
     endtask
 
-    // Switch USP tx -> RC rx
-    protected task switch_to_rc_loopback();
+    // Switch USP[r] tx -> RC[r] rx
+    protected task switch_to_rc_loopback(int r);
         pcie_tl_tlp tlp;
         forever begin
-            sw.usp.tx_fifo.get(tlp);
-            rc_adapter.tlm_rx_fifo.put(tlp);
+            sw.usps[r].tx_fifo.get(tlp);
+            rc_adapters[r].tlm_rx_fifo.put(tlp);
             replenish_credits(tlp);
             if (tlp.get_category() == TLP_CAT_COMPLETION) begin
-                if (scb != null)
-                    scb.write_rc(tlp);
-                if (rc_agent.rc_driver != null) begin
+                if (scbs[r] != null)
+                    scbs[r].write_rc(tlp);
+                if (rc_agents[r].rc_driver != null) begin
                     pcie_tl_cpl_tlp cpl;
                     if ($cast(cpl, tlp))
-                        void'(rc_agent.rc_driver.handle_completion(cpl));
+                        void'(rc_agents[r].rc_driver.handle_completion(cpl));
                 end
             end
             // Unified-memory path: route EP->host memory requests to RC responder.
             // Gated by use_unified_mem (default 0) — legacy/OFF behavior is unchanged.
-            else if (cfg.use_unified_mem && rc_agent != null && rc_agent.rc_driver != null &&
+            else if (cfg.use_unified_mem && rc_agents[r] != null && rc_agents[r].rc_driver != null &&
                      (tlp.kind inside {TLP_MEM_WR, TLP_MEM_RD, TLP_MEM_RD_LK,
                                        TLP_ATOMIC_FETCHADD, TLP_ATOMIC_SWAP, TLP_ATOMIC_CAS})) begin
-                if (scb != null && tlp.requires_completion())
-                    scb.register_pending(tlp);
+                if (scbs[r] != null && tlp.requires_completion())
+                    scbs[r].register_pending(tlp);
                 fork
-                    begin pcie_tl_tlp req_copy = tlp; rc_agent.rc_driver.handle_request(req_copy); end
+                    begin pcie_tl_tlp req_copy = tlp; rc_agents[r].rc_driver.handle_request(req_copy); end
                 join_none
             end
         end
