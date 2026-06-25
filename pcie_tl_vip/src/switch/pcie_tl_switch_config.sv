@@ -75,6 +75,10 @@ class pcie_tl_switch_config extends uvm_object;
             usp_sub_bus[0]     = usp_subordinate_bus;
             usp_mem_base_a[0]  = 32'h8000_0000;
             usp_mem_limit_a[0] = ds_mem_limit[num_ds_ports - 1];
+            if (dsp_owner.size() != num_ds_ports) begin
+                dsp_owner = new[num_ds_ports];   // num_usp==1: 全部归 root 0
+                foreach (dsp_owner[i]) dsp_owner[i] = 0;
+            end
             return;
         end
 
