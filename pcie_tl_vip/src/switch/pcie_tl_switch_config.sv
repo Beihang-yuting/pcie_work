@@ -53,7 +53,6 @@ class pcie_tl_switch_config extends uvm_object;
     endfunction
 
     function void init_defaults();
-        int per;
         ds_secondary_bus   = new[num_ds_ports];
         ds_subordinate_bus = new[num_ds_ports];
         ds_mem_base        = new[num_ds_ports];
@@ -79,11 +78,34 @@ class pcie_tl_switch_config extends uvm_object;
             return;
         end
 
-        // 归属: 空 dsp_owner → 均匀连续
+        // 归属: 空 dsp_owner → base+remainder 均分（每根 >=1 当 num_ds_ports >= num_usp）
         if (dsp_owner.size() != num_ds_ports) begin
+            int base = num_ds_ports / num_usp;
+            int rem  = num_ds_ports % num_usp;
+            int idx  = 0;
             dsp_owner = new[num_ds_ports];
-            per = (num_ds_ports + num_usp - 1) / num_usp;  // ceil
-            foreach (dsp_owner[i]) dsp_owner[i] = ((i / per) < num_usp) ? (i / per) : (num_usp - 1);
+            for (int r = 0; r < num_usp; r++) begin
+                int cnt = base + (r < rem ? 1 : 0);   // first `rem` roots get one extra
+                for (int j = 0; j < cnt; j++) begin
+                    if (idx < num_ds_ports) dsp_owner[idx] = r;
+                    idx++;
+                end
+            end
+        end
+
+        // 校验归属 (spec §3.1 step1 / §8): dsp_owner 终态确定后、域循环之前
+        if (num_usp < 1)
+            `uvm_fatal("SWCFG", $sformatf("num_usp=%0d 必须 >=1", num_usp))
+        if (num_ds_ports < num_usp)
+            `uvm_fatal("SWCFG", $sformatf("num_ds_ports=%0d < num_usp=%0d: 无法每根 >=1 DSP", num_ds_ports, num_usp))
+        foreach (dsp_owner[i])
+            if (dsp_owner[i] < 0 || dsp_owner[i] >= num_usp)
+                `uvm_fatal("SWCFG", $sformatf("dsp_owner[%0d]=%0d 越界 [0,%0d)", i, dsp_owner[i], num_usp))
+        begin
+            bit seen[]; seen = new[num_usp];
+            foreach (dsp_owner[i]) seen[dsp_owner[i]] = 1;
+            for (int r = 0; r < num_usp; r++)
+                if (!seen[r]) `uvm_fatal("SWCFG", $sformatf("root %0d 无 DSP（每根需 >=1）", r))
         end
 
         // per-root 域 + 根内 DSP 细分
