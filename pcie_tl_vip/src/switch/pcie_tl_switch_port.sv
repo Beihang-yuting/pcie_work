@@ -7,6 +7,8 @@ class pcie_tl_switch_port extends uvm_component;
 
     switch_port_role_e  role;
     int                 port_id;
+    int owner_usp = 0;   // DSP 专用: 归属的 USP 索引
+    int root_id   = 0;   // USP 专用: 自身根索引
 
     uvm_tlm_fifo #(pcie_tl_tlp) rx_fifo;
     uvm_tlm_fifo #(pcie_tl_tlp) tx_fifo;
