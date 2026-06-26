@@ -13,5 +13,8 @@
 | `pcie_tl_cross_root_isolation_test` | 新 (T7) | 0 | 0 | cross_root_violations=4 全捕获；ISO PASSED |
 | `pcie_tl_uneven_ownership_test` | 新 (T8) | 0 | 0 | cross_root_violations=1；UNEVEN PASSED |
 | `pcie_tl_per_root_tag_test` | 新 (T8) | 0 | 0 | cross_root_violations=0；TAGINDEP PASSED |
+| `pcie_tl_multi_root_stress_test` | 新 (压力) | 1* | 0 | ~20K 混合(重流量+随机+错误注入)；isolation 0 泄漏；xroot=124(≥100 探针)；MRSTRESS PASSED |
 
-**结论：** 8/8 通过。num_usp=1 向后兼容（switch_unified_mem 无回退），4 个多根新 test 各自隔离/路由/tag 独立按 violation 计数断言全 PASS。Plan Task 9 完成。
+> \* `multi_root_stress` 的 1 个 UVM_ERROR 来自**故意注入**的 unexpected_cpl 错误序列（被正确捕获），按约定判据（隔离+不挂）计 PASS，非缺陷。CNST-CIF=0（随机激励符合 PCIe 合法性：single-DW last_be=0 + 4KB 边界 clamp）。
+
+**结论：** 9/9 通过。num_usp=1 向后兼容（switch_unified_mem 无回退），多根 route/隔离/uneven/tag 独立按 violation 计数断言全 PASS；压力测试在 ~20K 重压混错下隔离完好、不挂、检测正常。Plan Task 9 完成 + 压力扩展。
