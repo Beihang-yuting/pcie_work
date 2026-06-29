@@ -45,7 +45,7 @@ class pcie_tl_if_adapter extends uvm_component;
     //=========================================================================
     // Send TLP (dispatch by mode)
     //=========================================================================
-    task send(pcie_tl_tlp tlp);
+    virtual task send(pcie_tl_tlp tlp);
         case (mode)
             TLM_MODE:   tlm_tx_fifo.put(tlp);
             SV_IF_MODE: drive_to_interface(tlp);
@@ -55,7 +55,7 @@ class pcie_tl_if_adapter extends uvm_component;
     //=========================================================================
     // Receive TLP (dispatch by mode)
     //=========================================================================
-    task receive(output pcie_tl_tlp tlp);
+    virtual task receive(output pcie_tl_tlp tlp);
         case (mode)
             TLM_MODE: begin
                 if (tlm_rx_fifo.can_get())
