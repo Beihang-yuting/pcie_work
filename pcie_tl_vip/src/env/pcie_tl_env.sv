@@ -227,11 +227,12 @@ class pcie_tl_env extends uvm_env;
         //     (shared managers); otherwise the single direct-mode / switch-dangling agent.
         if (!cfg.switch_enable && ep_agents.size() > 0) begin
             foreach (ep_agents[i]) begin
+                int mi = (i < fc_mgrs.size()) ? i : 0;  // per-pair managers (RC[i]<->EP[i]); shared [0] if fewer roots
                 if (ep_agents[i] == null) continue;
-                ep_agents[i].fc_mgr    = fc_mgr;
-                ep_agents[i].tag_mgr   = tag_mgr;
-                ep_agents[i].ord_eng   = ord_eng;
-                ep_agents[i].cfg_mgr   = cfg_mgr;
+                ep_agents[i].fc_mgr    = fc_mgrs[mi];
+                ep_agents[i].tag_mgr   = tag_mgrs[mi];
+                ep_agents[i].ord_eng   = ord_engs[mi];
+                ep_agents[i].cfg_mgr   = cfg_mgrs[mi];
                 ep_agents[i].bw_shaper = bw_shaper;
                 ep_agents[i].codec     = codec;
                 ep_agents[i].adapter   = ep_adapters[i];
@@ -298,9 +299,10 @@ class pcie_tl_env extends uvm_env;
         //    otherwise the single direct-mode / switch-dangling agent.
         if (!cfg.switch_enable && ep_agents.size() > 0) begin
             foreach (ep_agents[i]) begin
+                int si = (i < scbs.size()) ? i : 0;   // pair i -> scbs[i] (matches RC[i])
                 if (ep_agents[i] == null) continue;
-                if (scb != null)
-                    ep_agents[i].monitor.tlp_ap.connect(scb.ep_imp);
+                if (scbs.size() > si && scbs[si] != null)
+                    ep_agents[i].monitor.tlp_ap.connect(scbs[si].ep_imp);
                 ep_agents[i].monitor.tlp_ap.connect(cov.analysis_export);
                 v_seqr.ep_seqr_arr.push_back(ep_agents[i].sequencer);
             end
@@ -431,6 +433,20 @@ class pcie_tl_env extends uvm_env;
                         join_none
                     end
                 join_none
+            end else if (!cfg.switch_enable && ep_adapters.size() > 0) begin
+                // Non-switch multi-agent: independent RC[i] <-> EP[i] TLM pairs
+                fork
+                    for (int i = 0; i < ep_adapters.size(); i++) begin
+                        automatic int ii = i;
+                        if (ii < rc_agents.size() && rc_agents[ii] != null &&
+                            ep_agents[ii] != null) begin
+                            fork
+                                tlm_loopback_rc_to_ep_pair(ii);
+                                tlm_loopback_ep_to_rc_pair(ii);
+                            join_none
+                        end
+                    end
+                join_none
             end else if (ep_agent != null) begin
                 // Direct mode: RC <-> EP (existing)
                 fork
@@ -512,6 +528,63 @@ class pcie_tl_env extends uvm_env;
                     begin
                         pcie_tl_tlp req_copy = tlp;
                         rc_auto_respond(req_copy);
+                    end
+                join_none
+            end
+        end
+    endtask
+
+    //=========================================================================
+    // Non-switch pair loopback: RC[i] tx -> EP[i] rx (+ EP auto-response)
+    //=========================================================================
+    protected task tlm_loopback_rc_to_ep_pair(int i);
+        pcie_tl_tlp tlp;
+        int mi = (i < fc_mgrs.size()) ? i : 0;
+        forever begin
+            rc_adapters[i].tlm_tx_fifo.get(tlp);
+            if (scbs.size() > i && scbs[i] != null && tlp.requires_completion())
+                scbs[i].register_pending(tlp);
+            rc2ep_delay.forward(tlp, ep_adapters[i].tlm_rx_fifo);
+            replenish_port_credits(fc_mgrs[mi], tlp);
+            if (cfg.ep_auto_response && ep_agents[i].ep_driver != null) begin
+                fork
+                    begin
+                        pcie_tl_tlp tlp_copy = tlp;
+                        ep_agents[i].ep_driver.handle_request(tlp_copy);
+                    end
+                join_none
+            end
+        end
+    endtask
+
+    //=========================================================================
+    // Non-switch pair loopback: EP[i] tx -> RC[i] rx (completions + unified DMA)
+    //=========================================================================
+    protected task tlm_loopback_ep_to_rc_pair(int i);
+        pcie_tl_tlp tlp;
+        int mi = (i < fc_mgrs.size()) ? i : 0;
+        forever begin
+            ep_adapters[i].tlm_tx_fifo.get(tlp);
+            ep2rc_delay.forward(tlp, rc_adapters[i].tlm_rx_fifo);
+            replenish_port_credits(fc_mgrs[mi], tlp);
+            if (tlp.get_category() == TLP_CAT_COMPLETION) begin
+                if (scbs.size() > i && scbs[i] != null)
+                    scbs[i].write_rc(tlp);
+                if (rc_agents[i].rc_driver != null) begin
+                    pcie_tl_cpl_tlp cpl;
+                    if ($cast(cpl, tlp))
+                        void'(rc_agents[i].rc_driver.handle_completion(cpl));
+                end
+            end
+            // Unified-memory path: route EP->host requests to RC[i] responder.
+            else if (cfg.use_unified_mem && rc_agents[i].rc_driver != null &&
+                     (tlp.requires_completion() || tlp.kind == TLP_MEM_WR)) begin
+                if (scbs.size() > i && scbs[i] != null && tlp.requires_completion())
+                    scbs[i].register_pending(tlp);
+                fork
+                    begin
+                        pcie_tl_tlp req_copy = tlp;
+                        rc_agents[i].rc_driver.handle_request(req_copy);
                     end
                 join_none
             end
