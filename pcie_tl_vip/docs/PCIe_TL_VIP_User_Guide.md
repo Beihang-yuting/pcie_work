@@ -879,7 +879,9 @@ cfg.switch_enable   = 0;
 
 **访问句柄:** `env.rc_agents[i]` / `env.ep_agents[i]`（`env.rc_agent`/`ep_agent` = `[i=0]` 别名）。发激励：`env.rc_agents[i].sequencer`。
 
-> 每链路是独立物理 AXIS，需 DUT（或 loopback）提供 `tready` 才能驱流；无 DUT 的 smoke 仅做 build/connect/elaborate + idle。对接 Xilinx PG213 真实 DUT 的连线约定见 `xilinx_pcie` 集成指南 §2.3（BFM RC-role pin 镜像真实器件，4 通道同名直连，零描述符翻译）。
+**TLM 配对回环（无需 DUT）:** `if_mode = TLM_MODE` 且 `num_rc == num_ep > 1` 时，env 为**每对** `RC[i] ↔ EP[i]` fork 一条独立回环，各用 per-pair manager（`fc_mgrs[i]`/`tag_mgrs[i]`/…）+ 独立 scoreboard（`scbs[i]`）。可在纯 sim 里跑 N 条独立链路、不接 DUT；跨对 tag 重叠不冲突（隔离）。大流量回归见 `pcie_tl_multipair_heavy_test`（`+NUM_PAIRS=1` 直连兼容 / `=2` 双对，每对数千 MWr+MRd）。
+
+> `SV_IF_MODE`（对接真实 DUT）下每链路是独立物理 AXIS，需 DUT（或外部 loopback）提供 `tready` 才能驱流；无 DUT 的 smoke 仅做 build/connect/elaborate + idle。对接 Xilinx PG213 真实 DUT 的连线约定见 `xilinx_pcie` 集成指南 §2.3（BFM RC-role pin 镜像真实器件，4 通道同名直连，零描述符翻译）。
 
 ---
 
