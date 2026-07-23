@@ -97,6 +97,56 @@ class pcie_tl_cfg_space_manager extends uvm_object;
     endfunction
 
     //=========================================================================
+    // Initialize Type 1 Configuration Header (PCI-to-PCI bridge / switch / port)
+    //   与 Type 0 布局不同: 只有 BAR0-1, 之后是 bus number + bridge windows。
+    //=========================================================================
+    function void init_type1_header(
+        bit [15:0] vendor_id       = 16'hABCD,
+        bit [15:0] device_id       = 16'h1234,
+        bit [7:0]  revision_id     = 8'h01,
+        bit [7:0]  primary_bus     = 8'h00,
+        bit [7:0]  secondary_bus   = 8'h01,
+        bit [7:0]  subordinate_bus = 8'h01
+    );
+        foreach (cfg_space[i]) cfg_space[i] = 0;
+
+        // Vendor/Device ID (00h/02h) - RO
+        cfg_space[0] = vendor_id[7:0];   cfg_space[1] = vendor_id[15:8];
+        cfg_space[2] = device_id[7:0];   cfg_space[3] = device_id[15:8];
+        field_attrs[0] = CFG_FIELD_RO; field_attrs[1] = CFG_FIELD_RO;
+        field_attrs[2] = CFG_FIELD_RO; field_attrs[3] = CFG_FIELD_RO;
+
+        // Status (06h) - RW1C
+        field_attrs[6] = CFG_FIELD_RW1C; field_attrs[7] = CFG_FIELD_RW1C;
+
+        // Revision ID (08h) - RO
+        cfg_space[8] = revision_id;      field_attrs[8] = CFG_FIELD_RO;
+
+        // Class Code (09h-0Bh) = 0x060400 (PCI-to-PCI bridge) - RO
+        cfg_space[9]  = 8'h00;  // prog-if
+        cfg_space[10] = 8'h04;  // sub-class = PCI-to-PCI
+        cfg_space[11] = 8'h06;  // base-class = bridge
+        field_attrs[9] = CFG_FIELD_RO; field_attrs[10] = CFG_FIELD_RO; field_attrs[11] = CFG_FIELD_RO;
+
+        // Header Type (0Eh) = 0x01 (bridge) - RO
+        cfg_space[14] = 8'h01;           field_attrs[14] = CFG_FIELD_RO;
+
+        // BAR0/BAR1 (10h-17h) - RW (Type1 仅 2 个 BAR)
+
+        // Primary/Secondary/Subordinate Bus Number (18h/19h/1Ah) - RW
+        cfg_space[24] = primary_bus;
+        cfg_space[25] = secondary_bus;
+        cfg_space[26] = subordinate_bus;
+
+        // IO/Memory/Prefetch windows (1Ch-33h) - RW, 由 OS 分配, 默认 0
+        // Capabilities Pointer (34h) - RO
+        field_attrs[52] = CFG_FIELD_RO;
+
+        // Interrupt Pin (3Dh) - RO ; Bridge Control (3Eh) - RW
+        field_attrs[61] = CFG_FIELD_RO;
+    endfunction
+
+    //=========================================================================
     // Register a standard capability
     //=========================================================================
     function void register_capability(pcie_capability cap);
@@ -106,6 +156,9 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         if (cap_list.size() == 0) begin
             // First capability: update Capabilities Pointer (34h)
             cfg_space[52] = cap.offset;
+            // Set Status register (06h) bit4 = Capabilities List, else OS
+            // ignores the cap pointer and reports no capabilities.
+            cfg_space[6] = cfg_space[6] | 8'h10;
         end else begin
             // Link from previous capability
             prev_next_ptr_addr = cap_list[$].offset + 1;
@@ -319,22 +372,102 @@ class pcie_tl_cfg_space_manager extends uvm_object;
         pcie_cap = pcie_capability::type_id::create("pcie_cap");
         pcie_cap.cap_id = CAP_ID_PCIE;
         pcie_cap.offset = cap_offset;
-        pcie_cap.data = new[10];
-        pcie_cap.data[0] = 8'h02;  // PCIe Caps: version=2, type=EP
+        // 完整 PCIe Express Capability v2 (EP): 结构 0x00..0x33 (52B)。
+        // data[] 从 cap+0x02 起 = 50 字节。驱动按固定偏移读 Device Cap2(0x24),
+        // 结构必须够长否则读到 0。
+        pcie_cap.data = new[50];
+        foreach (pcie_cap.data[i]) pcie_cap.data[i] = 8'h00;
+
+        // +0x02 PCI Express Capabilities: version=2, device type=EP(0)
+        pcie_cap.data[0] = 8'h02;
         pcie_cap.data[1] = 8'h00;
+        // +0x04 Device Capabilities: MPS (data[2..5])
         pcie_cap.data[2] = dev_cap[7:0];
         pcie_cap.data[3] = dev_cap[15:8];
         pcie_cap.data[4] = dev_cap[23:16];
         pcie_cap.data[5] = dev_cap[31:24];
+        // +0x08 Device Control: MPS/MRRS/RCB (data[6..7])
         pcie_cap.data[6] = dev_ctrl[7:0];
         pcie_cap.data[7] = dev_ctrl[15:8];
-        pcie_cap.data[8] = dev_ctrl[23:16];
-        pcie_cap.data[9] = dev_ctrl[31:24];
+        // +0x0A Device Status = 0 (data[8..9])
+        // +0x0C Link Capabilities: max speed=1(2.5GT/s), max width=x1 占位, 让驱动读 link 不崩
+        pcie_cap.data[10] = 8'h11;   // [3:0]=speed=1, [9:4]=width=1
+        // +0x10 Link Control = 0 (data[14..15])
+        // +0x12 Link Status: current speed=1, width=1 (data[16..17])
+        pcie_cap.data[16] = 8'h11;
+        // +0x14..0x23 Slot/Root (EP 不适用, 全 0: data[18..33])
+        // +0x24 Device Capabilities 2: bit5 = ARI Forwarding Supported (data[34..37])
+        pcie_cap.data[34] = 8'h20;
+        // +0x28 Device Control 2 = 0 (data[38..39]); guest 写 bit5=ARI Forwarding Enable
+        // +0x2C Link Cap2 (data[42..45]); +0x30 Link Ctrl2 (46..47); +0x32 Link Stat2 (48..49)
 
         register_capability(pcie_cap);
 
-        // Device Capabilities = RO
-        for (int i = 0; i < 4; i++)
+        // Device Capabilities / Device Cap2 / Link Capabilities = RO
+        for (int i = 0; i < 4; i++) begin
+            field_attrs[cap_offset + 4  + i] = CFG_FIELD_RO;  // Device Cap  (+0x04)
+            field_attrs[cap_offset + 12 + i] = CFG_FIELD_RO;  // Link Cap    (+0x0C)
+            field_attrs[cap_offset + 36 + i] = CFG_FIELD_RO;  // Device Cap2 (+0x24)
+        end
+    endfunction
+
+    //=========================================================================
+    // Initialize Power Management Capability (cap id 0x01)
+    //   放在 PCIe cap(默认 0x40,占 0x40..0x73)之后, 避免重叠。
+    //=========================================================================
+    function void init_pm_capability(bit [7:0] cap_offset = 8'h80);
+        pcie_capability pm_cap;
+        pm_cap = pcie_capability::type_id::create("pm_cap");
+        pm_cap.cap_id = CAP_ID_PM;   // 0x01
+        pm_cap.offset = cap_offset;
+        pm_cap.data = new[4];
+        pm_cap.data[0] = 8'h03;      // PMC: version=3 (PCI PM 1.2)
+        pm_cap.data[1] = 8'h00;
+        pm_cap.data[2] = 8'h00;      // PMCSR: PowerState=D0
+        pm_cap.data[3] = 8'h00;
+        register_capability(pm_cap);
+    endfunction
+
+    //=========================================================================
+    // Initialize MSI-X Capability (cap id 0x11). Placed at 0x90 (after PM @0x80).
+    //   Message Control (cap+2): Table Size = table_size-1; Enable/Mask bits are
+    //   RW (default) so the guest driver / VFIO can enable MSI-X. Table & PBA
+    //   Offset/BIR point into a VF BAR (bir, byte offset). The MSI-X table itself
+    //   lives in that BAR region — for the cosim VF it is served by the PF BAR
+    //   aperture and the EP captures per-vector addr/data writes.
+    //=========================================================================
+    function void init_msix_capability(bit [7:0] cap_offset = 8'h90,
+                                       int table_size = 8, bit [2:0] bir = 3'd0,
+                                       bit [31:0] table_off = 32'h0000_1000,
+                                       bit [31:0] pba_off   = 32'h0000_1800);
+        pcie_capability msix_cap;
+        bit [10:0] ts;
+        bit [31:0] tbl, pba;
+        msix_cap = pcie_capability::type_id::create("msix_cap");
+        msix_cap.cap_id = CAP_ID_MSIX;   // 0x11
+        msix_cap.offset = cap_offset;
+        ts  = table_size - 1;
+        tbl = (table_off & 32'hFFFF_FFF8) | bir;
+        pba = (pba_off   & 32'hFFFF_FFF8) | bir;
+        msix_cap.data = new[10];
+        msix_cap.data[0] = ts[7:0];            // Message Control lo (table size)
+        msix_cap.data[1] = {5'b0, ts[10:8]};   // hi: Enable=0 Mask=0 at init
+        msix_cap.data[2] = tbl[7:0];
+        msix_cap.data[3] = tbl[15:8];
+        msix_cap.data[4] = tbl[23:16];
+        msix_cap.data[5] = tbl[31:24];
+        msix_cap.data[6] = pba[7:0];
+        msix_cap.data[7] = pba[15:8];
+        msix_cap.data[8] = pba[23:16];
+        msix_cap.data[9] = pba[31:24];
+        register_capability(msix_cap);
+        // Message Control low byte (cap+2 = Table Size[7:0]) is RO: it must NOT be
+        // clobbered when the guest writes MSI-X Enable/Function Mask (cap+3). In
+        // config-bypass a stray/bad read that returns 0 would otherwise be written
+        // back, zeroing Table Size -> kernel sees 1 vector (pci_msix_vec_count).
+        field_attrs[cap_offset + 2] = CFG_FIELD_RO;
+        // Table Offset/BIR (cap+4..+7) and PBA (cap+8..+11) are RO.
+        for (int i = 0; i < 8; i++)
             field_attrs[cap_offset + 4 + i] = CFG_FIELD_RO;
     endfunction
 

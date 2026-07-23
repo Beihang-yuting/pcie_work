@@ -19,6 +19,10 @@
 `ifdef PCIE_COSIM_ENABLE
 import "DPI-C" function int bridge_vcs_send_vf_event(input int event_type, input int pf_index, input int num_vfs);
 import "DPI-C" function void bridge_vcs_set_bar_base_bdf(input int bdf, input int bar_idx, input longint unsigned bar_addr);
+import "DPI-C" function int bridge_vcs_send_vf_config(
+    input int pf_index, input int num_vfs,
+    input int first_vf_bdf, input int vf_bdf_stride, input int vf_msix,
+    input longint unsigned bar_base[6], input longint unsigned bar_stride[6]);
 `endif
 
 class pcie_tl_config_proxy extends uvm_component;
@@ -111,8 +115,8 @@ class pcie_tl_config_proxy extends uvm_component;
         // ============================================================
         // MSI Capability stub (offset 0x40, DW16-DW19)
         // ============================================================
-        // DW16 (0x40): {msg_ctrl=0x0080(64bit,1vec), next=0x50, cap_id=0x05}
-        config_space[16] = 32'h0080_50_05;
+        // DW16 (0x40): {msg_ctrl=0x0080(64bit,1vec), next=0x98(MSI-X), cap_id=0x05}
+        config_space[16] = 32'h0080_98_05;
         // DW17 (0x44): MSI msg_addr_lo
         config_space[17] = 32'h0000_0000;
         // DW18 (0x48): MSI msg_addr_hi
@@ -148,6 +152,19 @@ class pcie_tl_config_proxy extends uvm_component;
         config_space[35] = 32'h00_00_00_00;   // bar=0
         config_space[36] = 32'h0000_4000;     // offset = 0x4000
         config_space[37] = 32'h0000_0010;     // length = 16
+
+        // ============================================================
+        // MSI-X Capability (offset 0x98, DW38-DW40) — virtio-pci 每队列需
+        // MSI-X 才用消息中断，否则回退 legacy INTx（电平触发重触发竞争）。
+        // 表/PBA 在 BAR0，pcie_ep_stub 建模其 MMIO。
+        // ============================================================
+        // DW38 (0x98): {msg_ctrl=table_size-1=3(4 entries), next=0x50, cap_id=0x11}
+        //   guest 写 bit15(MSIX_ENABLE) 由 handle_cfg_write 字节合并保存。
+        config_space[38] = 32'h0003_50_11;
+        // DW39 (0x9C): MSI-X Table  BIR=0, offset=0x5000
+        config_space[39] = 32'h0000_5000;
+        // DW40 (0xA0): MSI-X PBA    BIR=0, offset=0x6000
+        config_space[40] = 32'h0000_6000;
     endfunction
 
     //=========================================================================
@@ -266,6 +283,29 @@ class pcie_tl_config_proxy extends uvm_component;
                 `uvm_info("CFG_PROXY", $sformatf("BAR%0d sizing read BDF=0x%04h: mask=0x%08h",
                     bar_idx, target_bdf, data), UVM_MEDIUM)
                 return 1;
+            end else if (ctx.bar_size[bar_idx] != 0) begin
+                // Implemented BAR (not sizing): return the assigned base. The
+                // base is stored in ctx.bar_base on write, not in cfg_space, so
+                // the normal cfg_read would return 0 -> kernel "error updating".
+                data = ctx.bar_base[bar_idx][31:0];
+                return 1;
+            end
+        end
+
+        // VF BAR sizing read (SR-IOV cap VF BAR, dw 0x89..0x8E)
+        if (dw_addr >= 'h89 && dw_addr <= 'h8E) begin
+            int vbar = dw_addr - 'h89;
+            if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar]) begin
+                if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar] != 0)
+                    data = ~(func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar][31:0] - 1);
+                else
+                    data = 32'h0;
+                return 1;
+            end else if (func_mgr.sriov_caps[ctx.pf_index].vf_bar_size[vbar] != 0) begin
+                // Implemented VF BAR (not sizing): return assigned aperture base
+                // (stored in sriov_cap.vf_bar on write, not cfg_space).
+                data = func_mgr.sriov_caps[ctx.pf_index].vf_bar[vbar];
+                return 1;
             end
         end
 
@@ -309,24 +349,72 @@ class pcie_tl_config_proxy extends uvm_component;
             return 1;
         end
 
-        // SR-IOV NumVFs write detection
-        // SR-IOV cap at offset 0x200; NumVFs is at cap+0x10 = byte offset 0x210
-        // DW index = 0x210 / 4 = 0x84 = 132
+        // SR-IOV NumVFs write (@0x210, dw 0x84): 只记录数量, 不立即实例化(符合 spec)
         if (dw_addr == 'h84 && !ctx.is_vf) begin
-            bit [15:0] new_num_vfs = data[15:0];
-            `uvm_info("CFG_PROXY", $sformatf("SR-IOV NumVFs write BDF=0x%04h num_vfs=%0d",
-                target_bdf, new_num_vfs), UVM_MEDIUM)
-            if (new_num_vfs > 0) begin
-                func_mgr.enable_vfs(ctx.pf_index, int'(new_num_vfs));
+            func_mgr.sriov_caps[ctx.pf_index].num_vfs = data[15:0];
+            `uvm_info("CFG_PROXY", $sformatf("SR-IOV NumVFs record BDF=0x%04h num_vfs=%0d",
+                target_bdf, data[15:0]), UVM_MEDIUM)
+        end
+
+        // SR-IOV Control (@0x208, dw 0x82) bit0 = VF Enable: 置 1 才实例化 VF。
+        // spec 时序: guest 先写 NumVFs 再写 VF Enable, VF 在 Enable=1 后出现。
+        if (dw_addr == 'h82 && !ctx.is_vf) begin
+            bit vf_en = data[0];
+            int n     = int'(func_mgr.sriov_caps[ctx.pf_index].num_vfs);
+            if (vf_en && n > 0) begin
+                func_mgr.enable_vfs(ctx.pf_index, n);
+                `uvm_info("CFG_PROXY", $sformatf("SR-IOV VF Enable BDF=0x%04h num_vfs=%0d",
+                    target_bdf, n), UVM_MEDIUM)
                 `ifdef PCIE_COSIM_ENABLE
-                void'(bridge_vcs_send_vf_event(1, ctx.pf_index, int'(new_num_vfs)));
+                void'(bridge_vcs_send_vf_event(1, ctx.pf_index, n));
+                // VCS/DUT is authoritative for the VF layout — push per-VF BDF /
+                // BAR base / MSI-X to QEMU so it can build matching VF PCIDevices.
+                begin
+                    pcie_tl_sriov_cap sc = func_mgr.sriov_caps[ctx.pf_index];
+                    longint unsigned bbase[6];
+                    longint unsigned bstride[6];
+                    int fvf  = int'(sc.get_vf_rid(0));
+                    int vstr = (n > 1) ? (int'(sc.get_vf_rid(1)) - fvf) : int'(sc.vf_stride);
+                    for (int b = 0; b < 6; b++) begin
+                        bbase[b]   = longint'(sc.vf_bar[b]);
+                        bstride[b] = sc.vf_bar_size[b];
+                    end
+                    // Also record each VF's BAR base in the VCS-side BDF map (for MMIO decode).
+                    for (int vf = 0; vf < n; vf++)
+                        for (int b = 0; b < 6; b++)
+                            if (sc.vf_bar[b] != 0)
+                                bridge_vcs_set_bar_base_bdf(int'(sc.get_vf_rid(vf)), b,
+                                    longint'(sc.vf_bar[b]) + vf * sc.vf_bar_size[b]);
+                    void'(bridge_vcs_send_vf_config(ctx.pf_index, n, fvf, vstr,
+                        func_mgr.vf_msix_vectors, bbase, bstride));
+                end
                 `endif
-            end else begin
+            end else if (!vf_en && func_mgr.sriov_caps[ctx.pf_index].vf_enable) begin
+                // Only fire the disable path on a real enabled->disabled edge.
+                // The kernel writes SR-IOV Control (VFE=0) many times during
+                // enumeration (ARIHierarchy/MSE setup); firing VF_EVENT/VF_CONFIG
+                // on those spurious writes desyncs the ctrl_fd stream.
                 func_mgr.disable_vfs(ctx.pf_index);
                 `ifdef PCIE_COSIM_ENABLE
                 void'(bridge_vcs_send_vf_event(0, ctx.pf_index, 0));
+                begin
+                    longint unsigned z6[6] = '{default:0};
+                    void'(bridge_vcs_send_vf_config(ctx.pf_index, 0, 0, 0, 0, z6, z6));
+                end
                 `endif
             end
+        end
+
+        // VF BAR sizing (SR-IOV cap VF BAR @0x224-0x23B, dw 0x89..0x8E)
+        if (dw_addr >= 'h89 && dw_addr <= 'h8E && !ctx.is_vf) begin
+            int vbar = dw_addr - 'h89;
+            if (data == 32'hFFFF_FFFF)
+                func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar] = 1;
+            else begin
+                func_mgr.sriov_caps[ctx.pf_index].vf_bar_sizing[vbar] = 0;
+                func_mgr.sriov_caps[ctx.pf_index].vf_bar[vbar]        = data;
+            end
+            return 1;
         end
 
         // Normal config write via func_mgr
