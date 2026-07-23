@@ -43,6 +43,12 @@ class pcie_tl_func_context extends uvm_object;
     //--- Bus Master Enable (mirrors Command register bit 2) ---
     bit        bus_master_en;
 
+    //--- Bridge (Type 1) support: 该 context 是桥则置位 + bus number 窗口 ---
+    bit        is_bridge;
+    bit [7:0]  primary_bus;
+    bit [7:0]  secondary_bus;
+    bit [7:0]  subordinate_bus;
+
     function new(string name = "pcie_tl_func_context");
         super.new(name);
         vf_index      = -1;
@@ -64,8 +70,18 @@ class pcie_tl_func_context extends uvm_object;
     );
         cfg_mgr = pcie_tl_cfg_space_manager::type_id::create(
             $sformatf("cfg_mgr_bdf%04h", bdf));
-        cfg_mgr.init_type0_header(vendor_id, device_id, .header_type(header_type));
-        cfg_mgr.init_pcie_capability();
+        if (is_bridge) begin
+            // Type 1 (bridge/switch): bus number 窗口由本 context 携带
+            cfg_mgr.init_type1_header(vendor_id, device_id,
+                .primary_bus(primary_bus), .secondary_bus(secondary_bus),
+                .subordinate_bus(subordinate_bus));
+            cfg_mgr.init_pcie_capability();  // TODO: bridge 的 PCIe cap port type(switch/root)细化
+        end else begin
+            // Type 0 (endpoint)
+            cfg_mgr.init_type0_header(vendor_id, device_id, .header_type(header_type));
+            cfg_mgr.init_pcie_capability();
+            cfg_mgr.init_pm_capability();
+        end
     endfunction
 
 endclass
@@ -83,7 +99,7 @@ class pcie_tl_func_manager extends uvm_object;
     bit [15:0] vendor_id      = 16'hABCD;
     bit [15:0] device_id      = 16'h1234;
     bit [15:0] vf_device_id   = 16'h1235;
-    bit [7:0]  pf_base_bus    = 8'h01;
+    bit [7:0]  pf_base_bus    = 8'h01;   // cosim EP behind pcie-root-port -> 01:00.0
     bit [4:0]  pf_base_dev    = 5'h00;
 
     //--- MSI-X and tag configuration (CoSim topology export) ---
@@ -137,20 +153,109 @@ class pcie_tl_func_manager extends uvm_object;
             pf_ctx[pf].bdf      = pf_bdf;
             pf_ctx[pf].is_vf    = 0;
             pf_ctx[pf].enabled  = 1;
-            pf_ctx[pf].init_cfg_space(vendor_id, device_id);
+            // PF BAR0 size — without a sizeable PF BAR the guest sees no MMIO
+            // window and SR-IOV init bails (no VF resources). 64KB memory BAR.
+            pf_ctx[pf].bar_size[0] = 64 * 1024;
+            // 多 PF 时置 Header Type multi-function bit(0x80), 否则 OS 只扫 function 0
+            pf_ctx[pf].init_cfg_space(vendor_id, device_id,
+                                      .header_type((num_pfs > 1) ? 8'h80 : 8'h00));
 
             // Register PF in BDF lookup table
             bdf_lut[pf_bdf] = pf_ctx[pf];
 
-            // Create SR-IOV extended capability for this PF
+            // ARI Extended Capability (0x000E): extended cap 链头必须在 0x100,
+            // 否则 OS 从 0x100 见空即止, SR-IOV(@0x200)永远发现不了。
+            // 且多 VF(function# > 7)路由依赖 ARI。先注册 ARI(占 0x100)再链到 SR-IOV。
+            begin
+                pcie_ext_capability ari_cap = pcie_ext_capability::type_id::create(
+                    $sformatf("ari_cap_%0d", pf));
+                ari_cap.cap_id  = EXT_CAP_ID_ARI;
+                ari_cap.cap_ver = 4'h1;
+                ari_cap.data    = new[4];   // ARI Cap Reg(2B) + ARI Control(2B)
+                foreach (ari_cap.data[i]) ari_cap.data[i] = 8'h00;
+                // ARI Next Function Number (ARI Cap Reg bits[15:8] = data[1]): chain
+                // the PFs so OS ARI enumeration visits PF0->PF1->..->PF(N-1). Without
+                // this (next=0) ARI enumeration stops at function 0 and only PF0 is
+                // discovered even though the multi-function header bit is set.
+                ari_cap.data[1] = (pf + 1 < num_pfs) ? 8'(pf + 1) : 8'h00;
+                pf_ctx[pf].cfg_mgr.register_ext_capability(ari_cap);  // 首个 -> 0x100
+            end
+
+            // Create SR-IOV extended capability for this PF (链在 ARI 之后 @0x200)
             sriov_caps[pf] = pcie_tl_sriov_cap::type_id::create(
                 $sformatf("sriov_cap_%0d", pf));
-            sriov_caps[pf].pf_bdf       = pf_bdf;
-            sriov_caps[pf].total_vfs    = max_vfs_per_pf;
-            sriov_caps[pf].vf_device_id = vf_dev_id;
-            sriov_caps[pf].offset       = 12'h200;
+            sriov_caps[pf].pf_bdf                = pf_bdf;
+            sriov_caps[pf].total_vfs             = max_vfs_per_pf;
+            sriov_caps[pf].initial_vfs           = max_vfs_per_pf;  // InitialVFs = TotalVFs
+            sriov_caps[pf].vf_device_id          = vf_dev_id;
+            sriov_caps[pf].ari_capable_hierarchy = 1;               // 多 VF 需 ARI capable
+            sriov_caps[pf].vf_bar_size[0]        = 64 * 1024;       // VF BAR0 默认 64KB(sizing 用)
+            sriov_caps[pf].offset                = 12'h200;
+            // VF Offset/Stride: interleave VFs of all PFs so VF RIDs never collide
+            // with PF functions (0..num_pfs-1) or with other PFs' VFs. With
+            // offset=stride=num_pfs: PF_k VF_i RID = pf_bdf + num_pfs + i*num_pfs,
+            // e.g. 4 PF -> VFs start at PF0=0x0104,PF1=0x0105,.. striding by 4.
+            // Default 1/1 only works for a single PF (VF0 would land on PF1's BDF).
+            sriov_caps[pf].first_vf_offset       = num_pfs;
+            sriov_caps[pf].vf_stride             = num_pfs;
             sriov_caps[pf].build_data();
             pf_ctx[pf].cfg_mgr.register_ext_capability(sriov_caps[pf]);
+
+            // AER Extended Capability (0x0001) stub —— 链在 SR-IOV 之后 @0x300。
+            // 错误寄存器全 0(无错误), 让 OS AER 服务能遍历到而不崩。
+            begin
+                pcie_ext_capability aer_cap = pcie_ext_capability::type_id::create(
+                    $sformatf("aer_cap_%0d", pf));
+                aer_cap.cap_id  = EXT_CAP_ID_AER;
+                aer_cap.cap_ver = 4'h2;
+                aer_cap.offset  = 12'h300;
+                aer_cap.data    = new[64];
+                foreach (aer_cap.data[i]) aer_cap.data[i] = 8'h00;
+                pf_ctx[pf].cfg_mgr.register_ext_capability(aer_cap);
+            end
+
+            // ATS Extended Capability (0x000F) —— 链在 AER 之后 @0x350。DUT 广告
+            // ATS，guest lspci 可见 + 可 pci_enable_ats。config-bypass 下 DUT(此
+            // func_mgr)拥有该 cap；数据面 ATS TLP 由 VIP 桥接(§6.12/6.13)。
+            begin
+                pcie_ext_capability ats_cap = pcie_ext_capability::type_id::create(
+                    $sformatf("ats_cap_%0d", pf));
+                ats_cap.cap_id  = EXT_CAP_ID_ATS;
+                ats_cap.cap_ver = 4'h1;
+                ats_cap.offset  = 12'h350;
+                ats_cap.data    = new[4];   // ATS Cap Reg(2B) + ATS Control Reg(2B)
+                foreach (ats_cap.data[i]) ats_cap.data[i] = 8'h00;
+                ats_cap.data[0] = 8'h20;    // Cap Reg bit5 = Page Aligned Request
+                // Control Reg (data[2..3]) = 0: Enable=0 (guest sets), STU=0
+                pf_ctx[pf].cfg_mgr.register_ext_capability(ats_cap);
+            end
+
+            // PRI Extended Capability (0x0013) —— 链在 ATS 之后 @0x360。
+            begin
+                pcie_ext_capability pri_cap = pcie_ext_capability::type_id::create(
+                    $sformatf("pri_cap_%0d", pf));
+                pri_cap.cap_id  = EXT_CAP_ID_PRI;
+                pri_cap.cap_ver = 4'h1;
+                pri_cap.offset  = 12'h360;
+                pri_cap.data    = new[12];  // Ctrl/Status(4B) + OutstandingCap(4B) + Alloc(4B)
+                foreach (pri_cap.data[i]) pri_cap.data[i] = 8'h00;
+                pri_cap.data[4] = 8'h20;    // Outstanding Page Request Capacity = 32
+                pf_ctx[pf].cfg_mgr.register_ext_capability(pri_cap);
+            end
+
+            // PASID Extended Capability (0x001B) —— 链在 PRI 之后 @0x370。
+            begin
+                pcie_ext_capability pasid_cap = pcie_ext_capability::type_id::create(
+                    $sformatf("pasid_cap_%0d", pf));
+                pasid_cap.cap_id  = EXT_CAP_ID_PASID;
+                pasid_cap.cap_ver = 4'h1;
+                pasid_cap.offset  = 12'h370;
+                pasid_cap.data    = new[4];  // PASID Cap Reg(2B) + PASID Control Reg(2B)
+                foreach (pasid_cap.data[i]) pasid_cap.data[i] = 8'h00;
+                pasid_cap.data[1] = 8'h10;   // Cap Reg [12:8] Max PASID Width = 16
+                // Control Reg (data[2..3]) = 0: PASID Enable(bit0)=0 (guest sets)
+                pf_ctx[pf].cfg_mgr.register_ext_capability(pasid_cap);
+            end
 
             // Pre-allocate VF contexts (disabled by default)
             vf_ctx[pf] = new[max_vfs_per_pf];
@@ -165,9 +270,73 @@ class pcie_tl_func_manager extends uvm_object;
                 vf_ctx[pf][vf].is_vf    = 1;
                 vf_ctx[pf][vf].enabled  = 0;
                 vf_ctx[pf][vf].init_cfg_space(vendor_id, vf_dev_id);
+                // MSI-X capability so guest/VFIO can enable per-VF interrupts.
+                // Table @ VF BAR0 + 0x1000, PBA @ +0x1800 (doorbell regs are at
+                // 0x00..0x0C, no overlap). EP captures the table addr/data writes.
+                vf_ctx[pf][vf].cfg_mgr.init_msix_capability(
+                    .table_size(vf_msix_vectors > 0 ? vf_msix_vectors : 8));
+                // ATS/PRI Extended Capabilities on the VF — real SR-IOV VFs
+                // advertise ATS so the guest can enable per-VF address
+                // translation. The VF ext-cap chain is empty, so ATS is the head
+                // @0x100 and PRI @0x110. Data-plane ATS TLPs bridge via §6.12-6.14.
+                begin
+                    pcie_ext_capability vats;
+                    pcie_ext_capability vpri;
+                    pcie_ext_capability vpasid;
+                    vats = pcie_ext_capability::type_id::create(
+                        $sformatf("vf_ats_%0d_%0d", pf, vf));
+                    vats.cap_id  = EXT_CAP_ID_ATS;
+                    vats.cap_ver = 4'h1;
+                    vats.offset  = 12'h100;
+                    vats.data    = new[4];
+                    foreach (vats.data[i]) vats.data[i] = 8'h00;
+                    vats.data[0] = 8'h20;   // Cap Reg bit5 = Page Aligned Request
+                    vf_ctx[pf][vf].cfg_mgr.register_ext_capability(vats);
+
+                    vpri = pcie_ext_capability::type_id::create(
+                        $sformatf("vf_pri_%0d_%0d", pf, vf));
+                    vpri.cap_id  = EXT_CAP_ID_PRI;
+                    vpri.cap_ver = 4'h1;
+                    vpri.offset  = 12'h110;
+                    vpri.data    = new[12];
+                    foreach (vpri.data[i]) vpri.data[i] = 8'h00;
+                    vpri.data[4] = 8'h20;   // Outstanding Page Request Capacity = 32
+                    vf_ctx[pf][vf].cfg_mgr.register_ext_capability(vpri);
+
+                    vpasid = pcie_ext_capability::type_id::create(
+                        $sformatf("vf_pasid_%0d_%0d", pf, vf));
+                    vpasid.cap_id  = EXT_CAP_ID_PASID;
+                    vpasid.cap_ver = 4'h1;
+                    vpasid.offset  = 12'h120;
+                    vpasid.data    = new[4];
+                    foreach (vpasid.data[i]) vpasid.data[i] = 8'h00;
+                    vpasid.data[1] = 8'h10;  // Cap Reg [12:8] Max PASID Width = 16
+                    vf_ctx[pf][vf].cfg_mgr.register_ext_capability(vpasid);
+                end
                 // VFs start disabled — not yet added to bdf_lut
             end
         end
+    endfunction
+
+    //=========================================================================
+    // build_topology — cosim entry that also selects a topology form.
+    // topo (0=ep_direct, 1=switch, 2=multi_layer) is reserved for the Type1
+    // multi-topology roadmap; only flat ep_direct is modeled today, so it is
+    // accepted for API compatibility and delegated to build().
+    //=========================================================================
+    function void build_topology(
+        int        topo      = 0,
+        int        n_pfs     = 1,
+        int        max_vfs   = 256,
+        bit [15:0] v_id      = 16'hABCD,
+        bit [15:0] d_id      = 16'h1234,
+        bit [15:0] vf_dev_id = 16'h1235
+    );
+        if (topo != 0)
+            `uvm_info("FUNC_MGR", $sformatf(
+                "build_topology: topo=%0d not yet modeled, using flat ep_direct", topo),
+                UVM_LOW)
+        build(n_pfs, max_vfs, v_id, d_id, vf_dev_id);
     endfunction
 
     //=========================================================================
