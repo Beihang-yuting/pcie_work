@@ -277,11 +277,27 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     protected function void store_write_data(pcie_tl_tlp tlp);
         pcie_tl_mem_tlp mem;
+        int total_dw;
         if (tlp.kind != TLP_MEM_WR) return;
         if (!$cast(mem, tlp)) return;
 
+        total_dw = (mem.length == 0) ? 1024 : mem.length;
         foreach (tlp.payload[i]) begin
-            written_data[mem.addr + i] = tlp.payload[i];
+            int dw_index;
+            int byte_index;
+            bit [3:0] byte_enable;
+
+            dw_index = i / 4;
+            byte_index = i % 4;
+            if (dw_index == 0)
+                byte_enable = mem.first_be;
+            else if (dw_index == (total_dw - 1))
+                byte_enable = mem.last_be;
+            else
+                byte_enable = 4'hF;
+
+            if (byte_enable[byte_index])
+                written_data[mem.addr + i] = tlp.payload[i];
         end
     endfunction
 
