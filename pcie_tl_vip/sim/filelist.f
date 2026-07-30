@@ -25,6 +25,10 @@
 // ---- pcie_tl interface (must precede package) ----
 /home/ryan/pcie_work/pcie_tl_vip/src/pcie_tl_if.sv
 
+// ---- standalone helpers imported by pcie_tl_pkg ----
+/home/ryan/pcie_work/pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv
+/home/ryan/pcie_work/pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
+
 // ---- pcie_tl top package (includes all src via relative `include) ----
 /home/ryan/pcie_work/pcie_tl_vip/src/pcie_tl_pkg.sv
 
@@ -42,6 +46,7 @@
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_multipair_heavy_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_rw_readback_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_switch_rw_readback_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_dpu_501x_profile_test.sv
 
 // ---- testbench top module ----
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_tb_top.sv
