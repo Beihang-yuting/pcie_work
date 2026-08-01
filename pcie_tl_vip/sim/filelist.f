@@ -44,6 +44,7 @@
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_per_root_tag_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_multi_root_stress_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_multipair_heavy_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_tag_bit_runtime_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_rw_readback_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_switch_rw_readback_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_dpu_501x_profile_test.sv
