@@ -391,6 +391,10 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
         cpl.bcm          = 0;
         cpl.byte_count   = 0;
         cpl.lower_addr   = 0;
+        case (req.kind)
+            TLP_CFG_RD0, TLP_CFG_RD1: cpl.byte_count = 12'd4;
+            default: begin end
+        endcase
         return cpl;
     endfunction
 
