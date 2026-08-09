@@ -58,6 +58,56 @@ class pcie_tl_config_proxy extends uvm_component;
     endfunction
 
     //=========================================================================
+    // VF lifecycle notification seam. Local regressions override this helper
+    // without importing DPI; CoSim keeps the existing VF_EVENT/VF_CONFIG and
+    // per-VF BAR-base behavior in the default implementation.
+    //=========================================================================
+    virtual function void notify_vf_lifecycle(
+        bit enable,
+        int pf_index,
+        int num_vfs,
+        pcie_tl_sriov_cap sc
+    );
+        `ifdef PCIE_COSIM_ENABLE
+        if (enable) begin
+            longint unsigned bbase[6];
+            longint unsigned bstride[6];
+            int fvf;
+            int vstr;
+
+            if (num_vfs <= 0)
+                return;
+            void'(bridge_vcs_send_vf_event(1, pf_index, num_vfs));
+            // VCS/DUT is authoritative for the VF layout — push per-VF BDF /
+            // BAR base / MSI-X to QEMU so it can build matching VF PCIDevices.
+            fvf  = int'(sc.get_vf_rid(0));
+            vstr = (num_vfs > 1) ?
+                (int'(sc.get_vf_rid(1)) - fvf) : int'(sc.vf_stride);
+            for (int b = 0; b < 6; b++) begin
+                bbase[b]   = longint'(sc.vf_bar[b]);
+                bstride[b] = sc.vf_bar_size[b];
+            end
+            // Also record each VF's BAR base in the VCS-side BDF map (for
+            // MMIO decode).
+            for (int vf = 0; vf < num_vfs; vf++)
+                for (int b = 0; b < 6; b++)
+                    if (sc.vf_bar[b] != 0)
+                        bridge_vcs_set_bar_base_bdf(
+                            int'(sc.get_vf_rid(vf)), b,
+                            longint'(sc.vf_bar[b]) + vf * sc.vf_bar_size[b]);
+            void'(bridge_vcs_send_vf_config(
+                pf_index, num_vfs, fvf, vstr, func_mgr.vf_msix_vectors,
+                bbase, bstride));
+        end else begin
+            longint unsigned z6[6] = '{default:0};
+            void'(bridge_vcs_send_vf_event(0, pf_index, 0));
+            void'(bridge_vcs_send_vf_config(
+                pf_index, 0, 0, 0, 0, z6, z6));
+        end
+        `endif
+    endfunction
+
+    //=========================================================================
     // Shared 64-bit BAR-pair helpers. The descriptor-specific callers resolve
     // a configuration DWORD to its low owner, then use these routines for PF
     // and SR-IOV VF BAR reads/writes alike.
@@ -418,6 +468,12 @@ class pcie_tl_config_proxy extends uvm_component;
             write_be[safe_byte_off + b] = 1'b1;
         end
 
+        if (dw_addr == 1 && (write_be[0] || write_be[1])) begin
+            func_mgr.update_command_state(ctx, merged_dw[1], merged_dw[2]);
+            func_mgr.cfg_write(target_bdf, 12'h004, merged_dw, write_be);
+            return 1;
+        end
+
         sriov_cap_valid = 0;
         sriov_dw_base   = 0;
         if (!ctx.is_vf && ctx.pf_index >= 0 &&
@@ -442,8 +498,10 @@ class pcie_tl_config_proxy extends uvm_component;
                             bar_idx, target_bdf, owner), UVM_MEDIUM)
                     end else if (write_be != 0) begin
                         bit [31:0] canonical_dw;
+                        bit [63:0] old_base;
 
                         ctx.bar_sizing[owner] = 0;
+                        old_base = ctx.bar_base[owner];
                         ctx.bar_base[owner] = paired_bar_program_base(
                             ctx.bar_base[owner], merged_dw, bar_idx != owner,
                             ctx.bar_size[owner]);
@@ -454,6 +512,9 @@ class pcie_tl_config_proxy extends uvm_component;
                         // packed partial writes and direct configuration reads.
                         func_mgr.cfg_write(target_bdf, dw_addr[11:0] << 2,
                                            canonical_dw, 4'hf);
+                        if (old_base != ctx.bar_base[owner])
+                            func_mgr.mark_routing_dirty($sformatf(
+                                "BDF %04h BAR%0d base", target_bdf, owner));
                         `uvm_info("CFG_PROXY", $sformatf(
                             "BAR%0d assigned BDF=0x%04h owner=BAR%0d base=0x%016h",
                             bar_idx, target_bdf, owner, ctx.bar_base[owner]), UVM_MEDIUM)
@@ -476,58 +537,77 @@ class pcie_tl_config_proxy extends uvm_component;
         // requested count without instantiating VFs until VF Enable is set.
         if (sriov_cap_valid && dw_addr == sriov_dw_base + 4 &&
             (write_be[0] || write_be[1])) begin
-            func_mgr.sriov_caps[ctx.pf_index].num_vfs = merged_dw[15:0];
+            pcie_tl_sriov_cap sc = func_mgr.sriov_caps[ctx.pf_index];
+            bit [15:0] old_num_vfs = sc.num_vfs;
+            bit [15:0] requested_num_vfs = merged_dw[15:0];
+            int accepted_num_vfs;
+
+            if (sc.vf_enable && old_num_vfs != requested_num_vfs) begin
+                // NumVFs is programmed before VFE. Keep the capability image,
+                // enabled contexts, and LUT atomic if software attempts to
+                // change the count while VFs are active.
+                `uvm_info("CFG_PROXY", $sformatf(
+                    "ignored active SR-IOV NumVFs write BDF=0x%04h requested=%0d active=%0d",
+                    target_bdf, requested_num_vfs, old_num_vfs), UVM_LOW)
+                return 1;
+            end else begin
+                accepted_num_vfs = func_mgr.accepted_vf_count(
+                    ctx.pf_index, int'(requested_num_vfs));
+                merged_dw[15:0] = accepted_num_vfs;
+                write_be[1:0] = 2'b11;
+                sc.num_vfs = accepted_num_vfs;
+                sc.build_data();
+                if (old_num_vfs != sc.num_vfs)
+                    func_mgr.mark_routing_dirty($sformatf(
+                        "BDF %04h SR-IOV NumVFs", target_bdf));
+            end
             `uvm_info("CFG_PROXY", $sformatf("SR-IOV NumVFs record BDF=0x%04h num_vfs=%0d",
-                target_bdf, merged_dw[15:0]), UVM_MEDIUM)
+                target_bdf, sc.num_vfs), UVM_MEDIUM)
         end
 
         // SR-IOV Control is capability base plus two DWORDs. The guest writes
         // NumVFs first; VFs appear only after Control.VF Enable becomes one.
-        if (sriov_cap_valid && dw_addr == sriov_dw_base + 2) begin
+        if (sriov_cap_valid && dw_addr == sriov_dw_base + 2 &&
+            (write_be[0] || write_be[1])) begin
+            pcie_tl_sriov_cap sc = func_mgr.sriov_caps[ctx.pf_index];
+            bit old_vf_en = sc.vf_enable;
+            bit old_vf_mse = sc.vf_mse;
             bit vf_en = merged_dw[0];
-            int n     = int'(func_mgr.sriov_caps[ctx.pf_index].num_vfs);
-            if (vf_en && !func_mgr.sriov_caps[ctx.pf_index].vf_enable && n > 0) begin
-                func_mgr.enable_vfs(ctx.pf_index, n);
+            bit vf_mse = merged_dw[4];
+            bit notify_pending;
+            bit notify_enable;
+            int notify_num_vfs;
+
+            sc.vf_migration_enable = merged_dw[1];
+            sc.ari_capable = merged_dw[3];
+            sc.vf_mse = vf_mse;
+            if (vf_en && !old_vf_en) begin
+                func_mgr.enable_vfs(ctx.pf_index, int'(sc.num_vfs), 0);
+                notify_num_vfs = int'(sc.num_vfs);
                 `uvm_info("CFG_PROXY", $sformatf("SR-IOV VF Enable BDF=0x%04h num_vfs=%0d",
-                    target_bdf, n), UVM_MEDIUM)
-                `ifdef PCIE_COSIM_ENABLE
-                void'(bridge_vcs_send_vf_event(1, ctx.pf_index, n));
-                // VCS/DUT is authoritative for the VF layout — push per-VF BDF /
-                // BAR base / MSI-X to QEMU so it can build matching VF PCIDevices.
-                begin
-                    pcie_tl_sriov_cap sc = func_mgr.sriov_caps[ctx.pf_index];
-                    longint unsigned bbase[6];
-                    longint unsigned bstride[6];
-                    int fvf  = int'(sc.get_vf_rid(0));
-                    int vstr = (n > 1) ? (int'(sc.get_vf_rid(1)) - fvf) : int'(sc.vf_stride);
-                    for (int b = 0; b < 6; b++) begin
-                        bbase[b]   = longint'(sc.vf_bar[b]);
-                        bstride[b] = sc.vf_bar_size[b];
-                    end
-                    // Also record each VF's BAR base in the VCS-side BDF map (for MMIO decode).
-                    for (int vf = 0; vf < n; vf++)
-                        for (int b = 0; b < 6; b++)
-                            if (sc.vf_bar[b] != 0)
-                                bridge_vcs_set_bar_base_bdf(int'(sc.get_vf_rid(vf)), b,
-                                    longint'(sc.vf_bar[b]) + vf * sc.vf_bar_size[b]);
-                    void'(bridge_vcs_send_vf_config(ctx.pf_index, n, fvf, vstr,
-                        func_mgr.vf_msix_vectors, bbase, bstride));
-                end
-                `endif
-            end else if (!vf_en && func_mgr.sriov_caps[ctx.pf_index].vf_enable) begin
+                    target_bdf, notify_num_vfs), UVM_MEDIUM)
+                notify_pending = notify_num_vfs > 0;
+                notify_enable = 1;
+            end else if (!vf_en && old_vf_en) begin
                 // Only fire the disable path on a real enabled->disabled edge.
                 // The kernel writes SR-IOV Control (VFE=0) many times during
                 // enumeration (ARIHierarchy/MSE setup); firing VF_EVENT/VF_CONFIG
                 // on those spurious writes desyncs the ctrl_fd stream.
-                func_mgr.disable_vfs(ctx.pf_index);
-                `ifdef PCIE_COSIM_ENABLE
-                void'(bridge_vcs_send_vf_event(0, ctx.pf_index, 0));
-                begin
-                    longint unsigned z6[6] = '{default:0};
-                    void'(bridge_vcs_send_vf_config(ctx.pf_index, 0, 0, 0, 0, z6, z6));
-                end
-                `endif
-            end
+                func_mgr.disable_vfs(ctx.pf_index, 0);
+                notify_num_vfs = int'(sc.num_vfs);
+                // An n=0 VFE edge is maintained internally but never emitted
+                // an enable event, so it must not emit an unmatched disable.
+                notify_pending = notify_num_vfs > 0;
+                notify_enable = 0;
+            end else
+                sc.vf_enable = vf_en;
+            if (old_vf_mse != vf_mse)
+                func_mgr.mark_routing_dirty($sformatf(
+                    "BDF %04h SR-IOV VF MSE", target_bdf));
+            sc.build_data();
+            if (notify_pending)
+                notify_vf_lifecycle(notify_enable, ctx.pf_index,
+                                    notify_num_vfs, sc);
         end
 
         // SR-IOV VF BAR descriptors have the same paired BAR semantics as
@@ -544,8 +624,10 @@ class pcie_tl_config_proxy extends uvm_component;
                         sc.vf_bar_sizing[owner] = 1;
                     end else if (write_be != 0) begin
                         bit [31:0] canonical_dw;
+                        bit [63:0] old_base;
 
                         sc.vf_bar_sizing[owner] = 0;
+                        old_base = sc.vf_bar[owner];
                         sc.vf_bar[owner] = paired_bar_program_base(
                             sc.vf_bar[owner], merged_dw, vbar != owner,
                             sc.vf_bar_size[owner]);
@@ -554,6 +636,10 @@ class pcie_tl_config_proxy extends uvm_component;
                             sc.vf_bar_flags[owner], vbar != owner, 1'b0);
                         func_mgr.cfg_write(target_bdf, dw_addr[11:0] << 2,
                                            canonical_dw, 4'hf);
+                        if (old_base != sc.vf_bar[owner])
+                            func_mgr.mark_routing_dirty($sformatf(
+                                "BDF %04h SR-IOV VF BAR%0d base",
+                                target_bdf, owner));
                         `ifdef PCIE_COSIM_ENABLE
                         bridge_vcs_set_bar_base_bdf(int'(target_bdf), owner,
                                                     sc.vf_bar[owner]);

@@ -63,6 +63,7 @@ class pcie_tl_func_context extends uvm_object;
     bit        bar_sizing[6];
 
     //--- Bus Master Enable (mirrors Command register bit 2) ---
+    bit        memory_space_en;
     bit        bus_master_en;
 
     //--- Bridge (Type 1) support: 该 context 是桥则置位 + bus number 窗口 ---
@@ -76,6 +77,7 @@ class pcie_tl_func_context extends uvm_object;
         vf_index      = -1;
         is_vf         = 0;
         enabled       = 1;
+        memory_space_en = 0;
         bus_master_en = 0;
         foreach (bar_base[i])   bar_base[i]   = 64'h0;
         foreach (bar_size[i])   bar_size[i]   = 64'h0;
@@ -174,6 +176,11 @@ class pcie_tl_func_manager extends uvm_object;
     bit [4:0]  pf_base_dev    = 5'h00;
     bit        runtime_bdf_bound = 0;
     bit [15:0] runtime_pf_base_bdf = 16'h0000;
+    bit        topology_built = 0;
+
+    // Consumers cache BAR routing derived from the configuration state and
+    // rebuild only when this generation changes.
+    longint unsigned config_generation = 0;
 
     //--- MSI-X and tag configuration (CoSim topology export) ---
     int        pf_msix_vectors = 64;
@@ -191,6 +198,29 @@ class pcie_tl_func_manager extends uvm_object;
 
     function new(string name = "pcie_tl_func_manager");
         super.new(name);
+    endfunction
+
+    function void mark_routing_dirty(string reason);
+        config_generation++;
+        `uvm_info("FUNC_MGR", $sformatf(
+            "routing generation=%0d reason=%s", config_generation, reason),
+            UVM_HIGH)
+    endfunction
+
+    function void update_command_state(
+        pcie_tl_func_context ctx,
+        bit memory_space_en,
+        bit bus_master_en
+    );
+        bit old_mse;
+        old_mse = ctx.memory_space_en;
+        ctx.memory_space_en = memory_space_en;
+        ctx.bus_master_en = bus_master_en;
+        foreach (ctx.bar_enable[bar])
+            ctx.bar_enable[bar] = memory_space_en &&
+                ctx.bar_owner[bar] == bar && ctx.bar_size[bar] != 0;
+        if (old_mse != memory_space_en)
+            mark_routing_dirty($sformatf("BDF %04h Command.MSE", ctx.bdf));
     endfunction
 
     // Keep topology export and all generated function config images bound to
@@ -215,6 +245,12 @@ class pcie_tl_func_manager extends uvm_object;
         bit [15:0] d_id      = 16'h1234,
         bit [15:0] vf_dev_id = 16'h1235
     );
+        longint unsigned next_generation;
+
+        next_generation = topology_built ? config_generation + 1 : 1;
+        runtime_bdf_bound   = 0;
+        runtime_pf_base_bdf = 16'h0000;
+        bdf_lut.delete();
         num_pfs        = n_pfs;
         max_vfs_per_pf = max_vfs;
         vendor_id      = v_id;
@@ -526,6 +562,8 @@ class pcie_tl_func_manager extends uvm_object;
                 // VFs start disabled — not yet added to bdf_lut
             end
         end
+        config_generation = next_generation;
+        topology_built = 1;
     endfunction
 
     //=========================================================================
@@ -580,13 +618,13 @@ class pcie_tl_func_manager extends uvm_object;
         if (runtime_bdf_bound)
             return runtime_pf_base_bdf == new_base;
 
-        // Remove all old keys before changing any context. Enabled VFs are
-        // uncommon during boot, but handling them keeps a rekey atomic.
+        // Remove every old candidate key before changing any context. Disabled
+        // VF keys should be absent, but purging them also heals stale or
+        // wrong-object entries without compromising an overlapping rekey.
         for (int pf = 0; pf < num_pfs; pf++) begin
             bdf_lut.delete(pf_ctx[pf].bdf);
             for (int vf = 0; vf < max_vfs_per_pf; vf++)
-                if (vf_ctx[pf][vf].enabled)
-                    bdf_lut.delete(vf_ctx[pf][vf].bdf);
+                bdf_lut.delete(vf_ctx[pf][vf].bdf);
         end
 
         pf_base_bus = new_base[15:8];
@@ -615,55 +653,131 @@ class pcie_tl_func_manager extends uvm_object;
         `uvm_info("FUNC_MGR", $sformatf(
             "runtime BDF bind: PF base 0x%04h -> 0x%04h (%0d PFs)",
             old_base, new_base, num_pfs), UVM_LOW)
+        mark_routing_dirty($sformatf(
+            "runtime PF base BDF %04h", new_base));
         return 1;
+    endfunction
+
+    function int accepted_vf_count(int pf_idx, int requested_num_vfs);
+        int limit;
+        int accepted;
+
+        if (pf_idx < 0 || pf_idx >= num_pfs ||
+            pf_idx >= sriov_caps.size() || sriov_caps[pf_idx] == null) begin
+            `uvm_error("FUNC_MGR", $sformatf(
+                "accepted_vf_count: pf_idx %0d out of range", pf_idx))
+            return 0;
+        end
+        limit = max_vfs_per_pf;
+        if (int'(sriov_caps[pf_idx].total_vfs) < limit)
+            limit = int'(sriov_caps[pf_idx].total_vfs);
+        if (limit < 0)
+            limit = 0;
+        accepted = requested_num_vfs;
+        if (accepted < 0)
+            accepted = 0;
+        if (accepted > limit)
+            accepted = limit;
+        if (accepted != requested_num_vfs)
+            `uvm_warning("FUNC_MGR", $sformatf(
+                "VF count %0d exceeds supported range 0..%0d, clamping to %0d",
+                requested_num_vfs, limit, accepted))
+        return accepted;
+    endfunction
+
+    // Keep the mutable SR-IOV object and the already-registered PF config
+    // image coherent. Narrow writes preserve Status and Function Dependency
+    // Link, which share these DWORDs with Control and NumVFs respectively.
+    function void sync_sriov_cfg_image(int pf_idx);
+        bit [15:0] control;
+        pcie_tl_sriov_cap sc;
+
+        if (pf_idx < 0 || pf_idx >= num_pfs ||
+            pf_idx >= pf_ctx.size() || pf_idx >= sriov_caps.size() ||
+            pf_ctx[pf_idx] == null || sriov_caps[pf_idx] == null)
+            return;
+        sc = sriov_caps[pf_idx];
+        sc.build_data();
+        control = 16'h0000;
+        control[0] = sc.vf_enable;
+        control[1] = sc.vf_migration_enable;
+        control[3] = sc.ari_capable;
+        control[4] = sc.vf_mse;
+        pf_ctx[pf_idx].cfg_mgr.write_internal(
+            sc.offset + 12'h008, {16'h0000, control}, 4'b0011);
+        pf_ctx[pf_idx].cfg_mgr.write_internal(
+            sc.offset + 12'h010, {16'h0000, sc.num_vfs}, 4'b0011);
     endfunction
 
     //=========================================================================
     // Enable a set of VFs for a given PF; add them to the BDF lookup table
     //=========================================================================
-    function void enable_vfs(int pf_idx, int num_vfs);
+    function void enable_vfs(
+        int pf_idx,
+        int num_vfs,
+        bit sync_cfg_image = 1
+    );
+        bit routing_changed;
+
         if (pf_idx < 0 || pf_idx >= num_pfs) begin
             `uvm_error("FUNC_MGR", $sformatf("enable_vfs: pf_idx %0d out of range", pf_idx))
             return;
         end
-        if (num_vfs > max_vfs_per_pf) begin
-            `uvm_warning("FUNC_MGR", $sformatf(
-                "enable_vfs: num_vfs %0d exceeds max_vfs_per_pf %0d, clamping",
-                num_vfs, max_vfs_per_pf))
-            num_vfs = max_vfs_per_pf;
-        end
+        num_vfs = accepted_vf_count(pf_idx, num_vfs);
 
-        // Update SR-IOV capability num_vfs and vf_enable fields
+        routing_changed = !sriov_caps[pf_idx].vf_enable;
         sriov_caps[pf_idx].num_vfs   = num_vfs;
         sriov_caps[pf_idx].vf_enable = 1;
-        sriov_caps[pf_idx].build_data();
+        for (int vf = 0; vf < max_vfs_per_pf; vf++) begin
+            bit should_enable;
+            bit lut_exists;
+            bit lut_matches;
 
-        for (int vf = 0; vf < num_vfs; vf++) begin
-            vf_ctx[pf_idx][vf].enabled = 1;
-            bdf_lut[vf_ctx[pf_idx][vf].bdf] = vf_ctx[pf_idx][vf];
+            should_enable = vf < num_vfs;
+            lut_exists = bdf_lut.exists(vf_ctx[pf_idx][vf].bdf);
+            lut_matches = lut_exists &&
+                bdf_lut[vf_ctx[pf_idx][vf].bdf] == vf_ctx[pf_idx][vf];
+            if (vf_ctx[pf_idx][vf].enabled != should_enable ||
+                (should_enable && !lut_matches) ||
+                (!should_enable && lut_exists))
+                routing_changed = 1;
+            vf_ctx[pf_idx][vf].enabled = should_enable;
+            if (should_enable)
+                bdf_lut[vf_ctx[pf_idx][vf].bdf] = vf_ctx[pf_idx][vf];
+            else
+                bdf_lut.delete(vf_ctx[pf_idx][vf].bdf);
         end
+        if (sync_cfg_image)
+            sync_sriov_cfg_image(pf_idx);
+        if (routing_changed)
+            mark_routing_dirty($sformatf("PF%0d VF enable/LUT", pf_idx));
     endfunction
 
     //=========================================================================
     // Disable all VFs for a given PF; remove them from the BDF lookup table
     //=========================================================================
-    function void disable_vfs(int pf_idx);
+    function void disable_vfs(int pf_idx, bit sync_cfg_image = 1);
+        bit routing_changed;
+
         if (pf_idx < 0 || pf_idx >= num_pfs) begin
             `uvm_error("FUNC_MGR", $sformatf("disable_vfs: pf_idx %0d out of range", pf_idx))
             return;
         end
 
+        routing_changed = sriov_caps[pf_idx].vf_enable;
         for (int vf = 0; vf < max_vfs_per_pf; vf++) begin
-            if (vf_ctx[pf_idx][vf].enabled) begin
-                bdf_lut.delete(vf_ctx[pf_idx][vf].bdf);
-                vf_ctx[pf_idx][vf].enabled = 0;
-            end
+            if (vf_ctx[pf_idx][vf].enabled ||
+                bdf_lut.exists(vf_ctx[pf_idx][vf].bdf))
+                routing_changed = 1;
+            bdf_lut.delete(vf_ctx[pf_idx][vf].bdf);
+            vf_ctx[pf_idx][vf].enabled = 0;
         end
 
-        // Update SR-IOV capability
-        sriov_caps[pf_idx].num_vfs   = 0;
         sriov_caps[pf_idx].vf_enable = 0;
-        sriov_caps[pf_idx].build_data();
+        if (sync_cfg_image)
+            sync_sriov_cfg_image(pf_idx);
+        if (routing_changed)
+            mark_routing_dirty($sformatf("PF%0d VF disable/LUT", pf_idx));
     endfunction
 
     //=========================================================================
