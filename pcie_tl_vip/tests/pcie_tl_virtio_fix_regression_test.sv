@@ -28,6 +28,21 @@ class pcie_tl_fix_probe_ep_driver extends pcie_tl_ep_driver;
     function pcie_tl_cpl_tlp make_completion(pcie_tl_tlp req);
         return generate_completion(req, CPL_STATUS_SC);
     endfunction
+
+    task run_phase(uvm_phase phase);
+    endtask
+endclass
+
+class pcie_tl_fix_probe_rc_driver extends pcie_tl_rc_driver;
+    `uvm_component_utils(pcie_tl_fix_probe_rc_driver)
+
+    function new(string name = "pcie_tl_fix_probe_rc_driver",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+    endtask
 endclass
 
 class pcie_tl_order_probe_ep_driver extends pcie_tl_ep_driver;
@@ -55,7 +70,7 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_virtio_fix_unit_test)
 
     pcie_tl_fix_probe_ep_driver probe;
-    pcie_tl_rc_driver           rc_probe;
+    pcie_tl_fix_probe_rc_driver rc_probe;
     pcie_tl_scoreboard          scb_probe;
 
     function new(string name = "pcie_tl_virtio_fix_unit_test",
@@ -66,7 +81,7 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
         probe = pcie_tl_fix_probe_ep_driver::type_id::create("probe", this);
-        rc_probe = pcie_tl_rc_driver::type_id::create("rc_probe", this);
+        rc_probe = pcie_tl_fix_probe_rc_driver::type_id::create("rc_probe", this);
         scb_probe = pcie_tl_scoreboard::type_id::create("scb_probe", this);
     endfunction
 
