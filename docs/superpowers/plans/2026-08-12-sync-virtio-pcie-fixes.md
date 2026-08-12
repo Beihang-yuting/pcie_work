@@ -442,4 +442,3 @@ git ls-remote --heads origin refs/heads/main
 
 Expected: local HEAD, fetched `origin/main`, and `ls-remote` all report the same
 object ID.
-

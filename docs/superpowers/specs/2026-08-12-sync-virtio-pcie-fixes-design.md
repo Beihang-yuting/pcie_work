@@ -1,7 +1,7 @@
 # Synchronize Virtio PCIe TL Fixes Design
 
 > Date: 2026-08-12
-> Status: Approved in conversation; pending written-spec review
+> Status: Approved
 
 ## Goal
 
@@ -126,4 +126,3 @@ helpers, scripts, Git configuration, or proxy configuration.
 - Any VCS failure blocks the direct push until its cause is understood.
 - Any concurrent remote update blocks the push until it is integrated and the
   relevant verification is repeated.
-
