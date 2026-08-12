@@ -111,8 +111,11 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
         foreach (cpl.payload[i]) req.rb_data.push_back(cpl.payload[i]);
         rb_recv[cpl.tag] += cpl.payload.size();
         if (cpl.cpl_status != CPL_STATUS_SC) req.rb_status = cpl.cpl_status;
-        // Error status terminates immediately (no data will follow).
-        last = (rb_recv[cpl.tag] >= rb_total[cpl.tag]) ||
+        // A successful configuration/IO write completes with TLP_CPL, which
+        // intentionally carries no data. That Completion is terminal just
+        // like an error Completion; only CplD needs payload-byte accounting.
+        last = !cpl.has_data() ||
+               (rb_recv[cpl.tag] >= rb_total[cpl.tag]) ||
                (cpl.cpl_status != CPL_STATUS_SC);
         if (last) begin
             req.rb_done = 1;

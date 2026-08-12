@@ -501,12 +501,10 @@ class pcie_tl_env extends uvm_env;
                 if ($cast(cpl, tlp)) ep_agent.ep_driver.handle_completion(cpl);
             end
             else if (cfg.ep_auto_response && ep_agent.ep_driver != null) begin
-                begin
-                    automatic pcie_tl_tlp tlp_copy = tlp;
-                    fork
-                        ep_agent.ep_driver.handle_request(tlp_copy);
-                    join_none
-                end
+                // Keep endpoint request handling in ingress order. A posted
+                // write must update the EP model before a following read is
+                // handled on this same TLM link.
+                ep_agent.ep_driver.handle_request(tlp);
             end
         end
     endtask
@@ -581,12 +579,8 @@ class pcie_tl_env extends uvm_env;
                 if ($cast(cpl, tlp)) ep_agents[i].ep_driver.handle_completion(cpl);
             end
             else if (cfg.ep_auto_response && ep_agents[i].ep_driver != null) begin
-                begin
-                    automatic pcie_tl_tlp tlp_copy = tlp;
-                    fork
-                        ep_agents[i].ep_driver.handle_request(tlp_copy);
-                    join_none
-                end
+                // Keep endpoint request handling in ingress order per link.
+                ep_agents[i].ep_driver.handle_request(tlp);
             end
         end
     endtask
@@ -759,13 +753,9 @@ class pcie_tl_env extends uvm_env;
             else if (cfg.ep_auto_response && ep_agents[idx].ep_driver != null) begin
                 if (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
                                      TLP_CFG_RD0, TLP_CFG_WR0, TLP_IO_RD, TLP_IO_WR}) begin
-                    begin
-                        automatic int i = idx;
-                        automatic pcie_tl_tlp t = tlp;
-                        fork
-                            ep_agents[i].ep_driver.handle_request(t);
-                        join_none
-                    end
+                    // The DSP ingress FIFO is ordered; preserve that order
+                    // while applying requests to its endpoint model.
+                    ep_agents[idx].ep_driver.handle_request(tlp);
                 end
             end
         end

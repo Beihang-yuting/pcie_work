@@ -231,9 +231,30 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
             // Unified memory path: honour byte-enables
             um_write(mem_req.addr, req.payload, mem_req.first_be, mem_req.last_be);
         end else begin
-            // Original sparse memory path
+            // Sparse memory follows the same DWord lane semantics as the
+            // unified backend: address is DWord aligned and first/last BE
+            // select which payload bytes may modify memory.
+            int total_dw;
+            bit [63:0] dw_addr;
+
+            total_dw = (req.payload.size() + 3) / 4;
+            dw_addr = {mem_req.addr[63:2], 2'b00};
             foreach (req.payload[i]) begin
-                mem_space[mem_req.addr + i] = req.payload[i];
+                int dw_index;
+                int byte_index;
+                bit [3:0] byte_enable;
+
+                dw_index = i / 4;
+                byte_index = i % 4;
+                if (dw_index == 0)
+                    byte_enable = mem_req.first_be;
+                else if (dw_index == (total_dw - 1))
+                    byte_enable = mem_req.last_be;
+                else
+                    byte_enable = 4'hF;
+
+                if (byte_enable[byte_index])
+                    mem_space[dw_addr + i] = req.payload[i];
             end
         end
 
@@ -363,6 +384,10 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
         cpl.bcm          = 0;
         cpl.byte_count   = 0;
         cpl.lower_addr   = 0;
+        case (req.kind)
+            TLP_CFG_RD0, TLP_CFG_RD1: cpl.byte_count = 12'd4;
+            default: begin end
+        endcase
         return cpl;
     endfunction
 
