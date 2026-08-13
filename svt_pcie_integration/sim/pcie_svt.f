@@ -1,6 +1,8 @@
 +incdir+../rtl
 +incdir+../uvm
 +incdir+../uvm/sequences
++define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME
++define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
 +incdir+$PCIE_SVT_ROOT/sverilog/include
 +incdir+$DESIGNWARE_HOME/vip/svt/common/R-2020.12/sverilog/include
 -y $PCIE_SVT_ROOT/verilog/src/vcs
