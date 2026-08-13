@@ -1,3 +1,5 @@
+`include "pcie_svt_topology_checks.svh"
+
 module pcie_dut_placeholder (
 `ifdef PCIE_TOPO_EP_X16
   input logic reset,
