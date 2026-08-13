@@ -56,6 +56,26 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     return {next_offset[11:0], version, cap_id};
   endfunction
 
+  function automatic int unsigned first_ext_cap_offset(
+      pcie_svt_function_profile fn);
+    if (fn.enable_aer)   return 12'h100;
+    if (fn.enable_sriov) return 12'h180;
+    if (fn.enable_ats)   return 12'h240;
+    if (fn.enable_pri)   return 12'h260;
+    if (fn.enable_pasid) return 12'h280;
+    if (fn.enable_ari)   return 12'h2a0;
+    if (fn.enable_acs)   return 12'h2c0;
+    if (fn.enable_rebar) return 12'h300;
+    return 0;
+  endfunction
+
+  function automatic int unsigned ext_cap_image_offset(
+      pcie_svt_function_profile fn, int unsigned fixed_offset);
+    if (!fn.enable_aer && (fixed_offset == first_ext_cap_offset(fn)))
+      return 12'h100;
+    return fixed_offset;
+  endfunction
+
   function automatic int unsigned next_ext_cap(
       pcie_svt_function_profile fn, int unsigned offset);
     case (offset)
@@ -128,9 +148,19 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     end
     for (int unsigned i = 0; i < max_bars; i++) begin
       if (fn.bars[i].implemented) begin
-        if (!fn.bars[i].is_64bit && (fn.bars[i].initial_base[63:32] != 0)) begin
+        if (fn.bars[i].is_64bit && (i == (max_bars - 1))) begin
           `uvm_error("CFG_BUILD", $sformatf(
-            "%s.BAR%0d: 32-bit BAR base exceeds 32 bits", fn.get_name(), i))
+            "%s.BAR%0d: 64-bit BAR requires an upper DWORD within the header",
+            fn.get_name(), i))
+          return 0;
+        end
+        if (!fn.bars[i].is_64bit &&
+            ((fn.bars[i].initial_base > 64'hffff_ffff) ||
+             (fn.bars[i].aperture > 64'h1_0000_0000) ||
+             (fn.bars[i].initial_base >
+              (64'h1_0000_0000 - fn.bars[i].aperture)))) begin
+          `uvm_error("CFG_BUILD", $sformatf(
+            "%s.BAR%0d: 32-bit BAR range exceeds 4 GiB", fn.get_name(), i))
           return 0;
         end
         first_end = fn.bars[i].initial_base + fn.bars[i].aperture - 1;
@@ -248,34 +278,34 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     int unsigned entries;
     int unsigned offset;
     if (fn.enable_aer)
-      put_dw(image, 12'h100,
+      put_dw(image, ext_cap_image_offset(fn, 12'h100),
              ext_cap_header(16'h0001, 4'h2, next_ext_cap(fn, 12'h100)));
     if (fn.enable_sriov)
-      put_dw(image, 12'h180,
+      put_dw(image, ext_cap_image_offset(fn, 12'h180),
              ext_cap_header(16'h0010, 4'h1, next_ext_cap(fn, 12'h180)));
     if (fn.enable_ats)
-      put_dw(image, 12'h240,
+      put_dw(image, ext_cap_image_offset(fn, 12'h240),
              ext_cap_header(16'h000f, 4'h1, next_ext_cap(fn, 12'h240)));
     if (fn.enable_pri)
-      put_dw(image, 12'h260,
+      put_dw(image, ext_cap_image_offset(fn, 12'h260),
              ext_cap_header(16'h0013, 4'h1, next_ext_cap(fn, 12'h260)));
     if (fn.enable_pasid)
-      put_dw(image, 12'h280,
+      put_dw(image, ext_cap_image_offset(fn, 12'h280),
              ext_cap_header(16'h001b, 4'h1, next_ext_cap(fn, 12'h280)));
     if (fn.enable_ari)
-      put_dw(image, 12'h2a0,
+      put_dw(image, ext_cap_image_offset(fn, 12'h2a0),
              ext_cap_header(16'h000e, 4'h1, next_ext_cap(fn, 12'h2a0)));
     if (fn.enable_acs)
-      put_dw(image, 12'h2c0,
+      put_dw(image, ext_cap_image_offset(fn, 12'h2c0),
              ext_cap_header(16'h000d, 4'h1, next_ext_cap(fn, 12'h2c0)));
     if (fn.enable_rebar) begin
-      put_dw(image, 12'h300,
+      put_dw(image, ext_cap_image_offset(fn, 12'h300),
              ext_cap_header(16'h0015, 4'h1, next_ext_cap(fn, 12'h300)));
       entries = 0;
       foreach (fn.rebar_supported_sizes[i])
         if (fn.rebar_supported_sizes[i] != 0)
           entries++;
-      offset = 12'h304;
+      offset = ext_cap_image_offset(fn, 12'h300) + 4;
       foreach (fn.rebar_supported_sizes[i]) begin
         if (fn.rebar_supported_sizes[i] != 0) begin
           put_dw(image, offset,
@@ -321,6 +351,19 @@ class pcie_svt_cfg_space_builder extends uvm_object;
       return 0;
     if (fn.enable_rebar) begin
       foreach (fn.rebar_supported_sizes[i]) begin
+        if (fn.rebar_supported_sizes[i][31:28] != 0) begin
+          `uvm_error("CFG_BUILD", $sformatf(
+            "%s.BAR%0d: REBAR supported-size bitmap exceeds 28 bits",
+            fn.get_name(), i))
+          return 0;
+        end
+        if ((fn.rebar_supported_sizes[i] != 0) &&
+            (fn.rebar_current_size[i] >= 28)) begin
+          `uvm_error("CFG_BUILD", $sformatf(
+            "%s.BAR%0d: REBAR current-size encoding exceeds 27",
+            fn.get_name(), i))
+          return 0;
+        end
         if ((fn.rebar_supported_sizes[i] != 0) &&
             !current_rebar_size_matches(fn, i)) begin
           `uvm_error("CFG_BUILD", $sformatf(
@@ -352,9 +395,9 @@ class pcie_svt_cfg_space_builder extends uvm_object;
       if (!fn.bars[0].implemented || !fn.bars[0].is_64bit)
         emit_bar(fn, 1, image);
       put_dw(image, 12'h018, 32'h0000_0000);
-      put_dw(image, 12'h01c, 32'h0000_0000);
-      put_dw(image, 12'h020, 32'h0000_0000);
-      put_dw(image, 12'h024, 32'h0000_0000);
+      put_dw(image, 12'h01c, 32'h0000_00f0);
+      put_dw(image, 12'h020, 32'h0000_fff0);
+      put_dw(image, 12'h024, 32'h0000_fff0);
       put_dw(image, 12'h028, 32'h0000_0000);
       put_dw(image, 12'h02c, 32'h0000_0000);
       put_dw(image, 12'h030, 32'h0000_0000);

@@ -588,10 +588,39 @@ class pcie_svt_profile_unit_test extends uvm_test;
         image['h010/4] !== 32'h0000_0000 ||
         image['h014/4] !== 32'h0000_0000 ||
         image['h018/4] !== 32'h0000_0000 ||
-        image['h01c/4] !== 32'h0000_0000 ||
-        image['h020/4] !== 32'h0000_0000 ||
-        image['h024/4] !== 32'h0000_0000)
+        image['h01c/4][7:4] <= image['h01c/4][15:12] ||
+        image['h020/4][15:4] <= image['h020/4][31:20] ||
+        image['h024/4][15:4] <= image['h024/4][31:20] ||
+        image['h028/4] !== 32'h0000_0000 ||
+        image['h02c/4] !== 32'h0000_0000 ||
+        image['h030/4] !== 32'h0000_0000)
       `uvm_error("CFG_BUILD", "Type-1 header reset image mismatch")
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "extended-head-positive port clone failed");
+    bad.functions[0].enable_ats = 1;
+    bad.functions[0].enable_ari = 1;
+    profile_check(b.build_function(bad.functions[0], 4, 5, image),
+                  "AER-disabled extended capability image build failed");
+    profile_check(image['h100/4][15:0] == 16'h000f &&
+                  image['h100/4][31:20] == 12'h2a0 &&
+                  image['h240/4] == 32'h0000_0000 &&
+                  image['h2a0/4][15:0] == 16'h000e &&
+                  image['h2a0/4][31:20] == 12'h000,
+                  "AER-disabled extended capability chain is unreachable");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "REBAR-head-positive port clone failed");
+    bad.functions[0].enable_rebar = 1;
+    bad.functions[0].rebar_supported_sizes[0] = 32'h0000_0020;
+    bad.functions[0].rebar_current_size[0] = 5;
+    profile_check(b.build_function(bad.functions[0], 4, 5, image),
+                  "AER-disabled REBAR image build failed");
+    profile_check(image['h100/4][15:0] == 16'h0015 &&
+                  image['h100/4][31:20] == 12'h000 &&
+                  image['h104/4][31:4] == 28'h0000_020 &&
+                  image['h300/4] == 32'h0000_0000,
+                  "REBAR head and body are not contiguous at 0x100");
 
     catcher = pcie_svt_expected_profile_error_catcher::type_id::create(
       "expected_builder_errors");
@@ -675,6 +704,37 @@ class pcie_svt_profile_unit_test extends uvm_test;
     check_expected_failure(catcher,
       b.build_function(profiles.port[PCIE_SVT_PRIMARY_EP0].functions[0],
                        4, 3, image), "invalid builder generation");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_RC0].clone()),
+                  "Type-1 BAR-negative port clone failed");
+    bad.functions[0].bars[1].implemented = 1;
+    bad.functions[0].bars[1].is_64bit = 1;
+    bad.functions[0].bars[1].aperture = 4096;
+    catcher.set_expected("BAR1: 64-bit BAR requires an upper DWORD within the header",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 16, 5, image),
+      "Type-1 64-bit BAR in final slot");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "REBAR-width-negative port clone failed");
+    bad.functions[0].enable_rebar = 1;
+    bad.functions[0].rebar_supported_sizes[0] = 32'h1000_0020;
+    bad.functions[0].rebar_current_size[0] = 5;
+    catcher.set_expected("BAR0: REBAR supported-size bitmap exceeds 28 bits",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "out-of-range REBAR supported-size bitmap");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_RC0].clone()),
+                  "32-bit BAR-negative port clone failed");
+    bad.functions[0].bars[0].implemented = 1;
+    bad.functions[0].bars[0].aperture = 64'h0000_0002_0000_0000;
+    catcher.set_expected("BAR0: 32-bit BAR range exceeds 4 GiB", "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 16, 5, image),
+      "32-bit BAR aperture above 4 GiB");
 
     uvm_report_cb::delete(null, catcher);
   endfunction
