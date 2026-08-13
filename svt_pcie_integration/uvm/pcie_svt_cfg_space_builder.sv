@@ -43,13 +43,6 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     endcase
   endfunction
 
-  function automatic bit is_std_cap_header(int unsigned byte_offset);
-    case (byte_offset)
-      12'h040, 12'h080, 12'h0a0: return 1;
-      default: return 0;
-    endcase
-  endfunction
-
   function automatic bit [31:0] ext_cap_header(bit [15:0] cap_id,
                                                 bit [3:0] version,
                                                 int unsigned next_offset);
@@ -252,9 +245,10 @@ class pcie_svt_cfg_space_builder extends uvm_object;
       12'h038: if (fn.header_type[6:0] == 7'h01)
                  return 32'hffff_ffff;
       12'h03c: return 32'hffff_ff00;
-      12'h040, 12'h044, 12'h048, 12'h04c, 12'h064, 12'h06c:
+      12'h040, 12'h044, 12'h048, 12'h04c,
+      12'h064, 12'h068, 12'h06c:
         return 32'hffff_ffff;
-      12'h080: if (fn.enable_msi) return 32'h0000_ffff;
+      12'h080: if (fn.enable_msi) return 32'hffff_ffff;
       12'h0a0, 12'h0a4, 12'h0a8:
         if (fn.enable_msix) return 32'hffff_ffff;
       12'h104:

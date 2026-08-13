@@ -665,6 +665,14 @@ class pcie_svt_profile_unit_test extends uvm_test;
                   image['h004/4] == 32'h0010_0007,
                   "safe command-register raw override failed");
 
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "safe-MSI-payload-override-positive port clone failed");
+    bad.functions[0].enable_msi = 1;
+    bad.functions[0].raw_dw_override['h084/4] = 32'hfee0_0000;
+    profile_check(b.build_function(bad.functions[0], 4, 5, image) &&
+                  image['h084/4] == 32'hfee0_0000,
+                  "safe MSI payload raw override failed");
+
     catcher = pcie_svt_expected_profile_error_catcher::type_id::create(
       "expected_builder_errors");
     uvm_report_cb::add(null, catcher);
@@ -725,6 +733,25 @@ class pcie_svt_profile_unit_test extends uvm_test;
     check_expected_failure(catcher,
       b.build_function(bad.functions[0], 4, 5, image),
       "MSI-X Table BIR raw override");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "link-control-2-override-negative port clone failed");
+    bad.functions[0].raw_dw_override['h068/4] = 32'h0000_0007;
+    catcher.set_expected("raw override changes protected fields at 0x068",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "reserved Target Link Speed raw override");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "MSI-control-override-negative port clone failed");
+    bad.functions[0].enable_msi = 1;
+    bad.functions[0].raw_dw_override['h080/4] = 32'h0080_0005;
+    catcher.set_expected("raw override changes protected fields at 0x080",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "MSI 64-bit capable raw override");
 
     profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
                   "extended-ID-override-negative port clone failed");
