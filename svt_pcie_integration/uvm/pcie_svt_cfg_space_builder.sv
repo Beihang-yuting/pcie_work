@@ -69,13 +69,6 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     return 0;
   endfunction
 
-  function automatic int unsigned ext_cap_image_offset(
-      pcie_svt_function_profile fn, int unsigned fixed_offset);
-    if (!fn.enable_aer && (fixed_offset == first_ext_cap_offset(fn)))
-      return 12'h100;
-    return fixed_offset;
-  endfunction
-
   function automatic int unsigned next_ext_cap(
       pcie_svt_function_profile fn, int unsigned offset);
     case (offset)
@@ -276,36 +269,43 @@ class pcie_svt_cfg_space_builder extends uvm_object;
   function void emit_extended_capabilities(pcie_svt_function_profile fn,
                                             ref bit [31:0] image[1024]);
     int unsigned entries;
+    int unsigned first_offset;
     int unsigned offset;
+    first_offset = first_ext_cap_offset(fn);
+    if (!fn.enable_aer && (first_offset != 0)) begin
+      put_dw(image, 12'h100,
+             ext_cap_header(16'h000b, 4'h1, first_offset));
+      put_dw(image, 12'h104, 32'h0080_0000);
+    end
     if (fn.enable_aer)
-      put_dw(image, ext_cap_image_offset(fn, 12'h100),
+      put_dw(image, 12'h100,
              ext_cap_header(16'h0001, 4'h2, next_ext_cap(fn, 12'h100)));
     if (fn.enable_sriov)
-      put_dw(image, ext_cap_image_offset(fn, 12'h180),
+      put_dw(image, 12'h180,
              ext_cap_header(16'h0010, 4'h1, next_ext_cap(fn, 12'h180)));
     if (fn.enable_ats)
-      put_dw(image, ext_cap_image_offset(fn, 12'h240),
+      put_dw(image, 12'h240,
              ext_cap_header(16'h000f, 4'h1, next_ext_cap(fn, 12'h240)));
     if (fn.enable_pri)
-      put_dw(image, ext_cap_image_offset(fn, 12'h260),
+      put_dw(image, 12'h260,
              ext_cap_header(16'h0013, 4'h1, next_ext_cap(fn, 12'h260)));
     if (fn.enable_pasid)
-      put_dw(image, ext_cap_image_offset(fn, 12'h280),
+      put_dw(image, 12'h280,
              ext_cap_header(16'h001b, 4'h1, next_ext_cap(fn, 12'h280)));
     if (fn.enable_ari)
-      put_dw(image, ext_cap_image_offset(fn, 12'h2a0),
+      put_dw(image, 12'h2a0,
              ext_cap_header(16'h000e, 4'h1, next_ext_cap(fn, 12'h2a0)));
     if (fn.enable_acs)
-      put_dw(image, ext_cap_image_offset(fn, 12'h2c0),
+      put_dw(image, 12'h2c0,
              ext_cap_header(16'h000d, 4'h1, next_ext_cap(fn, 12'h2c0)));
     if (fn.enable_rebar) begin
-      put_dw(image, ext_cap_image_offset(fn, 12'h300),
+      put_dw(image, 12'h300,
              ext_cap_header(16'h0015, 4'h1, next_ext_cap(fn, 12'h300)));
       entries = 0;
       foreach (fn.rebar_supported_sizes[i])
         if (fn.rebar_supported_sizes[i] != 0)
           entries++;
-      offset = ext_cap_image_offset(fn, 12'h300) + 4;
+      offset = 12'h304;
       foreach (fn.rebar_supported_sizes[i]) begin
         if (fn.rebar_supported_sizes[i] != 0) begin
           put_dw(image, offset,

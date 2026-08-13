@@ -602,9 +602,12 @@ class pcie_svt_profile_unit_test extends uvm_test;
     bad.functions[0].enable_ari = 1;
     profile_check(b.build_function(bad.functions[0], 4, 5, image),
                   "AER-disabled extended capability image build failed");
-    profile_check(image['h100/4][15:0] == 16'h000f &&
-                  image['h100/4][31:20] == 12'h2a0 &&
-                  image['h240/4] == 32'h0000_0000 &&
+    profile_check(image['h100/4][15:0] == 16'h000b &&
+                  image['h100/4][19:16] == 4'h1 &&
+                  image['h100/4][31:20] == 12'h240 &&
+                  image['h104/4] == 32'h0080_0000 &&
+                  image['h240/4][15:0] == 16'h000f &&
+                  image['h240/4][31:20] == 12'h2a0 &&
                   image['h2a0/4][15:0] == 16'h000e &&
                   image['h2a0/4][31:20] == 12'h000,
                   "AER-disabled extended capability chain is unreachable");
@@ -616,15 +619,29 @@ class pcie_svt_profile_unit_test extends uvm_test;
     bad.functions[0].rebar_current_size[0] = 5;
     profile_check(b.build_function(bad.functions[0], 4, 5, image),
                   "AER-disabled REBAR image build failed");
-    profile_check(image['h100/4][15:0] == 16'h0015 &&
-                  image['h100/4][31:20] == 12'h000 &&
-                  image['h104/4][31:4] == 28'h0000_020 &&
-                  image['h300/4] == 32'h0000_0000,
-                  "REBAR head and body are not contiguous at 0x100");
+    profile_check(image['h100/4][15:0] == 16'h000b &&
+                  image['h100/4][19:16] == 4'h1 &&
+                  image['h100/4][31:20] == 12'h300 &&
+                  image['h104/4] == 32'h0080_0000 &&
+                  image['h300/4][15:0] == 16'h0015 &&
+                  image['h300/4][31:20] == 12'h000 &&
+                  image['h304/4][31:4] == 28'h0000_020,
+                  "AER-disabled REBAR fixed-offset chain mismatch");
 
     catcher = pcie_svt_expected_profile_error_catcher::type_id::create(
       "expected_builder_errors");
     uvm_report_cb::add(null, catcher);
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "anchor-override-negative port clone failed");
+    bad.functions[0].enable_ats = 1;
+    bad.functions[0].raw_dw_override['h100/4] = 32'h0001_000b;
+    catcher.set_expected(
+      "raw override of extended capability next pointer at 0x100 is forbidden",
+      "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "AER-disabled chain-anchor next-pointer override");
 
     profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
                   "PRI-negative port clone failed");
