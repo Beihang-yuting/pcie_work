@@ -36,9 +36,11 @@ cc -c -I. -I"$VCS_HOME/include" -I"$PCIE_SVT_ROOT/C/include" \
   "$PCIE_SVT_ROOT/C/src/veriuser.c" > pli.tab
 ```
 
-The generated `svc_util_parms.h`, `msglog.o`, and `pli.tab` artifacts belong
-only in the simulation build directory. Do not generate them in this source
-tree and do not copy installed Synopsys sources into the repository.
+The generated `svc_util_parms.h`, `msglog.o`, and `pli.tab` artifacts are
+disposable, untracked outputs created in the staged simulation working
+directory. Do not commit them, and do not generate them in or otherwise modify
+the installed Synopsys tree. Do not copy installed Synopsys sources into the
+repository.
 
 The `pcie_svt.f` file is an environment-relative source/include contract. Its
 project RTL and UVM paths are resolved relative to this `sim` directory; the
