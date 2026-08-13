@@ -22,6 +22,7 @@ module pcie_svt_topology_top;
 
   defparam primary_rc0_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
     `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam primary_rc0_spd.SVT_PCIE_UI_DISPLAY_NAME = "primary_rc0_spd.";
   defparam primary_rc0_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
     `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
   defparam primary_rc0_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;
@@ -58,6 +59,7 @@ module pcie_svt_topology_top;
 
   defparam primary_rc0_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
     `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam primary_rc0_spd.SVT_PCIE_UI_DISPLAY_NAME = "primary_rc0_spd.";
   defparam primary_rc0_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
     `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
   defparam primary_rc0_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;
@@ -69,6 +71,7 @@ module pcie_svt_topology_top;
 
   defparam primary_rc1_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
     `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam primary_rc1_spd.SVT_PCIE_UI_DISPLAY_NAME = "primary_rc1_spd.";
   defparam primary_rc1_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
     `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
   defparam primary_rc1_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;
@@ -124,6 +127,7 @@ module pcie_svt_topology_top;
 
   defparam primary_rc0_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
     `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam primary_rc0_spd.SVT_PCIE_UI_DISPLAY_NAME = "primary_rc0_spd.";
   defparam primary_rc0_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
     `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
   defparam primary_rc0_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;
@@ -135,6 +139,7 @@ module pcie_svt_topology_top;
 
   defparam primary_ep0_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
     `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam primary_ep0_spd.SVT_PCIE_UI_DISPLAY_NAME = "primary_ep0_spd.";
   defparam primary_ep0_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
     `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
   defparam primary_ep0_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;
@@ -146,6 +151,7 @@ module pcie_svt_topology_top;
 
   defparam primary_ep1_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
     `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam primary_ep1_spd.SVT_PCIE_UI_DISPLAY_NAME = "primary_ep1_spd.";
   defparam primary_ep1_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
     `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
   defparam primary_ep1_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;
@@ -157,6 +163,7 @@ module pcie_svt_topology_top;
 
   defparam primary_ep2_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
     `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam primary_ep2_spd.SVT_PCIE_UI_DISPLAY_NAME = "primary_ep2_spd.";
   defparam primary_ep2_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
     `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
   defparam primary_ep2_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;
@@ -168,6 +175,7 @@ module pcie_svt_topology_top;
 
   defparam primary_ep3_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
     `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam primary_ep3_spd.SVT_PCIE_UI_DISPLAY_NAME = "primary_ep3_spd.";
   defparam primary_ep3_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
     `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
   defparam primary_ep3_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;

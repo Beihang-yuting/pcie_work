@@ -8,10 +8,20 @@ package pcie_svt_integration_pkg;
   `include "pcie_svt_profile_set.sv"
   `include "pcie_svt_cfg_space_builder.sv"
 
+  function automatic pcie_svt_topology_e compiled_topology();
+`ifdef PCIE_TOPO_EP_X16
+    return PCIE_SVT_TOPO_EP_X16;
+`elsif PCIE_TOPO_EP_2X8
+    return PCIE_SVT_TOPO_EP_2X8;
+`else
+    return PCIE_SVT_TOPO_SWITCH;
+`endif
+  endfunction
+
   // Future Task 4-10 files, kept in planned dependency order.
-  // `include "pcie_svt_virtual_sequencer.sv"
-  // `include "pcie_svt_port_env.sv"
-  // `include "pcie_svt_env.sv"
+  `include "pcie_svt_virtual_sequencer.sv"
+  `include "pcie_svt_port_env.sv"
+  `include "pcie_svt_env.sv"
   // `include "sequences/pcie_svt_cfg_space_init_seq.sv"
   // `include "sequences/pcie_svt_all_cfg_spaces_init_vseq.sv"
   // `include "sequences/pcie_svt_link_bringup_seq.sv"
@@ -19,7 +29,7 @@ package pcie_svt_integration_pkg;
   // `include "sequences/pcie_svt_topology_enumeration_vseq.sv"
   // `include "sequences/pcie_svt_post_enum_enable_vseq.sv"
   // `include "sequences/pcie_svt_peer_smoke_vseq.sv"
-  // `include "pcie_svt_base_test.sv"
+  `include "pcie_svt_base_test.sv"
 
   `include "pcie_svt_profile_unit_test.sv"
 endpackage
