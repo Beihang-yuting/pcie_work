@@ -7,6 +7,24 @@ class pcie_svt_profile_set extends uvm_object;
     super.new(name);
   endfunction
 
+  virtual function void do_copy(uvm_object rhs);
+    pcie_svt_profile_set rhs_set;
+    super.do_copy(rhs);
+    if (!$cast(rhs_set, rhs)) begin
+      `uvm_error("PROFILE_COPY", "pcie_svt_profile_set copy source has the wrong type")
+      return;
+    end
+    foreach (port[i]) begin
+      if (rhs_set.port[i] == null) begin
+        port[i] = null;
+      end else begin
+        port[i] = pcie_svt_port_profile::type_id::create(
+          $sformatf("port%0d", i));
+        port[i].copy(rhs_set.port[i]);
+      end
+    end
+  endfunction
+
   function int unsigned active_count();
     int unsigned count;
     foreach (port[i])

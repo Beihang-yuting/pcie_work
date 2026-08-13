@@ -33,6 +33,20 @@ class pcie_svt_bar_profile extends uvm_object;
     super.new(name);
   endfunction
 
+  virtual function void do_copy(uvm_object rhs);
+    pcie_svt_bar_profile rhs_profile;
+    super.do_copy(rhs);
+    if (!$cast(rhs_profile, rhs)) begin
+      `uvm_error("PROFILE_COPY", "pcie_svt_bar_profile copy source has the wrong type")
+      return;
+    end
+    implemented = rhs_profile.implemented;
+    is_64bit = rhs_profile.is_64bit;
+    prefetchable = rhs_profile.prefetchable;
+    aperture = rhs_profile.aperture;
+    initial_base = rhs_profile.initial_base;
+  endfunction
+
   function bit validate(string path);
     if (!implemented)
       return 1;
@@ -92,6 +106,64 @@ class pcie_svt_function_profile extends uvm_object;
     expansion_rom = pcie_svt_bar_profile::type_id::create("expansion_rom");
   endfunction
 
+  virtual function void do_copy(uvm_object rhs);
+    pcie_svt_function_profile rhs_profile;
+    super.do_copy(rhs);
+    if (!$cast(rhs_profile, rhs)) begin
+      `uvm_error("PROFILE_COPY", "pcie_svt_function_profile copy source has the wrong type")
+      return;
+    end
+    vendor_id = rhs_profile.vendor_id;
+    device_id = rhs_profile.device_id;
+    class_code = rhs_profile.class_code;
+    revision_id = rhs_profile.revision_id;
+    header_type = rhs_profile.header_type;
+    subsystem_vendor_id = rhs_profile.subsystem_vendor_id;
+    subsystem_device_id = rhs_profile.subsystem_device_id;
+    command_reset = rhs_profile.command_reset;
+    interrupt_pin = rhs_profile.interrupt_pin;
+    foreach (bars[i]) begin
+      if (rhs_profile.bars[i] == null) begin
+        bars[i] = null;
+      end else begin
+        bars[i] = pcie_svt_bar_profile::type_id::create(
+          $sformatf("bar%0d", i));
+        bars[i].copy(rhs_profile.bars[i]);
+      end
+    end
+    if (rhs_profile.expansion_rom == null) begin
+      expansion_rom = null;
+    end else begin
+      expansion_rom = pcie_svt_bar_profile::type_id::create("expansion_rom");
+      expansion_rom.copy(rhs_profile.expansion_rom);
+    end
+    enable_msi = rhs_profile.enable_msi;
+    enable_msix = rhs_profile.enable_msix;
+    enable_aer = rhs_profile.enable_aer;
+    enable_sriov = rhs_profile.enable_sriov;
+    enable_ats = rhs_profile.enable_ats;
+    enable_pri = rhs_profile.enable_pri;
+    enable_pasid = rhs_profile.enable_pasid;
+    enable_ari = rhs_profile.enable_ari;
+    enable_acs = rhs_profile.enable_acs;
+    enable_rebar = rhs_profile.enable_rebar;
+    max_payload_supported = rhs_profile.max_payload_supported;
+    max_payload_size = rhs_profile.max_payload_size;
+    max_read_request_size = rhs_profile.max_read_request_size;
+    completion_timeout_ranges = rhs_profile.completion_timeout_ranges;
+    msix_table_bar = rhs_profile.msix_table_bar;
+    msix_pba_bar = rhs_profile.msix_pba_bar;
+    msix_table_offset = rhs_profile.msix_table_offset;
+    msix_pba_offset = rhs_profile.msix_pba_offset;
+    foreach (rebar_supported_sizes[i]) begin
+      rebar_supported_sizes[i] = rhs_profile.rebar_supported_sizes[i];
+      rebar_current_size[i] = rhs_profile.rebar_current_size[i];
+    end
+    raw_dw_override.delete();
+    foreach (rhs_profile.raw_dw_override[index])
+      raw_dw_override[index] = rhs_profile.raw_dw_override[index];
+  endfunction
+
   function bit msix_bir_is_valid(bit [2:0] bir, string path);
     if (bir >= 6) begin
       `uvm_error("PROFILE", {path, ": MSI-X BIR must select BAR0 through BAR5"})
@@ -115,6 +187,7 @@ class pcie_svt_function_profile extends uvm_object;
 
   function bit validate(string path);
     bit ok;
+    bit rebar_entry_found;
     ok = 1;
     if (enable_pri && !enable_ats) begin
       `uvm_error("PROFILE", {path, ": PRI requires ATS"})
@@ -130,6 +203,20 @@ class pcie_svt_function_profile extends uvm_object;
         ok = 0;
       end else if (!bars[i].validate($sformatf("%s.BAR%0d", path, i)))
         ok = 0;
+    end
+    foreach (bars[i]) begin
+      if ((bars[i] != null) && bars[i].implemented && bars[i].is_64bit) begin
+        if (i == 5) begin
+          `uvm_error("PROFILE", $sformatf(
+            "%s.BAR5: 64-bit BAR requires an upper DWORD", path))
+          ok = 0;
+        end else if ((bars[i+1] != null) && bars[i+1].implemented) begin
+          `uvm_error("PROFILE", $sformatf(
+            "%s.BAR%0d: upper DWORD of BAR%0d must be unimplemented",
+            path, i+1, i))
+          ok = 0;
+        end
+      end
     end
     if (expansion_rom == null) begin
       `uvm_error("PROFILE", {path, ".expansion_rom: null BAR handle"})
@@ -153,8 +240,10 @@ class pcie_svt_function_profile extends uvm_object;
     end
 
     if (enable_rebar) begin
+      rebar_entry_found = 0;
       foreach (rebar_supported_sizes[i]) begin
         if (rebar_supported_sizes[i] != 0) begin
+          rebar_entry_found = 1;
           if ((bars[i] == null) || !bars[i].implemented) begin
             `uvm_error("PROFILE", $sformatf(
               "%s.BAR%0d: REBAR entry requires an implemented BAR", path, i))
@@ -170,6 +259,10 @@ class pcie_svt_function_profile extends uvm_object;
             ok = 0;
           end
         end
+      end
+      if (!rebar_entry_found) begin
+        `uvm_error("PROFILE", {path, ": REBAR requires at least one configured entry"})
+        ok = 0;
       end
     end
     return ok;
@@ -188,6 +281,32 @@ class pcie_svt_port_profile extends uvm_object;
 
   function new(string name = "pcie_svt_port_profile");
     super.new(name);
+  endfunction
+
+  virtual function void do_copy(uvm_object rhs);
+    pcie_svt_port_profile rhs_profile;
+    pcie_svt_function_profile copied_function;
+    super.do_copy(rhs);
+    if (!$cast(rhs_profile, rhs)) begin
+      `uvm_error("PROFILE_COPY", "pcie_svt_port_profile copy source has the wrong type")
+      return;
+    end
+    port_id = rhs_profile.port_id;
+    role = rhs_profile.role;
+    link_width = rhs_profile.link_width;
+    max_gen = rhs_profile.max_gen;
+    root_hierarchy = rhs_profile.root_hierarchy;
+    functions.delete();
+    foreach (rhs_profile.functions[i]) begin
+      if (rhs_profile.functions[i] == null) begin
+        functions.push_back(null);
+      end else begin
+        copied_function = pcie_svt_function_profile::type_id::create(
+          $sformatf("function%0d", i));
+        copied_function.copy(rhs_profile.functions[i]);
+        functions.push_back(copied_function);
+      end
+    end
   endfunction
 
   function bit validate();

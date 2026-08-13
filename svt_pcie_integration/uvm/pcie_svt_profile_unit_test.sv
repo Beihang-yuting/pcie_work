@@ -323,6 +323,12 @@ class pcie_svt_profile_unit_test extends uvm_test;
     check_expected_failure(catcher, fn.validate("rebar_unimplemented_fn"),
                            "REBAR entry for an unimplemented BAR");
 
+    fn = make_valid_function("rebar_empty_fn");
+    fn.enable_rebar = 1;
+    catcher.set_expected("rebar_empty_fn: REBAR requires at least one configured entry");
+    check_expected_failure(catcher, fn.validate("rebar_empty_fn"),
+                           "REBAR with no configured entries");
+
     fn = make_valid_function("rebar_bounds_fn");
     fn.enable_rebar = 1;
     fn.bars[4].implemented = 1;
@@ -349,6 +355,24 @@ class pcie_svt_profile_unit_test extends uvm_test;
     check_expected_failure(catcher, fn.validate("null_bar_fn"),
                            "null BAR handle");
 
+    fn = make_valid_function("bar5_64bit_fn");
+    fn.bars[5].implemented = 1;
+    fn.bars[5].is_64bit = 1;
+    fn.bars[5].aperture = 4096;
+    catcher.set_expected("bar5_64bit_fn.BAR5: 64-bit BAR requires an upper DWORD");
+    check_expected_failure(catcher, fn.validate("bar5_64bit_fn"),
+                           "64-bit BAR at BAR5");
+
+    fn = make_valid_function("bar_upper_implemented_fn");
+    fn.bars[0].implemented = 1;
+    fn.bars[0].is_64bit = 1;
+    fn.bars[0].aperture = 4096;
+    fn.bars[1].implemented = 1;
+    fn.bars[1].aperture = 4096;
+    catcher.set_expected("bar_upper_implemented_fn.BAR1: upper DWORD of BAR0 must be unimplemented");
+    check_expected_failure(catcher, fn.validate("bar_upper_implemented_fn"),
+                           "implemented upper half of a 64-bit BAR");
+
     port_profile = make_valid_port("invalid_width_port");
     port_profile.link_width = 2;
     catcher.set_expected("invalid_width_port: link width must be x4, x8, or x16");
@@ -370,6 +394,123 @@ class pcie_svt_profile_unit_test extends uvm_test;
     check_expected_failure(catcher, port_profile.validate(), "missing PF0");
 
     uvm_report_cb::delete(null, catcher);
+  endfunction
+
+  function void check_deep_copy();
+    pcie_svt_bar_profile source_bar;
+    pcie_svt_bar_profile cloned_bar;
+    pcie_svt_function_profile source_fn;
+    pcie_svt_function_profile cloned_fn;
+    pcie_svt_port_profile source_port;
+    pcie_svt_port_profile cloned_port;
+    pcie_svt_profile_set source_set;
+    pcie_svt_profile_set cloned_set;
+    pcie_svt_profile_set copied_set;
+
+    source_bar = pcie_svt_bar_profile::type_id::create("source_bar");
+    source_bar.implemented = 1;
+    source_bar.is_64bit = 1;
+    source_bar.prefetchable = 1;
+    source_bar.aperture = 64'd65536;
+    source_bar.initial_base = 64'h1_0000;
+    profile_check($cast(cloned_bar, source_bar.clone()),
+                  "BAR clone must preserve the factory type");
+    if (cloned_bar != null) begin
+      profile_check(cloned_bar.implemented == source_bar.implemented &&
+                    cloned_bar.is_64bit == source_bar.is_64bit &&
+                    cloned_bar.prefetchable == source_bar.prefetchable &&
+                    cloned_bar.aperture == source_bar.aperture &&
+                    cloned_bar.initial_base == source_bar.initial_base,
+                    "BAR clone must copy all fields");
+      cloned_bar.aperture = 64'd4096;
+      profile_check(source_bar.aperture == 64'd65536,
+                    "BAR clone mutation must not affect the source");
+    end
+
+    source_fn = make_valid_function("source_fn");
+    source_fn.device_id = 16'h1234;
+    source_fn.bars[0].implemented = 1;
+    source_fn.bars[0].is_64bit = 1;
+    source_fn.bars[0].aperture = 64'd65536;
+    source_fn.raw_dw_override[32'h100] = 32'hdead_beef;
+    profile_check($cast(cloned_fn, source_fn.clone()),
+                  "function clone must preserve the factory type");
+    if (cloned_fn != null) begin
+      profile_check(cloned_fn.bars[0] != source_fn.bars[0] &&
+                    cloned_fn.bars[0].aperture == source_fn.bars[0].aperture &&
+                    cloned_fn.device_id == source_fn.device_id &&
+                    cloned_fn.raw_dw_override.exists(32'h100) &&
+                    cloned_fn.raw_dw_override[32'h100] == 32'hdead_beef,
+                    "function clone must deep-copy BARs and raw overrides");
+      cloned_fn.bars[0].aperture = 64'd4096;
+      cloned_fn.device_id = 16'h5678;
+      cloned_fn.raw_dw_override[32'h100] = 32'hcafe_f00d;
+      profile_check(source_fn.bars[0].aperture == 64'd65536 &&
+                    source_fn.device_id == 16'h1234 &&
+                    source_fn.raw_dw_override[32'h100] == 32'hdead_beef,
+                    "function clone mutation must not affect the source");
+    end
+
+    source_port = make_valid_port("source_port");
+    source_port.role = PCIE_SVT_EP;
+    source_port.functions[0].device_id = 16'h4321;
+    source_port.functions[0].raw_dw_override[32'h104] = 32'h0123_4567;
+    profile_check($cast(cloned_port, source_port.clone()),
+                  "port clone must preserve the factory type");
+    if ((cloned_port != null) && (cloned_port.functions.size() == 1) &&
+        (cloned_port.functions[0] != null)) begin
+      profile_check(cloned_port.functions.size() == 1 &&
+                    cloned_port.functions[0] != source_port.functions[0] &&
+                    cloned_port.functions[0].device_id == 16'h4321 &&
+                    cloned_port.functions[0].raw_dw_override[32'h104] == 32'h0123_4567,
+                    "port clone must deep-copy its function queue");
+      cloned_port.functions[0].device_id = 16'h8765;
+      profile_check(source_port.functions[0].device_id == 16'h4321,
+                    "port clone mutation must not affect the source");
+    end else begin
+      profile_check(0, "port clone must retain a non-null function queue entry");
+    end
+
+    source_set = pcie_svt_profile_set::type_id::create("source_set");
+    source_set.build_for_topology(PCIE_SVT_TOPO_SWITCH, 5);
+    source_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].raw_dw_override[32'h108] =
+      32'ha5a5_5a5a;
+    profile_check($cast(cloned_set, source_set.clone()),
+                  "profile-set clone must preserve the factory type");
+    copied_set = pcie_svt_profile_set::type_id::create("copied_set");
+    copied_set.copy(source_set);
+    if ((cloned_set != null) &&
+        (cloned_set.port[PCIE_SVT_PRIMARY_EP0] != null)) begin
+      profile_check(cloned_set.port[PCIE_SVT_PRIMARY_EP0] !=
+                    source_set.port[PCIE_SVT_PRIMARY_EP0] &&
+                    cloned_set.port[PCIE_SVT_PRIMARY_EP0].functions[0] !=
+                    source_set.port[PCIE_SVT_PRIMARY_EP0].functions[0] &&
+                    cloned_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].bars[0] !=
+                    source_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].bars[0] &&
+                    cloned_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].raw_dw_override[32'h108] ==
+                    32'ha5a5_5a5a,
+                    "profile-set clone must deep-copy populated Endpoint state");
+      cloned_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].bars[0].aperture =
+        64'd4096;
+      cloned_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].device_id = 16'hffff;
+      cloned_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].raw_dw_override[32'h108] =
+        32'hffff_ffff;
+      profile_check(source_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].bars[0].aperture ==
+                    64'd33554432 &&
+                    source_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].device_id ==
+                    16'h5011 &&
+                    source_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].raw_dw_override[32'h108] ==
+                    32'ha5a5_5a5a,
+                    "profile-set clone mutation must not affect the source");
+    end else begin
+      profile_check(0, "profile-set clone must retain the Endpoint slot");
+    end
+    profile_check(copied_set.port[PCIE_SVT_PRIMARY_EP0] != null &&
+                  copied_set.port[PCIE_SVT_PRIMARY_EP0] !=
+                  source_set.port[PCIE_SVT_PRIMARY_EP0] &&
+                  copied_set.port[PCIE_SVT_PRIMARY_EP0].functions[0].raw_dw_override[32'h108] ==
+                  32'ha5a5_5a5a,
+                  "profile-set copy must deep-copy populated Endpoint state");
   endfunction
 
   function void check_rebuild_and_independence();
@@ -428,6 +569,7 @@ class pcie_svt_profile_unit_test extends uvm_test;
     check_peer_topology(PCIE_SVT_TOPO_SWITCH, 5);
     check_negative_validation();
     check_rebuild_and_independence();
+    check_deep_copy();
 
     if (uvm_report_server::get_server().get_severity_count(UVM_ERROR) == 0 &&
         uvm_report_server::get_server().get_severity_count(UVM_FATAL) == 0)
