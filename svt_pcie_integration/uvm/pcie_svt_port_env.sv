@@ -66,6 +66,21 @@ class pcie_svt_port_env extends uvm_env;
     end
     device_cfg.pcie_cfg.pl_cfg.set_link_speed_values(
       supported_speeds, selected_speed, selected_speed);
+    if ((device_cfg.pcie_cfg.pl_cfg.get_supported_link_speeds_value() !=
+         supported_speeds) ||
+        (device_cfg.pcie_cfg.pl_cfg.get_target_link_speed_value() !=
+         selected_speed) ||
+        (device_cfg.pcie_cfg.pl_cfg.get_expected_link_speed_value() !=
+         selected_speed))
+      `uvm_fatal("LINK_SPEED", $sformatf(
+        "%s: failed to configure Gen%0d speed vector=0x%0h",
+        port_profile.port_id, port_profile.max_gen, supported_speeds))
+    `uvm_info("PCIE_SVT_LINK_SPEED", $sformatf(
+      "profile=%s gen=%0d supported=0x%0h target=0x%0h expected=0x%0h",
+      port_profile.port_id, port_profile.max_gen,
+      device_cfg.pcie_cfg.pl_cfg.get_supported_link_speeds_value(),
+      device_cfg.pcie_cfg.pl_cfg.get_target_link_speed_value(),
+      device_cfg.pcie_cfg.pl_cfg.get_expected_link_speed_value()), UVM_LOW)
 
     if (port_profile.role == PCIE_SVT_EP)
       device_cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b1;
@@ -95,7 +110,7 @@ class pcie_svt_port_env extends uvm_env;
         "%s: profile role disagrees with Unified HDL device_is_root=%0d",
         profile.port_id, cfg.device_is_root))
     apply_profile_to_cfg(profile, cfg);
-    status = svt_pcie_device_status::type_id::create("status");
+    status = svt_pcie_device_status::type_id::create("status", this);
     uvm_config_db#(svt_pcie_device_configuration)::set(
       this, "agent", "cfg", cfg);
     uvm_config_db#(svt_pcie_device_status)::set(

@@ -1,3 +1,5 @@
+`include "pcie_svt_topology_checks.svh"
+
 package pcie_svt_integration_pkg;
   import uvm_pkg::*;
   `include "uvm_macros.svh"
@@ -13,8 +15,10 @@ package pcie_svt_integration_pkg;
     return PCIE_SVT_TOPO_EP_X16;
 `elsif PCIE_TOPO_EP_2X8
     return PCIE_SVT_TOPO_EP_2X8;
-`else
+`elsif PCIE_TOPO_SWITCH_1X16_4X4
     return PCIE_SVT_TOPO_SWITCH;
+`else
+    `error "PCIe topology contract: compiled_topology has no selected topology"
 `endif
   endfunction
 

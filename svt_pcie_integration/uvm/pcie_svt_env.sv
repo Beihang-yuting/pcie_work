@@ -37,17 +37,18 @@ class pcie_svt_env extends uvm_env;
   endfunction
 
   virtual function void build_phase(uvm_phase phase);
-    string gen_arg;
+    string gen_values[$];
     string vif_key;
     svt_pcie_vif selected_vif;
 
     super.build_phase(phase);
     topology = compiled_topology();
-    if (!$value$plusargs("PCIE_GEN=%s", gen_arg) ||
-        $sscanf(gen_arg, "%d", pcie_gen) != 1 ||
-        !(pcie_gen inside {4,5}) ||
-        !((gen_arg == "4") || (gen_arg == "5")))
+    void'(uvm_cmdline_processor::get_inst().get_arg_values(
+      "+PCIE_GEN=", gen_values));
+    if ((gen_values.size() != 1) ||
+        !((gen_values[0] == "4") || (gen_values[0] == "5")))
       `uvm_fatal("PCIE_GEN", "Required +PCIE_GEN must be 4 or 5")
+    pcie_gen = (gen_values[0] == "4") ? 4 : 5;
 
     profiles = pcie_svt_profile_set::type_id::create("profiles");
     profiles.build_for_topology(topology, pcie_gen);
@@ -77,6 +78,10 @@ class pcie_svt_env extends uvm_env;
     for (int unsigned i = 0; i < PCIE_SVT_MAX_PORTS; i++) begin
       if (port[i] == null)
         continue;
+      if ((port[i].profile == null) || (port[i].status == null) ||
+          (port[i].agent == null) || (port[i].agent.virt_seqr == null))
+        `uvm_fatal("PORT_REGISTRY", $sformatf(
+          "port index %0d has incomplete profile/status/agent/sequencer handles", i))
       vseqr.port_seqr[i] = port[i].agent.virt_seqr;
       vseqr.port_status[i] = port[i].status;
       vseqr.port_profile[i] = port[i].profile;
