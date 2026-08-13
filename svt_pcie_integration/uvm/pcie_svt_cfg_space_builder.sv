@@ -126,6 +126,59 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     return fn.bars[bar_number].aperture == expected_aperture;
   endfunction
 
+  function bit validate_msix_layout(pcie_svt_function_profile fn);
+    longint unsigned pba_offset;
+    longint unsigned table_offset;
+    pba_offset = fn.msix_pba_offset;
+    table_offset = fn.msix_table_offset;
+    if (table_offset > (fn.bars[fn.msix_table_bar].aperture - 16)) begin
+      `uvm_error("CFG_BUILD", $sformatf(
+        "%s: MSI-X table exceeds BAR%0d aperture",
+        fn.get_name(), fn.msix_table_bar))
+      return 0;
+    end
+    if (pba_offset > (fn.bars[fn.msix_pba_bar].aperture - 8)) begin
+      `uvm_error("CFG_BUILD", $sformatf(
+        "%s: MSI-X PBA exceeds BAR%0d aperture",
+        fn.get_name(), fn.msix_pba_bar))
+      return 0;
+    end
+    if (fn.msix_table_bar == fn.msix_pba_bar) begin
+      if (((table_offset <= pba_offset) &&
+           ((pba_offset - table_offset) < 16)) ||
+          ((pba_offset < table_offset) &&
+           ((table_offset - pba_offset) < 8))) begin
+        `uvm_error("CFG_BUILD", $sformatf(
+          "%s: MSI-X table and PBA overlap in BAR%0d",
+          fn.get_name(), fn.msix_table_bar))
+        return 0;
+      end
+    end
+    return 1;
+  endfunction
+
+  function bit validate_expansion_rom(pcie_svt_function_profile fn);
+    if (!fn.expansion_rom.implemented)
+      return 1;
+    if ((fn.expansion_rom.aperture < 2048) ||
+        ((fn.expansion_rom.aperture &
+          (fn.expansion_rom.aperture - 1)) != 0)) begin
+      `uvm_error("CFG_BUILD", $sformatf(
+        "%s: Expansion ROM aperture must be a power of two and at least 2 KiB",
+        fn.get_name()))
+      return 0;
+    end
+    if ((fn.expansion_rom.initial_base > 64'hffff_ffff) ||
+        (fn.expansion_rom.aperture > 64'h1_0000_0000) ||
+        (fn.expansion_rom.initial_base >
+         (64'h1_0000_0000 - fn.expansion_rom.aperture))) begin
+      `uvm_error("CFG_BUILD", $sformatf(
+        "%s: Expansion ROM range exceeds 4 GiB", fn.get_name()))
+      return 0;
+    end
+    return 1;
+  endfunction
+
   function bit validate_bar_layout(pcie_svt_function_profile fn);
     int unsigned max_bars;
     longint unsigned first_end;
@@ -181,10 +234,62 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     return 1;
   endfunction
 
+  function automatic bit [31:0] raw_override_protected_mask(
+      pcie_svt_function_profile fn,
+      int unsigned byte_offset,
+      ref bit [31:0] image[1024]);
+    int unsigned entries;
+    int unsigned bar_number;
+    int unsigned rebar_end;
+    case (byte_offset)
+      12'h000, 12'h008, 12'h00c: return 32'hffff_ffff;
+      12'h004: return 32'hffff_0000;
+      12'h018, 12'h01c, 12'h020, 12'h024, 12'h028:
+        if (fn.header_type[6:0] == 7'h01)
+          return 32'hffff_ffff;
+      12'h02c, 12'h030: return 32'hffff_ffff;
+      12'h034: return 32'hffff_ffff;
+      12'h038: if (fn.header_type[6:0] == 7'h01)
+                 return 32'hffff_ffff;
+      12'h03c: return 32'hffff_ff00;
+      12'h040, 12'h044, 12'h048, 12'h04c, 12'h064, 12'h06c:
+        return 32'hffff_ffff;
+      12'h080: if (fn.enable_msi) return 32'h0000_ffff;
+      12'h0a0, 12'h0a4, 12'h0a8:
+        if (fn.enable_msix) return 32'hffff_ffff;
+      12'h104:
+        if (!fn.enable_aer && (first_ext_cap_offset(fn) != 0))
+          return 32'hffff_ffff;
+      default: begin
+      end
+    endcase
+    if ((byte_offset >= 12'h010) &&
+        (byte_offset <= ((fn.header_type[6:0] == 7'h00) ? 12'h024 :
+                                                            12'h014))) begin
+      bar_number = (byte_offset - 12'h010) / 4;
+      if ((bar_number == 0) || !fn.bars[bar_number-1].implemented ||
+          !fn.bars[bar_number-1].is_64bit)
+        return 32'h0000_000f;
+    end
+    if (is_ext_cap_header(byte_offset) &&
+        (image[byte_offset/4] != 0))
+      return 32'hffff_ffff;
+    if (fn.enable_rebar && (byte_offset >= 12'h304)) begin
+      entries = 0;
+      foreach (fn.rebar_supported_sizes[i])
+        if (fn.rebar_supported_sizes[i] != 0)
+          entries++;
+      rebar_end = 12'h304 + (entries * 8);
+      if (byte_offset < rebar_end)
+        return 32'hffff_ffff;
+    end
+    return 32'h0000_0000;
+  endfunction
+
   function bit validate_raw_overrides(pcie_svt_function_profile fn,
                                       ref bit [31:0] image[1024]);
     int unsigned byte_offset;
-    int unsigned bar_number;
+    bit [31:0] protected_mask;
     bit [31:0] value;
     foreach (fn.raw_dw_override[index]) begin
       if (index > 1023) begin
@@ -194,34 +299,11 @@ class pcie_svt_cfg_space_builder extends uvm_object;
       end
       byte_offset = index * 4;
       value = fn.raw_dw_override[index];
-      if (byte_offset == 12'h034) begin
-        `uvm_error("CFG_BUILD", "raw override of Capability Pointer is forbidden")
-        return 0;
-      end
-      if ((byte_offset >= 12'h010) &&
-          (byte_offset <= ((fn.header_type[6:0] == 7'h00) ? 12'h024 :
-                                                              12'h014))) begin
-        bar_number = (byte_offset - 12'h010) / 4;
-        if (((bar_number == 0) || !fn.bars[bar_number-1].implemented ||
-             !fn.bars[bar_number-1].is_64bit) &&
-            (value[3:0] != image[index][3:0])) begin
-          `uvm_error("CFG_BUILD", $sformatf(
-            "raw override of BAR type bits at 0x%03h is forbidden", byte_offset))
-          return 0;
-        end
-      end
-      if (is_std_cap_header(byte_offset) &&
-          (value[15:8] != image[index][15:8])) begin
+      protected_mask = raw_override_protected_mask(
+        fn, byte_offset, image);
+      if (((value ^ image[index]) & protected_mask) != 0) begin
         `uvm_error("CFG_BUILD", $sformatf(
-          "raw override of standard capability next pointer at 0x%03h is forbidden",
-          byte_offset))
-        return 0;
-      end
-      if (is_ext_cap_header(byte_offset) &&
-          (value[31:20] != image[index][31:20])) begin
-        `uvm_error("CFG_BUILD", $sformatf(
-          "raw override of extended capability next pointer at 0x%03h is forbidden",
-          byte_offset))
+          "raw override changes protected fields at 0x%03h", byte_offset))
         return 0;
       end
     end
@@ -349,6 +431,10 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     end
     if (!validate_bar_layout(fn))
       return 0;
+    if (!validate_expansion_rom(fn))
+      return 0;
+    if (fn.enable_msix && !validate_msix_layout(fn))
+      return 0;
     if (fn.enable_rebar) begin
       foreach (fn.rebar_supported_sizes[i]) begin
         if (fn.rebar_supported_sizes[i][31:28] != 0) begin
@@ -401,7 +487,10 @@ class pcie_svt_cfg_space_builder extends uvm_object;
       put_dw(image, 12'h028, 32'h0000_0000);
       put_dw(image, 12'h02c, 32'h0000_0000);
       put_dw(image, 12'h030, 32'h0000_0000);
-      put_dw(image, 12'h038, 32'h0000_0000);
+      rom_value = 0;
+      if (fn.expansion_rom.implemented)
+        rom_value = fn.expansion_rom.initial_base[31:0] & 32'hffff_f800;
+      put_dw(image, 12'h038, rom_value);
     end
     put_dw(image, 12'h034, 32'h0000_0040);
     put_dw(image, 12'h03c, {16'h0000, fn.interrupt_pin, 8'h00});

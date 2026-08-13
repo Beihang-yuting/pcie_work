@@ -628,6 +628,43 @@ class pcie_svt_profile_unit_test extends uvm_test;
                   image['h304/4][31:4] == 28'h0000_020,
                   "AER-disabled REBAR fixed-offset chain mismatch");
 
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "MSI-X-boundary-positive port clone failed");
+    bad.functions[0].enable_msix = 1;
+    bad.functions[0].msix_table_bar = 0;
+    bad.functions[0].msix_pba_bar = 2;
+    bad.functions[0].msix_table_offset =
+      bad.functions[0].bars[0].aperture - 16;
+    bad.functions[0].msix_pba_offset =
+      bad.functions[0].bars[2].aperture - 8;
+    profile_check(b.build_function(bad.functions[0], 4, 5, image),
+                  "MSI-X structures ending at BAR apertures must build");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "Type-0-ROM-positive port clone failed");
+    bad.functions[0].expansion_rom.implemented = 1;
+    bad.functions[0].expansion_rom.aperture = 2048;
+    bad.functions[0].expansion_rom.initial_base = 64'h8000_0000;
+    profile_check(b.build_function(bad.functions[0], 4, 5, image) &&
+                  image['h030/4] == 32'h8000_0000,
+                  "Type-0 Expansion ROM encoding/reset mismatch");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_RC0].clone()),
+                  "Type-1-ROM-positive port clone failed");
+    bad.functions[0].expansion_rom.implemented = 1;
+    bad.functions[0].expansion_rom.aperture = 4096;
+    bad.functions[0].expansion_rom.initial_base = 64'h9000_0000;
+    profile_check(b.build_function(bad.functions[0], 16, 5, image) &&
+                  image['h038/4] == 32'h9000_0000,
+                  "Type-1 Expansion ROM encoding/reset mismatch");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "safe-override-positive port clone failed");
+    bad.functions[0].raw_dw_override['h004/4] = 32'h0010_0007;
+    profile_check(b.build_function(bad.functions[0], 4, 5, image) &&
+                  image['h004/4] == 32'h0010_0007,
+                  "safe command-register raw override failed");
+
     catcher = pcie_svt_expected_profile_error_catcher::type_id::create(
       "expected_builder_errors");
     uvm_report_cb::add(null, catcher);
@@ -636,12 +673,122 @@ class pcie_svt_profile_unit_test extends uvm_test;
                   "anchor-override-negative port clone failed");
     bad.functions[0].enable_ats = 1;
     bad.functions[0].raw_dw_override['h100/4] = 32'h0001_000b;
-    catcher.set_expected(
-      "raw override of extended capability next pointer at 0x100 is forbidden",
-      "CFG_BUILD");
+    catcher.set_expected("raw override changes protected fields at 0x100",
+                         "CFG_BUILD");
     check_expected_failure(catcher,
       b.build_function(bad.functions[0], 4, 5, image),
       "AER-disabled chain-anchor next-pointer override");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "MSI-X-table-bounds-negative port clone failed");
+    bad.functions[0].enable_msix = 1;
+    bad.functions[0].msix_table_bar = 0;
+    bad.functions[0].msix_pba_bar = 2;
+    bad.functions[0].msix_table_offset =
+      bad.functions[0].bars[0].aperture - 8;
+    catcher.set_expected("MSI-X table exceeds BAR0 aperture", "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "MSI-X table exact-end overflow");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "MSI-X-PBA-bounds-negative port clone failed");
+    bad.functions[0].enable_msix = 1;
+    bad.functions[0].msix_table_bar = 0;
+    bad.functions[0].msix_pba_bar = 2;
+    bad.functions[0].msix_pba_offset = bad.functions[0].bars[2].aperture;
+    catcher.set_expected("MSI-X PBA exceeds BAR2 aperture", "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "MSI-X PBA exact-end overflow");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "MSI-X-overlap-negative port clone failed");
+    bad.functions[0].enable_msix = 1;
+    bad.functions[0].msix_table_bar = 0;
+    bad.functions[0].msix_pba_bar = 0;
+    bad.functions[0].msix_table_offset = 0;
+    bad.functions[0].msix_pba_offset = 8;
+    catcher.set_expected("MSI-X table and PBA overlap in BAR0", "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "overlapping MSI-X table and PBA");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "MSI-X-override-negative port clone failed");
+    bad.functions[0].enable_msix = 1;
+    bad.functions[0].msix_table_bar = 0;
+    bad.functions[0].msix_pba_bar = 2;
+    bad.functions[0].raw_dw_override['h0a4/4] = 32'h0000_0007;
+    catcher.set_expected("raw override changes protected fields at 0x0a4",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "MSI-X Table BIR raw override");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "extended-ID-override-negative port clone failed");
+    bad.functions[0].enable_ats = 1;
+    bad.functions[0].raw_dw_override['h240/4] = 32'h0002_000e;
+    catcher.set_expected("raw override changes protected fields at 0x240",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "extended capability ID/version raw override");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "VSEC-length-override-negative port clone failed");
+    bad.functions[0].enable_ats = 1;
+    bad.functions[0].raw_dw_override['h104/4] = 32'h0090_0000;
+    catcher.set_expected("raw override changes protected fields at 0x104",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "VSEC anchor length raw override");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "REBAR-override-negative port clone failed");
+    bad.functions[0].enable_rebar = 1;
+    bad.functions[0].rebar_supported_sizes[0] = 32'h0000_0020;
+    bad.functions[0].rebar_current_size[0] = 5;
+    bad.functions[0].raw_dw_override['h308/4] = 32'h0000_0620;
+    catcher.set_expected("raw override changes protected fields at 0x308",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "REBAR control metadata raw override");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "small-ROM-negative port clone failed");
+    bad.functions[0].expansion_rom.implemented = 1;
+    bad.functions[0].expansion_rom.aperture = 1024;
+    catcher.set_expected(
+      "Expansion ROM aperture must be a power of two and at least 2 KiB",
+      "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "Expansion ROM below 2 KiB");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "wide-ROM-negative port clone failed");
+    bad.functions[0].expansion_rom.implemented = 1;
+    bad.functions[0].expansion_rom.aperture = 2048;
+    bad.functions[0].expansion_rom.initial_base = 64'h1_0000_0000;
+    catcher.set_expected("Expansion ROM range exceeds 4 GiB", "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "Expansion ROM base above 32 bits");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "misaligned-ROM-negative port clone failed");
+    bad.functions[0].expansion_rom.implemented = 1;
+    bad.functions[0].expansion_rom.aperture = 2048;
+    bad.functions[0].expansion_rom.initial_base = 64'h8000_0400;
+    catcher.set_expected("expansion_rom: BAR base is not aperture aligned",
+                         "PROFILE");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image),
+      "misaligned Expansion ROM base");
 
     profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
                   "PRI-negative port clone failed");
@@ -661,7 +808,7 @@ class pcie_svt_profile_unit_test extends uvm_test;
     profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
                   "override-negative port clone failed");
     bad.functions[0].raw_dw_override['h034/4] = 32'hdead_beef;
-    catcher.set_expected("raw override of Capability Pointer is forbidden",
+    catcher.set_expected("raw override changes protected fields at 0x034",
                          "CFG_BUILD");
     check_expected_failure(catcher,
       b.build_function(bad.functions[0], 4, 5, image), "Capability Pointer override");
