@@ -1,5 +1,6 @@
 class pcie_svt_expected_profile_error_catcher extends uvm_report_catcher;
-  int unsigned caught_count;
+  string expected_substring;
+  int unsigned matched_count;
 
   `uvm_object_utils(pcie_svt_expected_profile_error_catcher)
 
@@ -7,9 +8,24 @@ class pcie_svt_expected_profile_error_catcher extends uvm_report_catcher;
     super.new(name);
   endfunction
 
+  function void set_expected(string substring);
+    expected_substring = substring;
+    matched_count = 0;
+  endfunction
+
+  function bit message_contains(string message, string substring);
+    if ((substring.len() == 0) || (message.len() < substring.len()))
+      return 0;
+    for (int i = 0; i <= message.len() - substring.len(); i++)
+      if (message.substr(i, i + substring.len() - 1) == substring)
+        return 1;
+    return 0;
+  endfunction
+
   virtual function action_e catch();
-    if (get_id() == "PROFILE") begin
-      caught_count++;
+    if ((get_id() == "PROFILE") &&
+        message_contains(get_message(), expected_substring)) begin
+      matched_count++;
       return CAUGHT;
     end
     return THROW;
@@ -27,6 +43,30 @@ class pcie_svt_profile_unit_test extends uvm_test;
   function void profile_check(bit condition, string message);
     if (!condition)
       `uvm_error("PROFILE_TEST", message)
+  endfunction
+
+  function void check_expected_failure(
+      pcie_svt_expected_profile_error_catcher catcher,
+      bit validation_result,
+      string description);
+    profile_check(!validation_result, {description, " must fail validation"});
+    profile_check(catcher.matched_count == 1,
+                  $sformatf("%s must emit exactly one matching PROFILE report; got %0d",
+                            description, catcher.matched_count));
+  endfunction
+
+  function pcie_svt_function_profile make_valid_function(string name);
+    return pcie_svt_function_profile::type_id::create(name);
+  endfunction
+
+  function pcie_svt_port_profile make_valid_port(string name);
+    pcie_svt_port_profile result;
+    result = pcie_svt_port_profile::type_id::create(name);
+    result.port_id = name;
+    result.link_width = 4;
+    result.max_gen = 4;
+    result.functions.push_back(make_valid_function({name, "_pf0"}));
+    return result;
   endfunction
 
   function void check_function_defaults(pcie_svt_function_profile fn,
@@ -123,24 +163,24 @@ class pcie_svt_profile_unit_test extends uvm_test;
       PCIE_SVT_TOPO_EP_X16: begin
         profile_check(profiles.active_count() == 1,
               "EP_X16 primary must contain one port");
-        check_port(profiles.port[PCIE_SVT_PRIMARY_PORT0], "rc0", PCIE_SVT_RC,
+        check_port(profiles.port[PCIE_SVT_PRIMARY_RC0], "rc0", PCIE_SVT_RC,
                    16, 0, gen, 16'h1d0f, 16'hf000);
       end
       PCIE_SVT_TOPO_EP_2X8: begin
         profile_check(profiles.active_count() == 2,
               "EP_2X8 primary must contain two ports");
-        check_port(profiles.port[PCIE_SVT_PRIMARY_PORT0], "rc0", PCIE_SVT_RC,
+        check_port(profiles.port[PCIE_SVT_PRIMARY_RC0], "rc0", PCIE_SVT_RC,
                    8, 0, gen, 16'h1d0f, 16'hf000);
-        check_port(profiles.port[PCIE_SVT_PRIMARY_PORT1], "rc1", PCIE_SVT_RC,
+        check_port(profiles.port[PCIE_SVT_PRIMARY_RC1], "rc1", PCIE_SVT_RC,
                    8, 1, gen, 16'h1d0f, 16'hf000);
       end
       PCIE_SVT_TOPO_SWITCH: begin
         profile_check(profiles.active_count() == 5,
               "switch primary must contain five ports");
-        check_port(profiles.port[PCIE_SVT_PRIMARY_PORT0], "rc0", PCIE_SVT_RC,
+        check_port(profiles.port[PCIE_SVT_PRIMARY_RC0], "rc0", PCIE_SVT_RC,
                    16, 0, gen, 16'h1d0f, 16'hf000);
         for (int i = 0; i < 4; i++)
-          check_port(profiles.port[PCIE_SVT_PRIMARY_PORT1+i],
+          check_port(profiles.port[PCIE_SVT_PRIMARY_EP0+i],
                      $sformatf("ep%0d", i), PCIE_SVT_EP, 4, 0, gen,
                      16'h20f9, 16'h5011+i);
       end
@@ -188,7 +228,6 @@ class pcie_svt_profile_unit_test extends uvm_test;
     pcie_svt_bar_profile bar;
     pcie_svt_function_profile fn;
     pcie_svt_port_profile port_profile;
-    int unsigned caught_before;
 
     catcher = pcie_svt_expected_profile_error_catcher::type_id::create(
       "expected_profile_errors");
@@ -197,105 +236,138 @@ class pcie_svt_profile_unit_test extends uvm_test;
     bar = pcie_svt_bar_profile::type_id::create("small_bar");
     bar.implemented = 1;
     bar.aperture = 8;
-    caught_before = catcher.caught_count;
-    profile_check(!bar.validate("small_bar") && catcher.caught_count > caught_before,
-          "implemented BAR below 16 bytes must fail validation");
+    catcher.set_expected("small_bar: BAR aperture must be a power of two and at least 16 bytes");
+    check_expected_failure(catcher, bar.validate("small_bar"),
+                           "implemented BAR below 16 bytes");
+
+    bar = pcie_svt_bar_profile::type_id::create("non_power_bar");
+    bar.implemented = 1;
     bar.aperture = 48;
-    caught_before = catcher.caught_count;
-    profile_check(!bar.validate("non_power_bar") && catcher.caught_count > caught_before,
-          "non-power-of-two BAR must fail validation");
+    catcher.set_expected("non_power_bar: BAR aperture must be a power of two and at least 16 bytes");
+    check_expected_failure(catcher, bar.validate("non_power_bar"),
+                           "non-power-of-two BAR");
+
+    bar = pcie_svt_bar_profile::type_id::create("misaligned_bar");
+    bar.implemented = 1;
     bar.aperture = 4096;
     bar.initial_base = 2048;
-    caught_before = catcher.caught_count;
-    profile_check(!bar.validate("misaligned_bar") && catcher.caught_count > caught_before,
-          "misaligned BAR must fail validation");
+    catcher.set_expected("misaligned_bar: BAR base is not aperture aligned");
+    check_expected_failure(catcher, bar.validate("misaligned_bar"),
+                           "misaligned BAR");
 
-    fn = pcie_svt_function_profile::type_id::create("negative_fn");
+    fn = make_valid_function("pri_fn");
     fn.enable_pri = 1;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "PRI without ATS must fail validation");
-    fn.enable_pri = 0;
-    fn.enable_pasid = 1;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "PASID without ATS must fail validation");
-    fn.enable_pasid = 0;
+    catcher.set_expected("pri_fn: PRI requires ATS");
+    check_expected_failure(catcher, fn.validate("pri_fn"), "PRI without ATS");
 
+    fn = make_valid_function("pasid_fn");
+    fn.enable_pasid = 1;
+    catcher.set_expected("pasid_fn: PASID requires ATS");
+    check_expected_failure(catcher, fn.validate("pasid_fn"),
+                           "PASID without ATS");
+
+    fn = make_valid_function("msix_unimplemented_fn");
     fn.enable_msix = 1;
     fn.msix_table_bar = 0;
     fn.msix_pba_bar = 2;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "MSI-X BIR to unimplemented BAR must fail validation");
+    fn.bars[2].implemented = 1;
+    fn.bars[2].aperture = 4096;
+    catcher.set_expected("msix_unimplemented_fn.msix_table: MSI-X BIR selects an unimplemented BAR");
+    check_expected_failure(catcher, fn.validate("msix_unimplemented_fn"),
+                           "MSI-X BIR to unimplemented BAR");
+
+    fn = make_valid_function("msix_upper_fn");
+    fn.enable_msix = 1;
     fn.bars[0].implemented = 1;
     fn.bars[0].is_64bit = 1;
     fn.bars[0].aperture = 4096;
     fn.bars[2].implemented = 1;
     fn.bars[2].aperture = 4096;
     fn.msix_table_bar = 1;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "MSI-X BIR to upper half of 64-bit BAR must fail validation");
-    fn.msix_table_bar = 0;
-    fn.msix_table_offset = 3;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "unaligned MSI-X table offset must fail validation");
-    fn.msix_table_offset = 0;
-    fn.msix_pba_offset = 4;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "unaligned MSI-X PBA offset must fail validation");
-    fn.enable_msix = 0;
+    fn.msix_pba_bar = 2;
+    catcher.set_expected("msix_upper_fn.msix_table: MSI-X BIR selects the upper half of a 64-bit BAR");
+    check_expected_failure(catcher, fn.validate("msix_upper_fn"),
+                           "MSI-X BIR to upper half of 64-bit BAR");
 
+    fn = make_valid_function("msix_table_align_fn");
+    fn.enable_msix = 1;
+    fn.bars[0].implemented = 1;
+    fn.bars[0].aperture = 4096;
+    fn.bars[2].implemented = 1;
+    fn.bars[2].aperture = 4096;
+    fn.msix_table_bar = 0;
+    fn.msix_pba_bar = 2;
+    fn.msix_table_offset = 3;
+    catcher.set_expected("msix_table_align_fn: MSI-X table offset must be 8-byte aligned");
+    check_expected_failure(catcher, fn.validate("msix_table_align_fn"),
+                           "unaligned MSI-X table offset");
+
+    fn = make_valid_function("msix_pba_align_fn");
+    fn.enable_msix = 1;
+    fn.bars[0].implemented = 1;
+    fn.bars[0].aperture = 4096;
+    fn.bars[2].implemented = 1;
+    fn.bars[2].aperture = 4096;
+    fn.msix_table_bar = 0;
+    fn.msix_pba_bar = 2;
+    fn.msix_pba_offset = 4;
+    catcher.set_expected("msix_pba_align_fn: MSI-X PBA offset must be 8-byte aligned");
+    check_expected_failure(catcher, fn.validate("msix_pba_align_fn"),
+                           "unaligned MSI-X PBA offset");
+
+    fn = make_valid_function("rebar_unimplemented_fn");
     fn.enable_rebar = 1;
     fn.rebar_supported_sizes[4] = 32'h1;
     fn.rebar_current_size[4] = 0;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "REBAR entry for an unimplemented BAR must fail validation");
+    catcher.set_expected("rebar_unimplemented_fn.BAR4: REBAR entry requires an implemented BAR");
+    check_expected_failure(catcher, fn.validate("rebar_unimplemented_fn"),
+                           "REBAR entry for an unimplemented BAR");
+
+    fn = make_valid_function("rebar_bounds_fn");
+    fn.enable_rebar = 1;
+    fn.bars[4].implemented = 1;
+    fn.bars[4].aperture = 4096;
+    fn.rebar_supported_sizes[4] = 32'h1;
+    fn.rebar_current_size[4] = 32;
+    catcher.set_expected("rebar_bounds_fn.BAR4: REBAR current-size encoding is out of range");
+    check_expected_failure(catcher, fn.validate("rebar_bounds_fn"),
+                           "out-of-range REBAR encoding");
+
+    fn = make_valid_function("rebar_unsupported_fn");
+    fn.enable_rebar = 1;
     fn.bars[4].implemented = 1;
     fn.bars[4].aperture = 4096;
     fn.rebar_supported_sizes[4] = 32'h2;
-    fn.rebar_current_size[4] = 32;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "out-of-range REBAR encoding must fail validation safely");
     fn.rebar_current_size[4] = 2;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "unsupported REBAR current encoding must fail validation");
+    catcher.set_expected("rebar_unsupported_fn.BAR4: REBAR current size is not supported");
+    check_expected_failure(catcher, fn.validate("rebar_unsupported_fn"),
+                           "unsupported REBAR current encoding");
 
-    fn.enable_rebar = 0;
+    fn = make_valid_function("null_bar_fn");
     fn.bars[0] = null;
-    caught_before = catcher.caught_count;
-    profile_check(!fn.validate("negative_fn") && catcher.caught_count > caught_before,
-          "null BAR handle must fail validation");
+    catcher.set_expected("null_bar_fn.BAR0: null BAR handle");
+    check_expected_failure(catcher, fn.validate("null_bar_fn"),
+                           "null BAR handle");
 
-    port_profile = pcie_svt_port_profile::type_id::create("negative_port");
-    port_profile.port_id = "bad";
+    port_profile = make_valid_port("invalid_width_port");
     port_profile.link_width = 2;
-    port_profile.max_gen = 4;
-    port_profile.functions.push_back(fn);
-    caught_before = catcher.caught_count;
-    profile_check(!port_profile.validate() && catcher.caught_count > caught_before,
-          "invalid link width must fail validation");
-    port_profile.link_width = 4;
+    catcher.set_expected("invalid_width_port: link width must be x4, x8, or x16");
+    check_expected_failure(catcher, port_profile.validate(), "invalid link width");
+
+    port_profile = make_valid_port("invalid_gen_port");
     port_profile.max_gen = 3;
-    caught_before = catcher.caught_count;
-    profile_check(!port_profile.validate() && catcher.caught_count > caught_before,
-          "invalid generation must fail validation");
-    port_profile.max_gen = 4;
+    catcher.set_expected("invalid_gen_port: max_gen must be Gen4 or Gen5");
+    check_expected_failure(catcher, port_profile.validate(), "invalid generation");
+
+    port_profile = make_valid_port("empty_id_port");
     port_profile.port_id = "";
-    caught_before = catcher.caught_count;
-    profile_check(!port_profile.validate() && catcher.caught_count > caught_before,
-          "empty port ID must fail validation");
-    port_profile.port_id = "bad";
+    catcher.set_expected("port_id must not be empty");
+    check_expected_failure(catcher, port_profile.validate(), "empty port ID");
+
+    port_profile = make_valid_port("missing_pf0_port");
     port_profile.functions.delete();
-    caught_before = catcher.caught_count;
-    profile_check(!port_profile.validate() && catcher.caught_count > caught_before,
-          "missing PF0 must fail validation");
+    catcher.set_expected("missing_pf0_port: PF0 must be present");
+    check_expected_failure(catcher, port_profile.validate(), "missing PF0");
 
     uvm_report_cb::delete(null, catcher);
   endfunction
@@ -308,21 +380,21 @@ class pcie_svt_profile_unit_test extends uvm_test;
     profiles = pcie_svt_profile_set::type_id::create("rebuild_profiles");
     peers = pcie_svt_profile_set::type_id::create("independent_peers");
     profiles.build_for_topology(PCIE_SVT_TOPO_SWITCH, 5);
-    original = profiles.port[PCIE_SVT_PRIMARY_PORT0];
+    original = profiles.port[PCIE_SVT_PRIMARY_RC0];
     peers.build_peer_for_topology(PCIE_SVT_TOPO_SWITCH, 5);
     profile_check(original != peers.port[PCIE_SVT_PEER_PORT0],
           "primary and peer profiles must not alias");
     profiles.build_for_topology(PCIE_SVT_TOPO_EP_X16, 4);
     profile_check(profiles.active_count() == 1,
           "rebuild must clear previously active primary ports");
-    profile_check(profiles.port[PCIE_SVT_PRIMARY_PORT0] != original,
+    profile_check(profiles.port[PCIE_SVT_PRIMARY_RC0] != original,
           "rebuild must create a fresh primary port object");
-    profile_check(profiles.port[PCIE_SVT_PRIMARY_PORT1] == null &&
+    profile_check(profiles.port[PCIE_SVT_PRIMARY_RC1] == null &&
           profiles.port[PCIE_SVT_PEER_PORT0] == null,
           "rebuild must clear unused primary and peer registry slots");
     peers.build_peer_for_topology(PCIE_SVT_TOPO_EP_X16, 4);
     profile_check(peers.active_count() == 1 &&
-          peers.port[PCIE_SVT_PRIMARY_PORT0] == null &&
+          peers.port[PCIE_SVT_PRIMARY_RC0] == null &&
           peers.port[PCIE_SVT_PEER_PORT1] == null,
           "peer rebuild must clear all previous contents");
   endfunction
@@ -334,6 +406,13 @@ class pcie_svt_profile_unit_test extends uvm_test;
       `uvm_error("PROFILE_TEST", "+PCIE_GEN must select 4 or 5")
     profile_check((selected_gen == 4) || (selected_gen == 5),
           "+PCIE_GEN must select 4 or 5");
+    profile_check(PCIE_SVT_PRIMARY_RC0 == 0 &&
+                  PCIE_SVT_PRIMARY_RC1 == 1 &&
+                  PCIE_SVT_PRIMARY_EP0 == 1 &&
+                  PCIE_SVT_PRIMARY_EP1 == 2 &&
+                  PCIE_SVT_PRIMARY_EP2 == 3 &&
+                  PCIE_SVT_PRIMARY_EP3 == 4,
+                  "semantic primary registry indices changed");
 
     check_primary_topology(PCIE_SVT_TOPO_EP_X16, 4);
     check_primary_topology(PCIE_SVT_TOPO_EP_2X8, 4);

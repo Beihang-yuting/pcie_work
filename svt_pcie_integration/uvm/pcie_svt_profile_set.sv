@@ -124,15 +124,15 @@ class pcie_svt_profile_set extends uvm_object;
     check_build_args(topology, max_gen);
     case (topology)
       PCIE_SVT_TOPO_EP_X16:
-        add_port(PCIE_SVT_PRIMARY_PORT0, make_rc("rc0", 16, 0, max_gen));
+        add_port(PCIE_SVT_PRIMARY_RC0, make_rc("rc0", 16, 0, max_gen));
       PCIE_SVT_TOPO_EP_2X8: begin
-        add_port(PCIE_SVT_PRIMARY_PORT0, make_rc("rc0", 8, 0, max_gen));
-        add_port(PCIE_SVT_PRIMARY_PORT1, make_rc("rc1", 8, 1, max_gen));
+        add_port(PCIE_SVT_PRIMARY_RC0, make_rc("rc0", 8, 0, max_gen));
+        add_port(PCIE_SVT_PRIMARY_RC1, make_rc("rc1", 8, 1, max_gen));
       end
       PCIE_SVT_TOPO_SWITCH: begin
-        add_port(PCIE_SVT_PRIMARY_PORT0, make_rc("rc0", 16, 0, max_gen));
+        add_port(PCIE_SVT_PRIMARY_RC0, make_rc("rc0", 16, 0, max_gen));
         for (int i = 0; i < 4; i++)
-          add_port(PCIE_SVT_PRIMARY_PORT1+i,
+          add_port(PCIE_SVT_PRIMARY_EP0+i,
                    make_ep($sformatf("ep%0d", i), 4, 0, max_gen,
                            16'h20f9, 16'h5011+i));
       end

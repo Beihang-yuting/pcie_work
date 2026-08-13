@@ -8,6 +8,12 @@ localparam int unsigned PCIE_SVT_PRIMARY_PORT1 = 1;
 localparam int unsigned PCIE_SVT_PRIMARY_PORT2 = 2;
 localparam int unsigned PCIE_SVT_PRIMARY_PORT3 = 3;
 localparam int unsigned PCIE_SVT_PRIMARY_PORT4 = 4;
+localparam int unsigned PCIE_SVT_PRIMARY_RC0 = 0;
+localparam int unsigned PCIE_SVT_PRIMARY_RC1 = 1;
+localparam int unsigned PCIE_SVT_PRIMARY_EP0 = 1;
+localparam int unsigned PCIE_SVT_PRIMARY_EP1 = 2;
+localparam int unsigned PCIE_SVT_PRIMARY_EP2 = 3;
+localparam int unsigned PCIE_SVT_PRIMARY_EP3 = 4;
 localparam int unsigned PCIE_SVT_PEER_PORT0 = 5;
 localparam int unsigned PCIE_SVT_PEER_PORT1 = 6;
 localparam int unsigned PCIE_SVT_PEER_PORT2 = 7;
@@ -91,17 +97,17 @@ class pcie_svt_function_profile extends uvm_object;
       `uvm_error("PROFILE", {path, ": MSI-X BIR must select BAR0 through BAR5"})
       return 0;
     end
+    if ((bir > 0) && (bars[bir-1] != null) &&
+        bars[bir-1].implemented && bars[bir-1].is_64bit) begin
+      `uvm_error("PROFILE", {path, ": MSI-X BIR selects the upper half of a 64-bit BAR"})
+      return 0;
+    end
     if (bars[bir] == null) begin
       `uvm_error("PROFILE", {path, ": MSI-X BIR selects a null BAR handle"})
       return 0;
     end
     if (!bars[bir].implemented) begin
       `uvm_error("PROFILE", {path, ": MSI-X BIR selects an unimplemented BAR"})
-      return 0;
-    end
-    if ((bir > 0) && (bars[bir-1] != null) &&
-        bars[bir-1].implemented && bars[bir-1].is_64bit) begin
-      `uvm_error("PROFILE", {path, ": MSI-X BIR selects the upper half of a 64-bit BAR"})
       return 0;
     end
     return 1;
