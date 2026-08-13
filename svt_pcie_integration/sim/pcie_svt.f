@@ -10,5 +10,7 @@
 ../rtl/pcie_svt_vip_bootstrap.sv
 ../rtl/pcie_svt_serial_port_if.sv
 ../rtl/pcie_svt_reset_if.sv
+../rtl/pcie_svt_serial_adapter.sv
+../rtl/pcie_dut_placeholder.sv
 ../uvm/pcie_svt_integration_pkg.sv
 ../rtl/pcie_svt_topology_top.sv
