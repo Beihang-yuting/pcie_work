@@ -1,4 +1,5 @@
 class pcie_svt_expected_profile_error_catcher extends uvm_report_catcher;
+  string expected_id;
   string expected_substring;
   int unsigned matched_count;
 
@@ -8,7 +9,8 @@ class pcie_svt_expected_profile_error_catcher extends uvm_report_catcher;
     super.new(name);
   endfunction
 
-  function void set_expected(string substring);
+  function void set_expected(string substring, string report_id = "PROFILE");
+    expected_id = report_id;
     expected_substring = substring;
     matched_count = 0;
   endfunction
@@ -23,7 +25,7 @@ class pcie_svt_expected_profile_error_catcher extends uvm_report_catcher;
   endfunction
 
   virtual function action_e catch();
-    if ((get_id() == "PROFILE") &&
+    if ((get_id() == expected_id) &&
         message_contains(get_message(), expected_substring)) begin
       matched_count++;
       return CAUGHT;
@@ -51,8 +53,9 @@ class pcie_svt_profile_unit_test extends uvm_test;
       string description);
     profile_check(!validation_result, {description, " must fail validation"});
     profile_check(catcher.matched_count == 1,
-                  $sformatf("%s must emit exactly one matching PROFILE report; got %0d",
-                            description, catcher.matched_count));
+                  $sformatf("%s must emit exactly one matching %s report; got %0d",
+                            description, catcher.expected_id,
+                            catcher.matched_count));
   endfunction
 
   function pcie_svt_function_profile make_valid_function(string name);
@@ -540,6 +543,142 @@ class pcie_svt_profile_unit_test extends uvm_test;
           "peer rebuild must clear all previous contents");
   endfunction
 
+  function void check_cfg_space_builder();
+    pcie_svt_profile_set profiles;
+    pcie_svt_port_profile bad;
+    pcie_svt_cfg_space_builder b;
+    pcie_svt_expected_profile_error_catcher catcher;
+    bit [31:0] image[1024];
+
+    profiles = pcie_svt_profile_set::type_id::create("builder_profiles");
+    profiles.build_for_topology(PCIE_SVT_TOPO_SWITCH, 5);
+    b = pcie_svt_cfg_space_builder::type_id::create("b");
+    if (!b.build_function(profiles.port[1].functions[0], 4, 5, image))
+      `uvm_error("CFG_BUILD", "EP0 PF0 image build failed")
+    if (image['h000/4] !== 32'h5011_20f9)
+      `uvm_error("CFG_BUILD", "Vendor/Device DWORD mismatch")
+    if (image['h010/4] !== 32'h0000_000c ||
+        image['h018/4] !== 32'h0000_000c ||
+        image['h020/4] !== 32'h0000_000c)
+      `uvm_error("CFG_BUILD", "64-bit Prefetchable BAR attributes mismatch")
+    if (b.bar_sizing_dw(64'd32*1024*1024, 0) !== 32'hfe00_000c ||
+        b.bar_sizing_dw(64'd32*1024*1024, 1) !== 32'hffff_ffff ||
+        b.bar_sizing_dw(64'd64*1024, 0) !== 32'hffff_000c ||
+        b.bar_sizing_dw(64'd64*1024, 1) !== 32'hffff_ffff)
+      `uvm_error("CFG_BUILD", "BAR sizing DWORD mismatch")
+    if (b.bar_ro_map(64'd32*1024*1024, 0) !== 32'h01ff_ffff ||
+        b.bar_ro_map(64'd32*1024*1024, 1) !== 32'h0000_0000 ||
+        b.bar_ro_map(64'd64*1024, 0) !== 32'h0000_ffff ||
+        b.bar_ro_map(64'd64*1024, 1) !== 32'h0000_0000)
+      `uvm_error("CFG_BUILD", "BAR read-only map mismatch")
+    if (image['h034/4][7:0] !== 8'h40 ||
+        image['h004/4][20] !== 1'b1 ||
+        image['h040/4][7:0] !== 8'h10 ||
+        image['h040/4][15:8] !== 8'h00 ||
+        image['h04c/4][9:0] !== {6'd4, 4'd5} ||
+        image['h064/4][3:0] !== 4'b0001 ||
+        image['h06c/4][7:1] !== 7'b0011111)
+      `uvm_error("CFG_BUILD", "PCIe capability encoding mismatch")
+
+    if (!b.build_function(profiles.port[PCIE_SVT_PRIMARY_RC0].functions[0],
+                          16, 5, image))
+      `uvm_error("CFG_BUILD", "RC0 PF0 Type-1 image build failed")
+    if (image['h00c/4][22:16] !== 7'h01 ||
+        image['h040/4][23:20] !== 4'h4 ||
+        image['h010/4] !== 32'h0000_0000 ||
+        image['h014/4] !== 32'h0000_0000 ||
+        image['h018/4] !== 32'h0000_0000 ||
+        image['h01c/4] !== 32'h0000_0000 ||
+        image['h020/4] !== 32'h0000_0000 ||
+        image['h024/4] !== 32'h0000_0000)
+      `uvm_error("CFG_BUILD", "Type-1 header reset image mismatch")
+
+    catcher = pcie_svt_expected_profile_error_catcher::type_id::create(
+      "expected_builder_errors");
+    uvm_report_cb::add(null, catcher);
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "PRI-negative port clone failed");
+    bad.functions[0].enable_pri = 1;
+    bad.functions[0].enable_ats = 0;
+    catcher.set_expected("PRI requires ATS");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image), "PRI without ATS build");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "BAR-negative port clone failed");
+    bad.functions[0].bars[0].aperture = 64'd3*1024*1024;
+    catcher.set_expected("BAR aperture must be a power of two");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image), "non-power-of-two BAR build");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "override-negative port clone failed");
+    bad.functions[0].raw_dw_override['h034/4] = 32'hdead_beef;
+    catcher.set_expected("raw override of Capability Pointer is forbidden",
+                         "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image), "Capability Pointer override");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "MSI-X-negative port clone failed");
+    bad.functions[0].enable_msix = 1;
+    bad.functions[0].msix_table_bar = 1;
+    catcher.set_expected("MSI-X BIR selects the upper half");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image), "MSI-X upper-half BIR build");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "REBAR-negative port clone failed");
+    bad.functions[0].enable_rebar = 1;
+    bad.functions[0].rebar_supported_sizes[0] = '0;
+    catcher.set_expected("REBAR requires at least one configured entry");
+    check_expected_failure(catcher,
+      b.build_function(bad.functions[0], 4, 5, image), "empty REBAR build");
+
+    profile_check($cast(bad, profiles.port[PCIE_SVT_PRIMARY_EP0].clone()),
+                  "capability-positive port clone failed");
+    bad.functions[0].enable_msi = 1;
+    bad.functions[0].enable_msix = 1;
+    bad.functions[0].msix_table_bar = 0;
+    bad.functions[0].msix_pba_bar = 2;
+    bad.functions[0].enable_aer = 1;
+    bad.functions[0].enable_sriov = 1;
+    bad.functions[0].enable_ats = 1;
+    bad.functions[0].enable_pri = 1;
+    bad.functions[0].enable_pasid = 1;
+    bad.functions[0].enable_ari = 1;
+    bad.functions[0].enable_acs = 1;
+    bad.functions[0].enable_rebar = 1;
+    bad.functions[0].rebar_supported_sizes[0] = 32'h0000_0020;
+    bad.functions[0].rebar_current_size[0] = 5;
+    profile_check(b.build_function(bad.functions[0], 4, 5, image),
+                  "capability-rich image build failed");
+    profile_check(image['h040/4][15:8] == 8'h80 &&
+                  image['h080/4][15:8] == 8'ha0 &&
+                  image['h0a0/4][15:8] == 8'h00 &&
+                  image['h100/4][31:20] == 12'h180 &&
+                  image['h180/4][31:20] == 12'h240 &&
+                  image['h240/4][31:20] == 12'h260 &&
+                  image['h260/4][31:20] == 12'h280 &&
+                  image['h280/4][31:20] == 12'h2a0 &&
+                  image['h2a0/4][31:20] == 12'h2c0 &&
+                  image['h2c0/4][31:20] == 12'h300 &&
+                  image['h300/4][31:20] == 12'h000,
+                  "standard or extended capability chain mismatch");
+
+    catcher.set_expected("link_width must be x4, x8, or x16", "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(profiles.port[PCIE_SVT_PRIMARY_EP0].functions[0],
+                       2, 5, image), "invalid builder link width");
+    catcher.set_expected("max_gen must be Gen4 or Gen5", "CFG_BUILD");
+    check_expected_failure(catcher,
+      b.build_function(profiles.port[PCIE_SVT_PRIMARY_EP0].functions[0],
+                       4, 3, image), "invalid builder generation");
+
+    uvm_report_cb::delete(null, catcher);
+  endfunction
+
   task run_phase(uvm_phase phase);
     int selected_gen;
     phase.raise_objection(this);
@@ -570,6 +709,7 @@ class pcie_svt_profile_unit_test extends uvm_test;
     check_negative_validation();
     check_rebuild_and_independence();
     check_deep_copy();
+    check_cfg_space_builder();
 
     if (uvm_report_server::get_server().get_severity_count(UVM_ERROR) == 0 &&
         uvm_report_server::get_server().get_severity_count(UVM_FATAL) == 0)

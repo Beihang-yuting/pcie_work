@@ -6,9 +6,9 @@ package pcie_svt_integration_pkg;
 
   `include "pcie_svt_profile.sv"
   `include "pcie_svt_profile_set.sv"
+  `include "pcie_svt_cfg_space_builder.sv"
 
   // Future Task 4-10 files, kept in planned dependency order.
-  // `include "pcie_svt_cfg_space_builder.sv"
   // `include "pcie_svt_virtual_sequencer.sv"
   // `include "pcie_svt_port_env.sv"
   // `include "pcie_svt_env.sv"
