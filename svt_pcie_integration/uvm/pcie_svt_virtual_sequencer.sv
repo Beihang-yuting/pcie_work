@@ -1,4 +1,6 @@
 class pcie_svt_virtual_sequencer extends uvm_sequencer #(uvm_sequence_item);
+  svt_pcie_device_agent port_agent[PCIE_SVT_MAX_PORTS];
+  svt_pcie_device_configuration port_cfg[PCIE_SVT_MAX_PORTS];
   svt_pcie_device_virtual_sequencer port_seqr[PCIE_SVT_MAX_PORTS];
   svt_pcie_device_status port_status[PCIE_SVT_MAX_PORTS];
   pcie_svt_port_profile port_profile[PCIE_SVT_MAX_PORTS];

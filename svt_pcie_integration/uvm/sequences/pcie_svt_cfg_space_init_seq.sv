@@ -138,6 +138,126 @@ class pcie_svt_cfg_space_init_seq extends uvm_sequence #(uvm_sequence_item);
       cfg_read_check(function_num, 'h300/4, image['h300/4]);
   endtask
 
+  task target_bar_write_read_check(int unsigned bar_num,
+                                   bit [15:0] bdf_num,
+                                   bit [31:0] expected_map,
+                                   bit [31:0] expected_value);
+    svt_pcie_target_app_service_set_bar_ro_map_sequence set_map_seq;
+    svt_pcie_target_app_service_write_addr_sequence write_addr_seq;
+    svt_pcie_target_app_service_read_addr_sequence read_addr_seq;
+    svt_pcie_target_app_service_get_bar_ro_map_sequence get_map_seq;
+    bit [27:0] ecam_addr;
+
+    current_function = bdf_num[2:0];
+    current_dword = ('h010/4) + bar_num;
+    ecam_addr = {bdf_num, 12'('h010 + (4 * bar_num))};
+
+    stage = $sformatf("bar%0d_set_map", bar_num);
+    set_map_seq =
+      svt_pcie_target_app_service_set_bar_ro_map_sequence::type_id::create(
+        $sformatf("set_bar%0d_map", bar_num));
+    if ((set_map_seq == null) ||
+        !set_map_seq.randomize() with {
+          bar_num == local::bar_num;
+          bdf_num == local::bdf_num;
+          data == local::expected_map;
+        })
+      `uvm_fatal("BAR_INIT", {progress_context(),
+        " SET_BAR_RO_MAP sequence creation/randomization failed"})
+    set_map_seq.start(port_seqr.target_seqr[0]);
+
+    stage = $sformatf("bar%0d_write", bar_num);
+    write_addr_seq =
+      svt_pcie_target_app_service_write_addr_sequence::type_id::create(
+        $sformatf("write_bar%0d", bar_num));
+    if ((write_addr_seq == null) ||
+        !write_addr_seq.randomize() with {
+          ecam_addr == local::ecam_addr;
+          bit_mask == 32'hffff_ffff;
+          data == local::expected_value;
+        })
+      `uvm_fatal("BAR_INIT", {progress_context(),
+        " WRITE_ADDR sequence creation/randomization failed"})
+    write_addr_seq.start(port_seqr.target_seqr[0]);
+
+    stage = $sformatf("bar%0d_read", bar_num);
+    read_addr_seq =
+      svt_pcie_target_app_service_read_addr_sequence::type_id::create(
+        $sformatf("read_bar%0d", bar_num));
+    if ((read_addr_seq == null) ||
+        !read_addr_seq.randomize() with {
+          ecam_addr == local::ecam_addr;
+        })
+      `uvm_fatal("BAR_INIT", {progress_context(),
+        " READ_ADDR sequence creation/randomization failed"})
+    read_addr_seq.start(port_seqr.target_seqr[0]);
+
+    stage = $sformatf("bar%0d_get_map", bar_num);
+    get_map_seq =
+      svt_pcie_target_app_service_get_bar_ro_map_sequence::type_id::create(
+        $sformatf("get_bar%0d_map", bar_num));
+    if ((get_map_seq == null) ||
+        !get_map_seq.randomize() with {
+          bar_num == local::bar_num;
+          bdf_num == local::bdf_num;
+        })
+      `uvm_fatal("BAR_INIT", {progress_context(),
+        " GET_BAR_RO_MAP sequence creation/randomization failed"})
+    get_map_seq.start(port_seqr.target_seqr[0]);
+
+    if (read_addr_seq.data !== expected_value)
+      `uvm_fatal("BAR_VALUE", $sformatf(
+        "%s bdf=%04h BAR%0d expected=%08h got=%08h",
+        progress_context(), bdf_num, bar_num, expected_value,
+        read_addr_seq.data))
+    if (get_map_seq.data !== expected_map)
+      `uvm_fatal("BAR_MAP", $sformatf(
+        "%s bdf=%04h BAR%0d expected=%08h got=%08h",
+        progress_context(), bdf_num, bar_num, expected_map,
+        get_map_seq.data))
+    `uvm_info("MULTI_EP_BAR_CHECK", $sformatf(
+      "port=%s bdf=%04h BAR%0d value=%08h ro_map=%08h link_up=0",
+      profile.port_id, bdf_num, bar_num, read_addr_seq.data,
+      get_map_seq.data), UVM_NONE)
+  endtask
+
+  task init_target_bars(pcie_svt_cfg_space_builder builder);
+    pcie_svt_function_profile fn;
+    bit [31:0] bar_value;
+
+    if (profile.role == PCIE_SVT_RC) begin
+      `uvm_info("MULTI_EP_BAR_SKIP", $sformatf(
+        "port=%s role=RC Target App Multi-Endpoint BAR initialization skipped",
+        profile.port_id), UVM_NONE)
+      return;
+    end
+    if (port_seqr.target_seqr[0] == null)
+      `uvm_fatal("BAR_INIT", {progress_context(),
+        " EP has null target_seqr[0]"})
+    if (profile.functions.size() != 1)
+      `uvm_fatal("BAR_INIT", {progress_context(),
+        " expected exactly one function mapped to BDF 0000"})
+
+    fn = profile.functions[0];
+    for (int unsigned bar = 0; bar < 6; bar++) begin
+      if ((bar > 0) && fn.bars[bar-1].implemented &&
+          fn.bars[bar-1].is_64bit) begin
+        bar_value = fn.bars[bar-1].initial_base[63:32];
+        target_bar_write_read_check(
+          bar, 16'h0000, builder.bar_ro_map(fn.bars[bar-1].aperture, 1'b1),
+          bar_value);
+      end else if (fn.bars[bar].implemented) begin
+        bar_value = fn.bars[bar].initial_base[31:0];
+        if (fn.bars[bar].is_64bit)
+          bar_value[2:1] = 2'b10;
+        bar_value[3] = fn.bars[bar].prefetchable;
+        target_bar_write_read_check(
+          bar, 16'h0000, builder.bar_ro_map(fn.bars[bar].aperture, 1'b0),
+          bar_value);
+      end
+    end
+  endtask
+
   virtual task body();
     pcie_svt_cfg_space_builder builder;
     bit [31:0] image[1024];
@@ -184,8 +304,7 @@ class pcie_svt_cfg_space_init_seq extends uvm_sequence #(uvm_sequence_item);
                              image);
     end
 
-    // R-2020.12 responder BAR maps require HDL Multi-Endpoint support that
-    // this wrapper does not propagate; BAR sizing awaits a supported fix/API.
+    init_target_bars(builder);
     stage = "complete";
     current_function = -1;
     current_dword = -1;

@@ -46,6 +46,54 @@ The `pcie_svt.f` file is an environment-relative source/include contract. Its
 project RTL and UVM paths are resolved relative to this `sim` directory; the
 referenced integration sources are supplied by later integration tasks.
 
+## Configuration-space initialization regression
+
+Compile exactly one topology macro and select Gen4 or Gen5 at run time. For
+example, the switch-facing topology is compiled with:
+
+```sh
+mkdir -p build_switch
+vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+SVT_PCIE_ENABLE_GEN5 +define+SVT_PCIE_ENABLE_SERDES_ARCH \
+  +define+PCIE_TOPO_SWITCH_1X16_4X4 \
+  -f pcie_svt.f -top pcie_svt_topology_top \
+  -Mdir=build_switch/csrc -P pli.tab msglog.o \
+  -o build_switch/simv -l build_switch/compile.log
+```
+
+Run the configuration-only flow with a bare `+PCIE_CFG_INIT_ONLY` argument:
+
+```sh
+./build_switch/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test +PCIE_GEN=4 \
+  +PCIE_CFG_INIT_ONLY +UVM_NO_RELNOTES \
+  -l build_switch/run_cfg_init.log
+```
+
+For every Endpoint, the flow enables R-2020.12 Multi-Endpoint Mode, sets
+`target_cfg[0].default_bar_ro_map` to `0000_ffff`, refreshes the agent while
+the link is down, and programs then reads back BAR0 through BAR5 through the
+Target App service sequencer. The expected maps for the three 64-bit
+Prefetchable BAR pairs are:
+
+```text
+BAR0/1: 01ff_ffff / 0000_0000  (32 MiB)
+BAR2/3: 0000_ffff / 0000_0000  (64 KiB)
+BAR4/5: 0000_ffff / 0000_0000  (64 KiB)
+```
+
+R-2020.12 emits one incorrect `is_valid` role warning per Endpoint during
+`REFRESH_CFG`, even though the Endpoint role is zero and the Target App accepts
+the Multi-Endpoint requests. The integration catches only that exact message,
+only during the refresh window, checks its expected count, and records
+`MULTI_EP_REFRESH_VENDOR_WORKAROUND`. Other warnings are not caught.
+
+The switch topology must report 24 `MULTI_EP_BAR_CHECK` operations, one RC
+`MULTI_EP_BAR_SKIP`, five `CFG_INIT_DONE` operations, and zero final
+`UVM_WARNING`, `UVM_ERROR`, and `UVM_FATAL` counts. The x16 and 2x8 DUT-Endpoint
+topologies contain only primary RC VIPs, so their Target App BAR initialization
+is intentionally skipped once and twice, respectively.
+
 ## Configuration watchdog directed regression
 
 `pcie_svt_watchdog_directed_test.sv` runs the production

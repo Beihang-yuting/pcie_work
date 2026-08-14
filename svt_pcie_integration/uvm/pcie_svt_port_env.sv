@@ -82,8 +82,18 @@ class pcie_svt_port_env extends uvm_env;
       device_cfg.pcie_cfg.pl_cfg.get_target_link_speed_value(),
       device_cfg.pcie_cfg.pl_cfg.get_expected_link_speed_value()), UVM_LOW)
 
-    if (port_profile.role == PCIE_SVT_EP)
+    if (port_profile.role == PCIE_SVT_EP) begin
       device_cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b1;
+      if (!device_cfg.target_cfg.exists(0))
+        `uvm_fatal("PROFILE", {port_profile.port_id,
+          ": Endpoint configuration has no target_cfg[0]"})
+      if (device_cfg.target_cfg[0] == null)
+        `uvm_fatal("PROFILE", {port_profile.port_id,
+          ": Endpoint target_cfg[0] is null"})
+      // R-2020.12 Multi-Endpoint Target App default. Per-BAR service
+      // sequences override this value where the aperture requires a wider map.
+      device_cfg.target_cfg[0].default_bar_ro_map = 32'h0000_ffff;
+    end
 
     enable_ats = 1'b0;
     foreach (port_profile.functions[i])

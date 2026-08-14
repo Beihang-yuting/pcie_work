@@ -1,3 +1,29 @@
+class pcie_svt_r202012_multi_ep_warning_catcher extends uvm_report_catcher;
+  int unsigned matched_count;
+
+  `uvm_object_utils(pcie_svt_r202012_multi_ep_warning_catcher)
+
+  function new(string name = "pcie_svt_r202012_multi_ep_warning_catcher");
+    super.new(name);
+  endfunction
+
+  virtual function action_e catch();
+    string expected_message;
+
+    expected_message = {"Both enable_multi_endpoint_mode and device_is_root ",
+      "are set.  Multi-Endpoint Mode is only valid when the vip is ",
+      "configured as an endpoint.  Ignoring the value of ",
+      "enable_multi_endpoint_mode."};
+    if ((get_severity() == UVM_WARNING) &&
+        (get_id() == "is_valid") &&
+        (get_message() == expected_message)) begin
+      matched_count++;
+      return CAUGHT;
+    end
+    return THROW;
+  endfunction
+endclass
+
 class pcie_svt_all_cfg_spaces_init_vseq extends
     uvm_sequence #(uvm_sequence_item);
   // Synopsys R-2020.12 unified VIP example initialization hold:
@@ -49,6 +75,62 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
         p_sequencer.port_profile[i].port_id), UVM_NONE)
     end
   endfunction
+
+  task refresh_multi_endpoint_cfg(int unsigned index);
+    svt_pcie_device_agent_service_sequence refresh_seq;
+
+    if (p_sequencer.port_profile[index].role == PCIE_SVT_RC) begin
+      `uvm_info("MULTI_EP_REFRESH_SKIP", $sformatf(
+        "port=%s role=RC REFRESH_CFG skipped",
+        p_sequencer.port_profile[index].port_id), UVM_NONE)
+      return;
+    end
+    if (p_sequencer.port_seqr[index].device_agent_service_seqr == null)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s has null device_agent_service_seqr",
+        p_sequencer.port_profile[index].port_id))
+    if ((p_sequencer.port_agent[index] == null) ||
+        (p_sequencer.port_cfg[index] == null))
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s has null agent or configuration registry handle",
+        p_sequencer.port_profile[index].port_id))
+    if (p_sequencer.port_cfg[index].device_is_root != 1'b0)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s EP configuration has device_is_root=%0b before refresh",
+        p_sequencer.port_profile[index].port_id,
+        p_sequencer.port_cfg[index].device_is_root))
+    if (p_sequencer.port_cfg[index].pcie_cfg.enable_multi_endpoint_mode !=
+        1'b1)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s EP configuration has Multi-Endpoint Mode disabled",
+        p_sequencer.port_profile[index].port_id))
+
+    // R-2020.12 refresh_cfg() re-reads cfg from the target agent's exact
+    // config_db scope. Re-publish the original per-port object immediately
+    // before issuing REFRESH_CFG so a default root configuration cannot be
+    // selected by a broader or stale config_db entry.
+    uvm_config_db#(svt_pcie_device_configuration)::set(
+      p_sequencer.port_agent[index], "", "cfg",
+      p_sequencer.port_cfg[index]);
+
+    refresh_seq = svt_pcie_device_agent_service_sequence::type_id::create(
+      $sformatf("refresh_port%0d", index));
+    if ((refresh_seq == null) ||
+        !refresh_seq.randomize() with {
+          service_type == svt_pcie_device_agent_service::REFRESH_CFG;
+        })
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s REFRESH_CFG sequence creation/randomization failed",
+        p_sequencer.port_profile[index].port_id))
+    `uvm_info("MULTI_EP_REFRESH", $sformatf(
+      "stage=before port=%s device_is_root=0 multi_endpoint=1 reset_asserted=0 link_up=0",
+      p_sequencer.port_profile[index].port_id), UVM_NONE)
+    refresh_seq.start(
+      p_sequencer.port_seqr[index].device_agent_service_seqr);
+    `uvm_info("MULTI_EP_REFRESH", $sformatf(
+      "stage=after port=%s reset_asserted=0 link_up=0",
+      p_sequencer.port_profile[index].port_id), UVM_NONE)
+  endtask
 
   task run_one_port(int unsigned index);
     pcie_svt_cfg_space_init_seq child;
@@ -109,6 +191,9 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
   endtask
 
   virtual task body();
+    pcie_svt_r202012_multi_ep_warning_catcher warning_catcher;
+    int unsigned expected_vendor_warnings;
+
     if (p_sequencer == null)
       `uvm_fatal("CFG_INIT", "null PCIe SVT virtual sequencer")
     validate_active_registry();
@@ -132,6 +217,30 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
       "stage=cfg_init asserted=0x%0h",
       p_sequencer.reset_vif.asserted), UVM_NONE)
     check_active_links_down("before_cfg");
+
+    warning_catcher =
+      pcie_svt_r202012_multi_ep_warning_catcher::type_id::create(
+        "r202012_multi_ep_warning_catcher");
+    if (warning_catcher == null)
+      `uvm_fatal("MULTI_EP_REFRESH", "vendor warning catcher creation failed")
+    expected_vendor_warnings = 0;
+    uvm_report_cb::add(null, warning_catcher);
+    for (int unsigned i = 0; i < PCIE_SVT_MAX_PORTS; i++) begin
+      if (p_sequencer.active_port[i]) begin
+        if (p_sequencer.port_profile[i].role == PCIE_SVT_EP)
+          expected_vendor_warnings++;
+        refresh_multi_endpoint_cfg(i);
+      end
+    end
+    uvm_report_cb::delete(null, warning_catcher);
+    if (warning_catcher.matched_count != expected_vendor_warnings)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "R-2020.12 vendor warning count expected=%0d got=%0d",
+        expected_vendor_warnings, warning_catcher.matched_count))
+    if (warning_catcher.matched_count != 0)
+      `uvm_info("MULTI_EP_REFRESH_VENDOR_WORKAROUND", $sformatf(
+        "caught %0d known R-2020.12 REFRESH_CFG role-validation warnings",
+        warning_catcher.matched_count), UVM_NONE)
 
     for (int unsigned i = 0; i < PCIE_SVT_MAX_PORTS; i++) begin
       if (!p_sequencer.active_port[i])

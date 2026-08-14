@@ -79,9 +79,12 @@ class pcie_svt_env extends uvm_env;
       if (port[i] == null)
         continue;
       if ((port[i].profile == null) || (port[i].status == null) ||
-          (port[i].agent == null) || (port[i].agent.virt_seqr == null))
+          (port[i].cfg == null) || (port[i].agent == null) ||
+          (port[i].agent.virt_seqr == null))
         `uvm_fatal("PORT_REGISTRY", $sformatf(
           "port index %0d has incomplete profile/status/agent/sequencer handles", i))
+      vseqr.port_agent[i] = port[i].agent;
+      vseqr.port_cfg[i] = port[i].cfg;
       vseqr.port_seqr[i] = port[i].agent.virt_seqr;
       vseqr.port_status[i] = port[i].status;
       vseqr.port_profile[i] = port[i].profile;
