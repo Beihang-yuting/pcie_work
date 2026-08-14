@@ -33,22 +33,37 @@ class pcie_svt_cfg_space_init_seq extends uvm_sequence #(uvm_sequence_item);
                  int unsigned dword_addr,
                  bit [31:0] value);
     svt_pcie_cfg_database_service req;
+    uvm_sequencer_base mapped_seqr;
+
     current_function = function_num;
     current_dword = dword_addr;
-    stage = "cfg_write";
+    stage = "cfg_write_create";
+    req = svt_pcie_cfg_database_service::type_id::create(
+      $sformatf("write_pf%0d_dw%03h", function_num, dword_addr));
+    if (req == null)
+      `uvm_fatal("CFG_INIT", {progress_context(),
+        " cfg database write request creation failed"})
+
+    stage = "cfg_write_map";
+    mapped_seqr = port_seqr.map_data_item_to_seqr(req);
+    if (mapped_seqr == null)
+      `uvm_fatal("CFG_INIT", {progress_context(),
+        " cfg database write request sequencer mapping failed"})
+
     stage = "cfg_write_wait_grant";
-    `svt_pcie_do_on_with(
-      svt_pcie_cfg_database_service,
-      req,
-      port_seqr,
-      {
-        service_type == svt_pcie_cfg_database_service::WRITE_CFG_DWORD;
-        function_num == local::function_num;
-        dword_addr == local::dword_addr;
-        byte_enables == 4'hf;
-        dword_data == local::value;
-      })
+    start_item(req, -1, mapped_seqr);
+    stage = "cfg_write_randomize";
+    if (!req.randomize() with {
+          service_type == svt_pcie_cfg_database_service::WRITE_CFG_DWORD;
+          function_num == local::function_num;
+          dword_addr == local::dword_addr;
+          byte_enables == 4'hf;
+          dword_data == local::value;
+        })
+      `uvm_fatal("CFG_INIT", {progress_context(),
+        " cfg database write request randomization failed"})
     stage = "cfg_write_wait_done";
+    finish_item(req);
     if (req.command_status != `SVT_PCIE_CFG_DATABASE_STATUS_SUCCESSFUL)
       `uvm_fatal("CFG_INIT", $sformatf(
         "%s service_status=0x%08h", progress_context(), req.command_status))

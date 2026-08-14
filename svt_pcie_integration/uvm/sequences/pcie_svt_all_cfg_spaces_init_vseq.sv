@@ -74,6 +74,9 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
       begin
         wait (child_started);
         #1ms;
+        // Let completion scheduled exactly at the deadline settle first.
+        if (!child_done)
+          #1step;
         if (!child_done)
           `uvm_fatal("CFG_INIT_TIMEOUT", {child.progress_context(),
             " exceeded 1ms watchdog"})
