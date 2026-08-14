@@ -4,6 +4,7 @@ class pcie_svt_port_env extends uvm_env;
   svt_pcie_device_configuration cfg;
   svt_pcie_device_status status;
   svt_pcie_device_agent agent;
+  bit fast_link_training;
 
   `uvm_component_utils(pcie_svt_port_env)
 
@@ -124,6 +125,10 @@ class pcie_svt_port_env extends uvm_env;
     if (!uvm_config_db#(pcie_svt_port_profile)::get(
           this, "", "profile", profile) || (profile == null))
       `uvm_fatal("PORT_CFG", {get_full_name(), ": missing or null profile"})
+    if (!uvm_config_db#(bit)::get(
+          this, "", "fast_link_training", fast_link_training))
+      `uvm_fatal("PORT_CFG",
+        {get_full_name(), ": missing fast-link-training configuration"})
 
     cfg = svt_pcie_device_configuration::type_id::create("cfg", this);
     cfg.set_initial_values_via_unified_vif(1, vif);

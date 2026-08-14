@@ -5,6 +5,7 @@ class pcie_svt_env extends uvm_env;
   pcie_svt_virtual_sequencer vseqr;
   pcie_svt_topology_e topology;
   int unsigned pcie_gen;
+  bit fast_link_training;
 
   `uvm_component_utils(pcie_svt_env)
 
@@ -70,6 +71,9 @@ class pcie_svt_env extends uvm_env;
 
   virtual function void build_phase(uvm_phase phase);
     string gen_values[$];
+    string fast_link_values[$];
+    string fast_link_args[$];
+    bit invalid_fast_link_arg;
     string vif_key;
     svt_pcie_vif selected_vif;
 
@@ -81,6 +85,24 @@ class pcie_svt_env extends uvm_env;
         !((gen_values[0] == "4") || (gen_values[0] == "5")))
       `uvm_fatal("PCIE_GEN", "Required +PCIE_GEN must be 4 or 5")
     pcie_gen = (gen_values[0] == "4") ? 4 : 5;
+
+    fast_link_training = 1'b0;
+    void'(uvm_cmdline_processor::get_inst().get_arg_values(
+      "+PCIE_FAST_LINK_TRAIN=", fast_link_values));
+    void'(uvm_cmdline_processor::get_inst().get_arg_matches(
+      "+PCIE_FAST_LINK_TRAIN", fast_link_args));
+    invalid_fast_link_arg = 1'b0;
+    foreach (fast_link_args[i])
+      if (fast_link_args[i] == "+PCIE_FAST_LINK_TRAIN")
+        invalid_fast_link_arg = 1'b1;
+    if (invalid_fast_link_arg || (fast_link_values.size() > 1) ||
+        ((fast_link_values.size() == 1) &&
+         !((fast_link_values[0] == "0") ||
+           (fast_link_values[0] == "1"))))
+      `uvm_fatal("PCIE_FAST_LINK_TRAIN",
+        "Optional +PCIE_FAST_LINK_TRAIN must occur at most once and be 0 or 1")
+    if (fast_link_values.size() == 1)
+      fast_link_training = (fast_link_values[0] == "1");
 
     profiles = pcie_svt_profile_set::type_id::create("profiles");
     profiles.build_for_topology(topology, pcie_gen);
@@ -108,6 +130,9 @@ class pcie_svt_env extends uvm_env;
         this, $sformatf("port[%0d]", i), "vif", selected_vif);
       uvm_config_db#(pcie_svt_port_profile)::set(
         this, $sformatf("port[%0d]", i), "profile", profiles.port[i]);
+      uvm_config_db#(bit)::set(
+        this, $sformatf("port[%0d]", i), "fast_link_training",
+        fast_link_training);
       port[i] = pcie_svt_port_env::type_id::create(
         $sformatf("port[%0d]", i), this);
     end
