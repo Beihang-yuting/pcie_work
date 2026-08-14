@@ -53,6 +53,9 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
     pcie_svt_cfg_space_init_seq child;
     bit child_started;
     bit child_done;
+    realtime start_time;
+    realtime deadline;
+    realtime completion_time;
 
     child = pcie_svt_cfg_space_init_seq::type_id::create(
       $sformatf("init_port%0d", index));
@@ -65,21 +68,37 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
     child.profile = p_sequencer.port_profile[index];
     child_started = 1'b0;
     child_done = 1'b0;
+    start_time = 0;
+    deadline = 0;
+    completion_time = 0;
     fork
       begin
+        start_time = $realtime;
+        deadline = start_time + 1ms;
         child_started = 1'b1;
         child.start(null);
+        completion_time = $realtime;
         child_done = 1'b1;
+        if (completion_time > deadline)
+          `uvm_fatal("CFG_INIT_TIMEOUT", $sformatf(
+            "%s exceeded 1ms watchdog start=%0.6fns deadline=%0.6fns completion=%0.6fns",
+            child.progress_context(), start_time, deadline, completion_time))
       end
       begin
         wait (child_started);
-        #1ms;
+        if ($realtime < deadline)
+          #(deadline - $realtime);
         // Let completion scheduled exactly at the deadline settle first.
         if (!child_done)
           #1step;
         if (!child_done)
-          `uvm_fatal("CFG_INIT_TIMEOUT", {child.progress_context(),
-            " exceeded 1ms watchdog"})
+          `uvm_fatal("CFG_INIT_TIMEOUT", $sformatf(
+            "%s exceeded 1ms watchdog start=%0.6fns deadline=%0.6fns current=%0.6fns",
+            child.progress_context(), start_time, deadline, $realtime))
+        else if (completion_time > deadline)
+          `uvm_fatal("CFG_INIT_TIMEOUT", $sformatf(
+            "%s exceeded 1ms watchdog start=%0.6fns deadline=%0.6fns completion=%0.6fns",
+            child.progress_context(), start_time, deadline, completion_time))
       end
     join_any
     disable fork;
