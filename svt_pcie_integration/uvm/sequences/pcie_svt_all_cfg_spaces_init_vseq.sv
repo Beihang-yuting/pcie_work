@@ -3,6 +3,7 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
   // Synopsys R-2020.12 unified VIP example initialization hold:
   // examples/sverilog/tb_pcie_svt_uvm_unified_vip_sys/top.sv (reset setup).
   localparam time PCIE_SVT_VIP_INIT_HOLD_TIME = 205ns;
+  localparam time PCIE_SVT_CFG_INIT_WATCHDOG_TIME = 1ms;
 
   `uvm_object_utils(pcie_svt_all_cfg_spaces_init_vseq)
   `uvm_declare_p_sequencer(pcie_svt_virtual_sequencer)
@@ -74,15 +75,16 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
     fork
       begin
         start_time = $realtime;
-        deadline = start_time + 1ms;
+        deadline = start_time + PCIE_SVT_CFG_INIT_WATCHDOG_TIME;
         child_started = 1'b1;
         child.start(null);
         completion_time = $realtime;
         child_done = 1'b1;
         if (completion_time > deadline)
           `uvm_fatal("CFG_INIT_TIMEOUT", $sformatf(
-            "%s exceeded 1ms watchdog start=%0.6fns deadline=%0.6fns completion=%0.6fns",
-            child.progress_context(), start_time, deadline, completion_time))
+            "%s exceeded watchdog=%0t start=%0.6f deadline=%0.6f completion=%0.6f",
+            child.progress_context(), PCIE_SVT_CFG_INIT_WATCHDOG_TIME,
+            start_time, deadline, completion_time))
       end
       begin
         wait (child_started);
@@ -93,12 +95,14 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
           #1step;
         if (!child_done)
           `uvm_fatal("CFG_INIT_TIMEOUT", $sformatf(
-            "%s exceeded 1ms watchdog start=%0.6fns deadline=%0.6fns current=%0.6fns",
-            child.progress_context(), start_time, deadline, $realtime))
+            "%s exceeded watchdog=%0t start=%0.6f deadline=%0.6f current=%0.6f",
+            child.progress_context(), PCIE_SVT_CFG_INIT_WATCHDOG_TIME,
+            start_time, deadline, $realtime))
         else if (completion_time > deadline)
           `uvm_fatal("CFG_INIT_TIMEOUT", $sformatf(
-            "%s exceeded 1ms watchdog start=%0.6fns deadline=%0.6fns completion=%0.6fns",
-            child.progress_context(), start_time, deadline, completion_time))
+            "%s exceeded watchdog=%0t start=%0.6f deadline=%0.6f completion=%0.6f",
+            child.progress_context(), PCIE_SVT_CFG_INIT_WATCHDOG_TIME,
+            start_time, deadline, completion_time))
       end
     join_any
     disable fork;

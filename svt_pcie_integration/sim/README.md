@@ -45,3 +45,47 @@ repository.
 The `pcie_svt.f` file is an environment-relative source/include contract. Its
 project RTL and UVM paths are resolved relative to this `sim` directory; the
 referenced integration sources are supplied by later integration tasks.
+
+## Configuration watchdog directed regression
+
+`pcie_svt_watchdog_directed_test.sv` runs the production
+`pcie_svt_all_cfg_spaces_init_vseq::run_one_port(0)` with a factory-overridden
+child sequence. The test double's `start()` delegates directly to its delayed
+`body()` to bypass the standard UVM sequence wrapper's post-body delta cycles;
+this is test-only behavior that makes completion in the exact requested time
+slot deterministic while leaving the production factory creation,
+`child.start()`, and watchdog arbitration intact.
+
+After preparing the PLI inputs above, compile the directed top at the production
+time unit and precision:
+
+```sh
+mkdir -p build_watchdog_directed
+vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
+  +define+SVT_PCIE_ENABLE_GEN5 +define+SVT_PCIE_ENABLE_SERDES_ARCH \
+  +define+PCIE_TOPO_EP_X16 \
+  -f pcie_svt.f pcie_svt_watchdog_directed_test.sv \
+  -top pcie_svt_watchdog_directed_top \
+  -Mdir=build_watchdog_directed/csrc -P pli.tab msglog.o \
+  -o build_watchdog_directed/simv \
+  -l build_watchdog_directed/compile.log
+```
+
+Run all three boundary cases:
+
+```sh
+for mode in exact plus1fs plus2fs; do
+  ./build_watchdog_directed/simv -no_save \
+    +UVM_TESTNAME=pcie_svt_watchdog_directed_test \
+    +WATCHDOG_MODE="$mode" +UVM_NO_RELNOTES \
+    -l "build_watchdog_directed/run_${mode}.log"
+done
+```
+
+Each log must contain exactly one `WATCHDOG_DIRECTED_PASS` for its mode and
+zero final `UVM_WARNING`, `UVM_ERROR`, and `UVM_FATAL` counts. The `exact` case
+expects no timeout. The `plus1fs` case must report the child-side
+`completion=` diagnostic, and `plus2fs` must report the watchdog-side
+`current=` diagnostic. Expected `CFG_INIT_TIMEOUT` reports are caught by the
+test before the final UVM severity counts are produced.
