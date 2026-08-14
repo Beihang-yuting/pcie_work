@@ -1,5 +1,6 @@
 `include "pcie_svt_topology_checks.svh"
 `include "pcie_svt_serial_adapter.sv"
+`include "pcie_svt_peer_harness.sv"
 
 module pcie_svt_topology_top;
   import uvm_pkg::*;
@@ -35,6 +36,27 @@ module pcie_svt_topology_top;
   `PCIE_SVT_MAP_SERDES_X16(primary_rc0_spd, primary_rc0_serial)
   assign primary_rc0_spd.vip_port_if.ser_if.reset = reset_vif.asserted[0];
 
+`ifdef PCIE_USE_SVT_PEER
+  svt_pcie_if peer_ep0_if(clkreq_n[0], wake_n);
+  svt_pcie_single_port_device_agent_hdl peer_ep0_spd(peer_ep0_if);
+  pcie_svt_serial_port_if #(16) peer_ep0_serial();
+
+  defparam peer_ep0_spd.SVT_PCIE_UI_PCIE_SPEC_VER =
+    `SVT_PCIE_UI_PCIE_SPEC_VER_5_0;
+  defparam peer_ep0_spd.SVT_PCIE_UI_DISPLAY_NAME = "peer_ep0_spd.";
+  defparam peer_ep0_spd.SVT_PCIE_UI_PHY_INTERFACE_TYPE =
+    `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES;
+  defparam peer_ep0_spd.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE = 1'b1;
+  defparam peer_ep0_spd.SVT_PCIE_UI_ENABLE_CFG_BLOCK = 1'b1;
+  defparam peer_ep0_spd.SVT_PCIE_UI_CONNECT_ACTIVE_VIP = 1'b1;
+  defparam peer_ep0_spd.SVT_PCIE_UI_NUM_PHYSICAL_LANES = 16;
+  defparam peer_ep0_spd.SVT_PCIE_UI_DEVICE_IS_ROOT = 0;
+  defparam peer_ep0_spd.SVT_PCIE_UI_HIERARCHY_NUMBER = 0;
+
+  `PCIE_SVT_MAP_SERDES_X16(peer_ep0_spd, peer_ep0_serial)
+  `PCIE_SVT_CONNECT_SERIAL_PEERS(primary_rc0_serial, peer_ep0_serial)
+  assign peer_ep0_spd.vip_port_if.ser_if.reset = reset_vif.asserted[0];
+`else
   pcie_dut_placeholder dut (
     .reset(reset_vif.asserted[0]),
     .ep0_rx_p(primary_rc0_serial.rx_p),
@@ -42,12 +64,19 @@ module pcie_svt_topology_top;
     .ep0_tx_p(primary_rc0_serial.tx_p),
     .ep0_tx_n(primary_rc0_serial.tx_n)
   );
+`endif
 
   initial begin
     primary_rc0_spd.update_if_variables(4'h0, 0,
       "uvm_test_top", "uvm_test_top");
     uvm_config_db#(svt_pcie_vif)::set(null, "uvm_test_top",
       "primary_rc0_vif", primary_rc0_if);
+`ifdef PCIE_USE_SVT_PEER
+    peer_ep0_spd.update_if_variables(4'h1, 0,
+      "uvm_test_top", "uvm_test_top");
+    uvm_config_db#(svt_pcie_vif)::set(null, "uvm_test_top",
+      "peer_ep0_vif", peer_ep0_if);
+`endif
   end
 `elsif PCIE_TOPO_EP_2X8
   svt_pcie_if primary_rc0_if(clkreq_n[0], wake_n);

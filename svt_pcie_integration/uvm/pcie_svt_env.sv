@@ -1,5 +1,6 @@
 class pcie_svt_env extends uvm_env;
   pcie_svt_profile_set profiles;
+  pcie_svt_profile_set peer_profiles;
   pcie_svt_port_env port[PCIE_SVT_MAX_PORTS];
   pcie_svt_virtual_sequencer vseqr;
   pcie_svt_topology_e topology;
@@ -36,6 +37,37 @@ class pcie_svt_env extends uvm_env;
     return "";
   endfunction
 
+  function string peer_vif_key(int unsigned index);
+    case (topology)
+      PCIE_SVT_TOPO_EP_X16:
+        if (index == PCIE_SVT_PEER_PORT0)
+          return "peer_ep0_vif";
+      PCIE_SVT_TOPO_EP_2X8:
+        case (index)
+          PCIE_SVT_PEER_PORT0: return "peer_ep0_vif";
+          PCIE_SVT_PEER_PORT1: return "peer_ep1_vif";
+          default: return "";
+        endcase
+      PCIE_SVT_TOPO_SWITCH:
+        case (index)
+          PCIE_SVT_PEER_PORT0: return "peer_ep_usp_vif";
+          PCIE_SVT_PEER_PORT1: return "peer_rc_dsp0_vif";
+          PCIE_SVT_PEER_PORT2: return "peer_rc_dsp1_vif";
+          PCIE_SVT_PEER_PORT3: return "peer_rc_dsp2_vif";
+          PCIE_SVT_PEER_PORT4: return "peer_rc_dsp3_vif";
+          default: return "";
+        endcase
+      default: return "";
+    endcase
+    return "";
+  endfunction
+
+  function string selected_vif_key(int unsigned index);
+    if (index <= PCIE_SVT_PRIMARY_PORT4)
+      return primary_vif_key(index);
+    return peer_vif_key(index);
+  endfunction
+
   virtual function void build_phase(uvm_phase phase);
     string gen_values[$];
     string vif_key;
@@ -52,18 +84,26 @@ class pcie_svt_env extends uvm_env;
 
     profiles = pcie_svt_profile_set::type_id::create("profiles");
     profiles.build_for_topology(topology, pcie_gen);
+`ifdef PCIE_USE_SVT_PEER
+    peer_profiles = pcie_svt_profile_set::type_id::create("peer_profiles");
+    peer_profiles.build_peer_for_topology(topology, pcie_gen);
+    for (int unsigned i = PCIE_SVT_PEER_PORT0;
+         i <= PCIE_SVT_PEER_PORT4; i++)
+      if (peer_profiles.port[i] != null)
+        profiles.port[i] = peer_profiles.port[i];
+`endif
     vseqr = pcie_svt_virtual_sequencer::type_id::create("vseqr", this);
 
-    for (int unsigned i = 0; i <= PCIE_SVT_PRIMARY_PORT4; i++) begin
+    for (int unsigned i = 0; i < PCIE_SVT_MAX_PORTS; i++) begin
       if (profiles.port[i] == null)
         continue;
-      vif_key = primary_vif_key(i);
+      vif_key = selected_vif_key(i);
       if ((vif_key.len() == 0) ||
           !uvm_config_db#(svt_pcie_vif)::get(
             null, "uvm_test_top", vif_key, selected_vif) ||
           (selected_vif == null))
         `uvm_fatal("VIF", $sformatf(
-          "missing primary VIF for port index %0d key '%s'", i, vif_key))
+          "missing VIF for port index %0d key '%s'", i, vif_key))
       uvm_config_db#(svt_pcie_vif)::set(
         this, $sformatf("port[%0d]", i), "vif", selected_vif);
       uvm_config_db#(pcie_svt_port_profile)::set(
@@ -98,6 +138,15 @@ class pcie_svt_env extends uvm_env;
   function int unsigned active_primary_count();
     int unsigned count;
     for (int unsigned i = 0; i <= PCIE_SVT_PRIMARY_PORT4; i++)
+      if ((port[i] != null) && vseqr.active_port[i])
+        count++;
+    return count;
+  endfunction
+
+  function int unsigned active_peer_count();
+    int unsigned count;
+    for (int unsigned i = PCIE_SVT_PEER_PORT0;
+         i <= PCIE_SVT_PEER_PORT4; i++)
       if ((port[i] != null) && vseqr.active_port[i])
         count++;
     return count;

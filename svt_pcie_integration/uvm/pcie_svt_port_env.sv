@@ -30,6 +30,18 @@ class pcie_svt_port_env extends uvm_env;
 
     device_cfg.pcie_spec_ver =
       svt_pcie_device_configuration::PCIE_SPEC_VER_5_0;
+    // The Serial HDL adapters use TRANSMIT_BIT_CLOCK_MODE=1.  Select the
+    // matching public SVT configuration mode so each active VIP generates its
+    // own bit-rate clock instead of waiting for a testbench-supplied clock.
+    device_cfg.pcie_cfg.pl_cfg.disable_ext_bit_clock_mode = 1'b1;
+    `uvm_info("PCIE_SVT_BIT_CLOCK", $sformatf(
+      "profile=%s disable_ext_bit_clock_mode=%0d",
+      port_profile.port_id,
+      device_cfg.pcie_cfg.pl_cfg.disable_ext_bit_clock_mode), UVM_LOW)
+    if (device_cfg.pcie_cfg.pl_cfg.disable_ext_bit_clock_mode != 1'b1)
+      `uvm_fatal("BIT_CLOCK_CFG", $sformatf(
+        "%s: Serial TRANSMIT_BIT_CLOCK_MODE=1 requires internal bit clock",
+        port_profile.port_id))
     case (port_profile.link_width)
       4: supported_widths = 32'h0000_0007;
       8: supported_widths = 32'h0000_000f;

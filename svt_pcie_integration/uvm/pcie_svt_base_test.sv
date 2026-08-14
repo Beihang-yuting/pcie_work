@@ -43,10 +43,21 @@ class pcie_svt_base_test extends uvm_test;
     if (env.active_primary_count() != `PCIE_SVT_ACTIVE_PORTS)
       `uvm_fatal("TOPOLOGY", $sformatf("created %0d primary ports, expected %0d",
         env.active_primary_count(), `PCIE_SVT_ACTIVE_PORTS))
+`ifdef PCIE_USE_SVT_PEER
+    if (env.active_peer_count() != `PCIE_SVT_ACTIVE_PORTS)
+      `uvm_fatal("TOPOLOGY", $sformatf("created %0d peer ports, expected %0d",
+        env.active_peer_count(), `PCIE_SVT_ACTIVE_PORTS))
+`else
+    if (env.active_peer_count() != 0)
+      `uvm_fatal("TOPOLOGY", $sformatf(
+        "placeholder build unexpectedly created %0d peer ports",
+        env.active_peer_count()))
+`endif
   endfunction
 
   virtual task run_phase(uvm_phase phase);
     pcie_svt_all_cfg_spaces_init_vseq cfg_init_vseq;
+    pcie_svt_peer_smoke_vseq peer_smoke_vseq;
     phase.raise_objection(this);
     if (compile_only) begin
       // READY is intentionally non-final. External log gating owns success and
@@ -71,8 +82,16 @@ class pcie_svt_base_test extends uvm_test;
       phase.drop_objection(this);
       return;
     end
-    `uvm_fatal("TASK7_RUN_MODE",
-      "Task 7 supports only +PCIE_COMPILE_ONLY or +PCIE_CFG_INIT_ONLY; link sequences are not implemented")
+`ifdef PCIE_USE_SVT_PEER
+    peer_smoke_vseq =
+      pcie_svt_peer_smoke_vseq::type_id::create("peer_smoke_vseq");
+    if (peer_smoke_vseq == null)
+      `uvm_fatal("PEER_SMOKE", "peer smoke sequence creation failed")
+    peer_smoke_vseq.start(env.vseqr);
+`else
+    `uvm_fatal("PCIE_RUN_MODE",
+      "placeholder builds require +PCIE_COMPILE_ONLY or +PCIE_CFG_INIT_ONLY")
+`endif
     phase.drop_objection(this);
   endtask
 endclass
