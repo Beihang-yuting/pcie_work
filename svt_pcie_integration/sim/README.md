@@ -102,8 +102,10 @@ plusarg selects the default value of 0, and an explicit
 applied uniformly to every active link. The plusarg may appear at most once
 and must use the equals form with exactly `=0` or `=1`; an illegal value, a
 duplicate, or a bare `+PCIE_FAST_LINK_TRAIN` causes a `UVM_FATAL` before any
-agent is created. Runtime generation selection is likewise restricted to the
-validated Gen4 and Gen5 values.
+agent is created. The required `+PCIE_GEN=<value>` plusarg must likewise appear
+exactly once, must use the equals form, and accepts only `4` or `5`. A missing,
+duplicate, bare, or illegal `PCIE_GEN` argument causes a `UVM_FATAL` before any
+agent is created.
 
 For Gen4, the standard path transitions Gen1 -> Gen3 -> Gen4. The fast path
 transitions Gen1 -> Gen4 while retaining Gen4 equalization through the public
@@ -115,43 +117,62 @@ non-standard; when connecting the VIP to a real DUT, the DUT must support the
 same direct transition. The integration uses only public R-2020.12 APIs and
 does not modify Synopsys source code.
 
-With the x16 peer image already built in `build_peer_x16_red`, the following
-commands reproduce the Gen4 and Gen5 default and fast cases. Explicit `=0` is
-used for the default cases to make the selected policy visible on every
-command line.
+From a clean checkout, first run the environment and PLI preparation above,
+then compile the x16 SVT peer image with:
 
 ```sh
-./build_peer_x16_red/simv -no_save \
-  +UVM_TESTNAME=pcie_svt_base_test \
-  +PCIE_GEN=4 +PCIE_FAST_LINK_TRAIN=0 +UVM_NO_RELNOTES \
-  -l build_peer_x16_red/run_x16_gen4_default_explicit0.log
-
-./build_peer_x16_red/simv -no_save \
-  +UVM_TESTNAME=pcie_svt_base_test \
-  +PCIE_GEN=5 +PCIE_FAST_LINK_TRAIN=0 +UVM_NO_RELNOTES \
-  -l build_peer_x16_red/run_x16_gen5_default_explicit0.log
-
-./build_peer_x16_red/simv -no_save \
-  +UVM_TESTNAME=pcie_svt_base_test \
-  +PCIE_GEN=4 +PCIE_FAST_LINK_TRAIN=1 +UVM_NO_RELNOTES \
-  -l build_peer_x16_red/run_x16_gen4_fast.log
-
-./build_peer_x16_red/simv -no_save \
-  +UVM_TESTNAME=pcie_svt_base_test \
-  +PCIE_GEN=5 +PCIE_FAST_LINK_TRAIN=1 +UVM_NO_RELNOTES \
-  -l build_peer_x16_red/run_x16_gen5_fast.log
+mkdir -p build_peer_x16
+vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
+  +define+SVT_PCIE_ENABLE_GEN5 +define+SVT_PCIE_ENABLE_SERDES_ARCH \
+  +define+PCIE_TOPO_EP_X16 +define+PCIE_USE_SVT_PEER \
+  -f pcie_svt.f -top pcie_svt_topology_top \
+  -Mdir=build_peer_x16/csrc -P pli.tab msglog.o \
+  -o build_peer_x16/simv -l build_peer_x16/compile.log
 ```
 
-The following x16 evidence was verified on `10.11.10.53`. Each log contains
-exactly one primary `LINK_PASS` and finishes with `UVM_WARNING`, `UVM_ERROR`,
-and `UVM_FATAL` counts of 0/0/0.
+> **Compatibility warning:** Initial training still starts at Gen1. R-2020.12
+> identifies the Gen1 -> Gen4 direct transition as non-standard. Use this mode
+> with a real DUT only when the DUT explicitly supports the same transition.
+
+The following commands reproduce the Gen4 and Gen5 default and fast cases.
+The default commands intentionally omit `+PCIE_FAST_LINK_TRAIN`; an explicit
+`+PCIE_FAST_LINK_TRAIN=0` is equivalent.
+
+```sh
+./build_peer_x16/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test \
+  +PCIE_GEN=4 +UVM_NO_RELNOTES \
+  -l build_peer_x16/run_normal_gen4_regression.log
+
+./build_peer_x16/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test \
+  +PCIE_GEN=5 +UVM_NO_RELNOTES \
+  -l build_peer_x16/run_normal_gen5_regression.log
+
+./build_peer_x16/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test \
+  +PCIE_GEN=4 +PCIE_FAST_LINK_TRAIN=1 +UVM_NO_RELNOTES \
+  -l build_peer_x16/run_fast_gen4_green.log
+
+./build_peer_x16/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test \
+  +PCIE_GEN=5 +PCIE_FAST_LINK_TRAIN=1 +UVM_NO_RELNOTES \
+  -l build_peer_x16/run_fast_gen5_green.log
+```
+
+The following x16 evidence was generated from that stable build and verified
+on `10.11.10.53`. Each log contains exactly one emitted
+`UVM_INFO ... [LINK_PASS] primary=...` record. Separately, the UVM report
+summary contains `[LINK_PASS] 1`. Every run finishes with `UVM_WARNING`,
+`UVM_ERROR`, and `UVM_FATAL` counts of 0/0/0.
 
 | Mode | Verified log | `LINK_PASS` result | Observed rate-path evidence |
 | --- | --- | --- | --- |
-| Gen4 default (plusarg omitted) | `build_peer_x16_red/run_wait_target_green.log` | width 16, 16 GT/s | Serial Tx bit periods 0.400000, 0.125000, and 0.062500 ns show Gen1 -> Gen3 -> Gen4. |
-| Gen5 default (plusarg omitted) | `build_peer_x16_red/run_x16_gen5_default.log` | width 16, 32 GT/s | Final Gen5 rate reached. |
-| Gen4 fast | `build_peer_x16_red/run_fast_gen4_green.log` | width 16, 16 GT/s | Only 0.400000 and 0.062500 ns were observed; the Gen2 and Gen3 periods were absent. |
-| Gen5 fast | `build_peer_x16_red/run_fast_gen5_green.log` | width 16, 32 GT/s | Only 0.400000 and 0.031250 ns were observed; the Gen2, Gen3, and Gen4 periods were absent. |
+| Gen4 default (plusarg omitted) | `build_peer_x16/run_normal_gen4_regression.log` | width 16, 16 GT/s | Serial Tx bit periods 0.400000, 0.125000, and 0.062500 ns show Gen1 -> Gen3 -> Gen4. |
+| Gen5 default (plusarg omitted) | `build_peer_x16/run_normal_gen5_regression.log` | width 16, 32 GT/s | Final Gen5 rate reached. |
+| Gen4 fast | `build_peer_x16/run_fast_gen4_green.log` | width 16, 16 GT/s | Only 0.400000 and 0.062500 ns were observed; no 0.125000 ns period or 8 Gb/s READY event was emitted. |
+| Gen5 fast | `build_peer_x16/run_fast_gen5_green.log` | width 16, 32 GT/s | Only 0.400000 and 0.031250 ns were observed; no 8 or 16 Gb/s READY event was emitted. |
 
 The period evidence above comes from the complete set of
 `Serial Tx bit clk period before applying ssc is` messages in each log. The
