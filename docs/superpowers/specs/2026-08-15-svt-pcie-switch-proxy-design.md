@@ -147,8 +147,10 @@ following with the shipped R-2020.12 service/API surface:
 
 The receive surface is the documented
 `svt_pcie_tl_callback::pre_tlp_out_put(svt_pcie_tl, svt_pcie_tlp, ref bit)`.
-The callback clones the transaction before setting `drop=1`; it performs no
-blocking work. A repository-owned queue hands the clone to an adapter task.
+The callback calls the adapter's nonblocking capture function, which clones
+the transaction into an unbounded mailbox, then sets `drop=1`; neither
+function performs blocking work. The mailbox hands the clone to an adapter
+task.
 The egress adapter starts a repository-owned raw-TLP sequence on the
 documented `svt_pcie_agent::tlp_seqr`. The sequence sends a cloned
 `svt_pcie_tlp` and preserves every supported field. Production code must not
@@ -187,7 +189,8 @@ diagnostic port name.
 One callback object is registered on the public `pcie_agent.tl` of each Proxy
 full Device Agent. Its `pre_tlp_out_put` implementation:
 
-- clones every supported TLP received from that Serial link;
+- calls the matching adapter's nonblocking clone-and-enqueue function for
+  every supported TLP received from that Serial link;
 - sets `drop=1` so Requester/Target applications on the Proxy do not also own
   or respond to the transaction;
 - places exactly one clone into the corresponding adapter ingress queue; and

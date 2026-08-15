@@ -4,7 +4,7 @@
 
 **Goal:** Build and prove a verification-only 1x16 USP plus 4x4 DSP PCIe Switch Proxy that uses five full R-2020.12 Serial SVT links, dynamically enumerates four downstream Endpoints, and forwards the approved eight traffic paths.
 
-**Architecture:** Five Proxy-side SVT Application Agents terminate the Serial links and expose the public `svt_pcie_tlp_mapper` application ports. Per-port adapters translate public `svt_pcie_tlp` objects to the repository-owned `pcie_tl_tlp` representation, while an extended `pcie_tl_switch` owns Type-1 configuration images, dynamic BDF/window routing, Type-1-to-Type-0 conversion, and Completion return paths. The official SVT switch enumeration sequence remains the only allocator of final bus numbers and Endpoint BAR addresses; a registry and scoreboard turn its result into deterministic traffic and exactly-once checks.
+**Architecture:** Five Proxy-side full SVT Device Agents terminate the Serial links. A public `svt_pcie_tl_callback::pre_tlp_out_put` captures each received TLP and sets `drop=1`; per-port adapters translate clones to the repository-owned `pcie_tl_tlp` representation and reinject egress clones through the public `svt_pcie_agent::tlp_seqr`. An extended `pcie_tl_switch` owns Type-1 configuration images, dynamic BDF/window routing, Type-1-to-Type-0 conversion, and Completion return paths. The official SVT switch enumeration sequence remains the only allocator of final bus numbers and Endpoint BAR addresses; a registry and scoreboard turn its result into deterministic traffic and exactly-once checks.
 
 **Tech Stack:** SystemVerilog, UVM 1.2, Synopsys SVT PCIe R-2020.12, repository `pcie_tl_switch`, VCS W-2024.09-SP1 on `10.11.10.53`.
 
@@ -16,7 +16,7 @@
 - Use `/home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work` as the isolated remote staging checkout.
 - Keep `/home/ubuntu/synopsys/designware_vip_R-2020.12` read-only.
 - Do not put the host password, GitHub token, license strings, or a credential-bearing URL in a file or commit.
-- Stop after Task 1 if the Mapper probe does not meet every gate. Do not replace it with private state, hierarchical `force`, vendor-source edits, or five unrelated peer links.
+- Stop after Task 1 if the public TL-callback/raw-TLP-sequencer probe does not meet every gate. Do not replace it with private state, hierarchical `force`, vendor-source edits, or five unrelated peer links.
 - Keep Endpoint BAR0/1 at 32 MiB and BAR2/3 plus BAR4/5 at 64 KiB; all three pairs are 64-bit Prefetchable.
 
 Prepare the remote staging checkout once:
@@ -36,8 +36,8 @@ export PCIE_SVT_ROOT="$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12"
 
 ## File Structure
 
-- Create `svt_pcie_integration/sim/pcie_svt_mapper_probe.f`: isolated public-API probe file list.
-- Create `svt_pcie_integration/sim/pcie_svt_mapper_probe.sv`: two-link Mapper capture/reinject and single-response probe.
+- Create `svt_pcie_integration/sim/pcie_svt_tl_proxy_probe.f`: isolated public-API probe file list.
+- Create `svt_pcie_integration/sim/pcie_svt_tl_proxy_probe.sv`: two-link TL callback/drop/raw-sequence and single-response probe.
 - Create `pcie_tl_vip/src/pcie_tl_switch_pkg.sv`: lightweight switch-only package without `host_mem_pkg`.
 - Create `svt_pcie_integration/sim/pcie_tl_switch_unit.f`: standalone switch-core unit-test file list.
 - Create `svt_pcie_integration/sim/pcie_tl_switch_proxy_unit_test.sv`: Type-1, routing, window, and outstanding-table tests.
@@ -47,15 +47,16 @@ export PCIE_SVT_ROOT="$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12"
 - Modify `pcie_tl_vip/src/switch/pcie_tl_switch_fabric.sv`: 64-bit Prefetchable and exact BDF routing.
 - Modify `pcie_tl_vip/src/switch/pcie_tl_switch.sv`: local responder, Type conversion, and Completion ownership.
 - Create `svt_pcie_integration/uvm/pcie_svt_tlp_converter.sv`: lossless supported-class conversion.
-- Create `svt_pcie_integration/uvm/pcie_svt_switch_mapper_callback.sv`: public receive dispatch ownership.
-- Create `svt_pcie_integration/uvm/pcie_svt_switch_port_adapter.sv`: Mapper-to-switch ingress/egress bridge.
+- Create `svt_pcie_integration/uvm/pcie_svt_switch_tl_callback.sv`: public receive capture and suppression ownership.
+- Create `svt_pcie_integration/uvm/sequences/pcie_svt_raw_tlp_sequence.sv`: raw cloned-TLP injection through the public TL sequencer.
+- Create `svt_pcie_integration/uvm/pcie_svt_switch_port_adapter.sv`: TL-callback-to-switch ingress/egress bridge.
 - Create `svt_pcie_integration/uvm/pcie_svt_switch_scoreboard.sv`: signature, route, duplicate, drop, and Completion checks.
 - Create `svt_pcie_integration/uvm/pcie_svt_switch_enum_registry.sv`: dynamic USP/DSP/Endpoint enumeration result registry.
 - Create `svt_pcie_integration/uvm/sequences/pcie_svt_switch_enumeration_vseq.sv`: official enumeration and registry population.
 - Create `svt_pcie_integration/uvm/sequences/pcie_svt_switch_traffic_vseq.sv`: four downstream Write/Read and four upstream Write checks.
 - Create `svt_pcie_integration/uvm/sequences/pcie_svt_switch_proxy_vseq.sv`: strict full-flow stage orchestration.
 - Create `svt_pcie_integration/uvm/pcie_svt_switch_proxy_test.sv`: proxy-only UVM test selection.
-- Modify `svt_pcie_integration/uvm/pcie_svt_port_env.sv`: select Application Agent mode only for Proxy ports.
+- Modify `svt_pcie_integration/uvm/pcie_svt_port_env.sv`: identify full-Device-Agent Proxy ports without selecting Application Agent mode.
 - Modify `svt_pcie_integration/uvm/pcie_svt_env.sv`: build Proxy agents, switch, adapters, registry, and scoreboard.
 - Modify `svt_pcie_integration/uvm/pcie_svt_virtual_sequencer.sv`: publish switch/registry/scoreboard handles.
 - Modify `svt_pcie_integration/uvm/pcie_svt_integration_pkg.sv`: imports and include order.
@@ -67,52 +68,47 @@ export PCIE_SVT_ROOT="$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12"
 - Modify `svt_pcie_integration/sim/pcie_svt.f`: lightweight switch package source and new UVM files.
 - Modify `svt_pcie_integration/sim/README.md`: reproducible proxy build, matrix, and evidence gates.
 
-### Task 1: Prove the Public TLP Mapper API
+### Task 1: Prove the Public Full-Serial TL Proxy API
 
 **Files:**
-- Create: `svt_pcie_integration/sim/pcie_svt_mapper_probe.f`
-- Create: `svt_pcie_integration/sim/pcie_svt_mapper_probe.sv`
-- Reference only: R-2020.12 `class_svt_pcie_tlp_mapper.html` and `class_svt_pcie_tlp_mapper_callback.html`
-- Test: `svt_pcie_integration/sim/build_mapper_probe/run.log`
+- Create: `svt_pcie_integration/sim/pcie_svt_tl_proxy_probe.f`
+- Create: `svt_pcie_integration/sim/pcie_svt_tl_proxy_probe.sv`
+- Reference only: R-2020.12 `class_svt_pcie_tl_callback.html`, `class_svt_pcie_tl.html`, and `class_svt_pcie_agent.html`
+- Test: `svt_pcie_integration/sim/build_tl_proxy_probe/run.log`
 
 - [ ] **Step 1: Write the compile-failing public-surface probe**
 
-Create a two-link standalone topology: source RC to ingress Proxy EP, and egress Proxy RC to sink EP. Configure only the two Proxy agents as Application Agents:
+Create two real Serial x4 links: source RC to ingress Proxy EP, and egress Proxy RC to sink EP. All four UVM agents remain normal full Device Agents; assert that neither Proxy has `dut_model=RTL`, that both `pcie_agent.tl` handles exist, and that both public `pcie_agent.tlp_seqr` handles exist.
+
+Define a nonblocking receive callback and a raw egress sequence:
 
 ```systemverilog
-ingress_proxy_cfg.dut_model = svt_pcie_device_configuration::RTL;
-egress_proxy_cfg.dut_model  = svt_pcie_device_configuration::RTL;
-```
+class tl_proxy_capture_callback extends svt_pcie_tl_callback;
+  tl_proxy_bridge bridge;
+  bit ingress_side;
 
-Use one application ID consistently:
-
-```systemverilog
-localparam int PCIE_SVT_SWITCH_APP_ID = 16'h5357;
-
-class mapper_probe_callback extends svt_pcie_tlp_mapper_callback;
-  virtual function void pre_rx_tlp_put(
-      svt_pcie_tlp_mapper tlp_mapper, svt_pcie_tlp tlp);
-    tlp.application_id = PCIE_SVT_SWITCH_APP_ID;
+  virtual function void pre_tlp_out_put(
+      svt_pcie_tl tl, svt_pcie_tlp tlp, ref bit drop);
+    svt_pcie_tlp captured;
+    if ((tlp == null) || !$cast(captured, tlp.clone()))
+      `uvm_fatal("TL_PROXY_PROBE", "received TLP clone failed")
+    drop = 1'b1;
+    bridge.capture(captured, ingress_side);
   endfunction
+endclass
+
+class tl_proxy_raw_tlp_sequence extends uvm_sequence #(svt_pcie_tlp);
+  svt_pcie_tlp request;
+  virtual task body();
+    if (request == null)
+      `uvm_fatal("TL_PROXY_PROBE", "raw request is null")
+    start_item(request);
+    finish_item(request);
+  endtask
 endclass
 ```
 
-Connect only documented public members:
-
-```systemverilog
-ingress_proxy.tlp_mapper.rx_tlp_out_port[PCIE_SVT_SWITCH_APP_ID]
-  .connect(bridge.ingress_rx_imp);
-bridge.egress_tx_port.connect(
-  egress_proxy.tlp_mapper.tx_tlp_in_export[PCIE_SVT_SWITCH_APP_ID]);
-egress_proxy.tlp_mapper.rx_tlp_out_port[PCIE_SVT_SWITCH_APP_ID]
-  .connect(bridge.egress_rx_imp);
-bridge.ingress_tx_port.connect(
-  ingress_proxy.tlp_mapper.tx_tlp_in_export[PCIE_SVT_SWITCH_APP_ID]);
-```
-
-Register `mapper_probe_callback` with both Proxy Mapper instances through `uvm_callbacks#(svt_pcie_tlp_mapper, svt_pcie_tlp_mapper_callback)::add`. The bridge clones each received object before reinjection and never reads non-public Mapper state.
-
-Connect a source application put port to `source_rc.tlp_mapper.tx_tlp_in_export[PCIE_SVT_SWITCH_APP_ID]` and its receive implementation to `source_rc.tlp_mapper.rx_tlp_out_port[PCIE_SVT_SWITCH_APP_ID]`. On the sink EP, register a second callback that assigns the application ID only for a with-data Memory Request and leaves Configuration Requests at the default application ID; connect that application's receive implementation only to the sink Memory-Write checker. This selective ownership lets the sink checker prove payload delivery while its ordinary Target App remains the sole responder for the Configuration Read.
+`tl_proxy_bridge` owns two unbounded `mailbox #(svt_pcie_tlp)` instances. Its `capture` function calls `try_put` on exactly one mailbox and fatals if the nonblocking put fails. Its run task uses blocking `get` and starts a fresh `tl_proxy_raw_tlp_sequence` on `egress_proxy.pcie_agent.tlp_seqr` for ingress traffic and on `ingress_proxy.pcie_agent.tlp_seqr` for reverse traffic. The callback performs no wait or sequence start. Register callbacks only on the two Proxy TL components with `uvm_callbacks#(svt_pcie_tl, svt_pcie_tl_callback)::add`.
 
 - [ ] **Step 2: Compile to establish RED or expose the exact shipped signature**
 
@@ -121,58 +117,60 @@ ssh ubuntu@10.11.10.53 'bash -lic "
   cd /home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work/svt_pcie_integration/sim &&
   export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12 &&
   export PCIE_SVT_ROOT=\$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12 &&
-  mkdir -p build_mapper_probe &&
+  mkdir -p build_tl_proxy_probe &&
   vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
     +define+SVT_PCIE_ENABLE_GEN5 +define+SVT_PCIE_ENABLE_SERDES_ARCH \
-    -f pcie_svt_mapper_probe.f -top pcie_svt_mapper_probe_top \
-    -Mdir=build_mapper_probe/csrc -P pli.tab msglog.o \
-    -o build_mapper_probe/simv -l build_mapper_probe/compile.log
+    -f pcie_svt_tl_proxy_probe.f -top pcie_svt_tl_proxy_probe_top \
+    -Mdir=build_tl_proxy_probe/csrc -P pli.tab msglog.o \
+    -o build_tl_proxy_probe/simv -l build_tl_proxy_probe/compile.log
 "'
 ```
 
-Expected RED before the probe is complete: an unresolved connection/signature or missing probe class. If an installed public type differs, adjust only to the exact declaration displayed by the installed HTML; do not inspect or copy private implementation.
+Expected RED before the probe is complete: a missing probe class or a public callback/sequencer signature mismatch. Adjust only to the exact installed HTML declaration; do not inspect or copy private implementation.
 
 - [ ] **Step 3: Add directed write and exactly-one Completion checks**
 
-Send a one-DW Memory Write with address `64'h0000_0000_8000_1040`, `first_dw_be=4'hf`, Tag `10'h12a`, Requester ID `16'h0000`, and bytes `11 22 33 44`. The sink callback captures only that Memory Write and checks every field.
+Enable link and PHY on all four full Device Agents and require both Serial pairs to reach x4 Gen4 L0. Send a one-DW Memory Write from the source RC with address `64'h0000_0000_8000_1040`, `first_dw_be=4'hf`, Tag `10'h12a`, Requester ID `16'h0000`, and payload DWORD `32'h4433_2211`. The sink TL observation callback checks every field and requires exactly one copy.
 
-Then let the sink Target App own a Type-0 Configuration Read of Vendor/Device ID. Return the Completion through the reverse bridge and count it at the source application. The test passes only with:
+Then send a Type-0 Configuration Read of the sink Vendor/Device ID. The Proxy callbacks must suppress both Proxy Target Apps, the sink Target App must generate the only Completion, and the reverse raw-TLP sequence must return exactly one Completion to the source. Pass only with:
 
 ```systemverilog
-if (sink_write_count != 1)       `uvm_fatal("MAPPER_PROBE", "write count is not one")
-if (source_completion_count != 1)`uvm_fatal("MAPPER_PROBE", "completion count is not one")
-if (proxy_target_response_count != 0)
-  `uvm_fatal("MAPPER_PROBE", "Proxy Target App also responded")
-`uvm_info("MAPPER_API_PROBE_PASS",
-  "public capture, suppression, reinjection, payload, ID, Tag and one Completion proved",
+if (sink_write_count != 1)
+  `uvm_fatal("TL_PROXY_PROBE", "write count is not one")
+if (source_completion_count != 1)
+  `uvm_fatal("TL_PROXY_PROBE", "completion count is not one")
+if ((forward_count[0] != 2) || (forward_count[1] != 1))
+  `uvm_fatal("TL_PROXY_PROBE", "forward counts are not exactly once")
+`uvm_info("TL_PROXY_API_PROBE_PASS",
+  "public TL capture/drop and raw tlp_seqr reinjection proved on two Serial links",
   UVM_NONE)
 ```
 
-Bound both waits to 100 us and print `MAPPER_API_PROBE_BLOCKED` before a fatal if capture, suppression, reinjection, or exactly-once response fails.
+Bound link and packet waits to 100 us. Print `TL_PROXY_API_PROBE_BLOCKED` before every probe-owned fatal caused by missing public handles, link timeout, clone failure, reinjection failure, payload mismatch, or exactly-once failure.
 
 - [ ] **Step 4: Run GREEN and gate continuation**
 
 ```bash
 ssh ubuntu@10.11.10.53 'bash -lic "
   cd /home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work/svt_pcie_integration/sim &&
-  ./build_mapper_probe/simv -no_save +PCIE_GEN=4 +UVM_NO_RELNOTES \
-    -l build_mapper_probe/run.log &&
-  test \"\$(grep -a -c MAPPER_API_PROBE_PASS build_mapper_probe/run.log)\" -eq 1 &&
-  ! grep -a -q MAPPER_API_PROBE_BLOCKED build_mapper_probe/run.log &&
-  grep -a -q \"UVM_WARNING :    0\" build_mapper_probe/run.log &&
-  grep -a -q \"UVM_ERROR :    0\" build_mapper_probe/run.log &&
-  grep -a -q \"UVM_FATAL :    0\" build_mapper_probe/run.log
+  ./build_tl_proxy_probe/simv -no_save +PCIE_GEN=4 +UVM_NO_RELNOTES \
+    -l build_tl_proxy_probe/run.log &&
+  test \"\$(grep -a -c TL_PROXY_API_PROBE_PASS build_tl_proxy_probe/run.log)\" -eq 1 &&
+  ! grep -a -q TL_PROXY_API_PROBE_BLOCKED build_tl_proxy_probe/run.log &&
+  grep -a -q \"UVM_WARNING :    0\" build_tl_proxy_probe/run.log &&
+  grep -a -q \"UVM_ERROR :    0\" build_tl_proxy_probe/run.log &&
+  grep -a -q \"UVM_FATAL :    0\" build_tl_proxy_probe/run.log
 "'
 ```
 
-Expected GREEN: one probe pass, no blocked marker, and W/E/F=0/0/0. If any gate fails, stop this plan and report the public-API limitation.
+Expected GREEN: two real Serial links, one probe pass, no blocked marker, exact packet counts, and W/E/F=0/0/0. If any gate fails, stop this plan and report the public-API limitation.
 
 - [ ] **Step 5: Commit the proven API probe**
 
 ```bash
-git add svt_pcie_integration/sim/pcie_svt_mapper_probe.f \
-        svt_pcie_integration/sim/pcie_svt_mapper_probe.sv
-git commit -m "test: prove public SVT PCIe mapper forwarding API"
+git add svt_pcie_integration/sim/pcie_svt_tl_proxy_probe.f \
+        svt_pcie_integration/sim/pcie_svt_tl_proxy_probe.sv
+git commit -m "test: prove public SVT PCIe full-Serial proxy API"
 ```
 
 ### Task 2: Add a Host-Memory-Free Switch Package
@@ -484,10 +482,11 @@ git add svt_pcie_integration/uvm/pcie_svt_tlp_converter.sv \
 git commit -m "feat: convert public SVT and switch TLP objects"
 ```
 
-### Task 6: Connect Mapper Adapters and Exactly-Once Scoreboard
+### Task 6: Connect TL Callback Adapters and Exactly-Once Scoreboard
 
 **Files:**
-- Create: `svt_pcie_integration/uvm/pcie_svt_switch_mapper_callback.sv`
+- Create: `svt_pcie_integration/uvm/pcie_svt_switch_tl_callback.sv`
+- Create: `svt_pcie_integration/uvm/sequences/pcie_svt_raw_tlp_sequence.sv`
 - Create: `svt_pcie_integration/uvm/pcie_svt_switch_port_adapter.sv`
 - Create: `svt_pcie_integration/uvm/pcie_svt_switch_scoreboard.sv`
 - Create: `svt_pcie_integration/sim/pcie_svt_switch_adapter_unit_test.sv`
@@ -496,34 +495,69 @@ git commit -m "feat: convert public SVT and switch TLP objects"
 
 - [ ] **Step 1: Write failing adapter ownership tests**
 
-Use a fake Mapper-facing `uvm_blocking_put_port`, one real switch port FIFO, and a fake egress sink. Inject a Configuration Read, Memory Write, and Completion. Require one normalized ingress object, one egress object, and one signature for each. Inject one unsupported Message and require one caught `SVT_TLP_UNSUPPORTED` fatal.
+Create a callback with a real adapter and invoke `pre_tlp_out_put` for a Configuration Read, Memory Write, and Completion. For each call require `drop==1`, one cloned object in the adapter capture queue, one normalized switch ingress object, and no mutation of the source object. Inject one unsupported Message and require one caught `SVT_TLP_UNSUPPORTED` fatal plus `drop_count==1`.
+
+Connect the adapter's raw egress sequence to a unit-test `svt_pcie_tlp_sequencer` and a collecting driver. Put one object in the switch `tx_fifo`; require the driver to receive exactly one field-equal clone. This tests the same public sequencer path used by the full Serial probe.
 
 - [ ] **Step 2: Run RED**
 
-Expected RED: adapter, callback, and scoreboard classes are undefined.
+Expected RED: TL callback, raw sequence, adapter, and scoreboard classes are undefined.
 
-- [ ] **Step 3: Implement the public Mapper connection boundary**
+- [ ] **Step 3: Implement the public TL callback and raw sequencer boundary**
 
 Use:
 
 ```systemverilog
-`uvm_blocking_put_imp_decl(_mapper_rx)
+class pcie_svt_switch_tl_callback extends svt_pcie_tl_callback;
+  pcie_svt_switch_port_adapter adapter;
+  virtual function void pre_tlp_out_put(
+      svt_pcie_tl tl, svt_pcie_tlp tlp, ref bit drop);
+    adapter.capture_from_tl(tlp);
+    drop = 1'b1;
+  endfunction
+endclass
+
+class pcie_svt_raw_tlp_sequence extends uvm_sequence #(svt_pcie_tlp);
+  svt_pcie_tlp request;
+  virtual task body();
+    if (request == null)
+      `uvm_fatal("SVT_RAW_TLP", "request is null")
+    start_item(request);
+    finish_item(request);
+  endtask
+endclass
 
 class pcie_svt_switch_port_adapter extends uvm_component;
-  uvm_blocking_put_imp_mapper_rx #(svt_pcie_tlp,
-    pcie_svt_switch_port_adapter) mapper_rx_imp;
-  uvm_blocking_put_port #(svt_pcie_tlp) mapper_tx_port;
+  mailbox #(svt_pcie_tlp) captured_mbox;
+  svt_pcie_tlp_sequencer proxy_tlp_seqr;
   pcie_tl_switch_port switch_port;
   int unsigned switch_port_id;
-  int unsigned application_id = 16'h5357;
-  virtual task put_mapper_rx(svt_pcie_tlp tlp);
+  function void capture_from_tl(svt_pcie_tlp tlp);
   virtual task run_phase(uvm_phase phase);
 endclass
 ```
 
-`put_mapper_rx` converts and puts exactly one object into `switch_port.rx_fifo`. `run_phase` drains `switch_port.tx_fifo`, converts, assigns `application_id`, and sends exactly one object through `mapper_tx_port`. A failed conversion is fatal and increments no forwarding count.
+Implement the nonblocking capture boundary exactly once:
 
-The callback overrides `pre_rx_tlp_put`, assigns application ID `16'h5357`, and is registered only on the five Proxy Mappers.
+```systemverilog
+function void pcie_svt_switch_port_adapter::capture_from_tl(
+    svt_pcie_tlp tlp);
+  svt_pcie_tlp captured;
+  if ((tlp == null) || !$cast(captured, tlp.clone())) begin
+    drop_count++;
+    `uvm_fatal("SVT_TL_CAPTURE", "received TLP clone failed")
+  end
+  if (!captured_mbox.try_put(captured)) begin
+    drop_count++;
+    `uvm_fatal("SVT_TL_CAPTURE", "unbounded capture mailbox rejected TLP")
+  end
+  rx_count++;
+endfunction
+```
+
+Construct `captured_mbox = new()` in the adapter constructor. In `run_phase`, one forked thread blocks on `captured_mbox.get`, converts the clone, and puts exactly one normalized object into `switch_port.rx_fifo`. A second thread blocks on `switch_port.tx_fifo.get`, converts to one SVT object, assigns it to a fresh `pcie_svt_raw_tlp_sequence`, and starts that sequence on `proxy_tlp_seqr`. A failed conversion or sequence start is fatal and increments no successful forwarding count.
+
+Register one callback only on each of the five full Proxy agents' public `pcie_agent.tl` components. The callback must never be registered on a primary agent and must never call a task or start a sequence.
 
 - [ ] **Step 4: Implement stable signatures and checks**
 
@@ -546,12 +580,13 @@ Each adapter maintains `rx_count`, `tx_count`, `completion_count`, and `drop_cou
 Expected: `SWITCH_ADAPTER_PASS`, exactly three forwarded objects, and W/E/F=0/0/0.
 
 ```bash
-git add svt_pcie_integration/uvm/pcie_svt_switch_mapper_callback.sv \
+git add svt_pcie_integration/uvm/pcie_svt_switch_tl_callback.sv \
+        svt_pcie_integration/uvm/sequences/pcie_svt_raw_tlp_sequence.sv \
         svt_pcie_integration/uvm/pcie_svt_switch_port_adapter.sv \
         svt_pcie_integration/uvm/pcie_svt_switch_scoreboard.sv \
         svt_pcie_integration/sim/pcie_svt_switch_adapter_unit_test.sv \
         svt_pcie_integration/uvm/pcie_svt_integration_pkg.sv
-git commit -m "feat: bridge SVT mapper ports through switch adapters"
+git commit -m "feat: bridge SVT TL callbacks through switch adapters"
 ```
 
 ### Task 7: Build the Compile-Selected Five-Link Proxy
@@ -591,20 +626,22 @@ Use interface IDs 5 through 9, distinct display names, the existing Serial mappi
 
 Update `pcie_svt_env::peer_vif_key()` so the switch topology returns those five `proxy_*_vif` keys under `PCIE_USE_SVT_SWITCH_PROXY` and retains the existing `peer_*_vif` keys under `PCIE_USE_SVT_PEER`.
 
-- [ ] **Step 3: Build Proxy profiles and Application Agents**
+- [ ] **Step 3: Build Proxy profiles and full Device Agents**
 
-Reuse the opposing role/width/generation values from `build_peer_for_topology`, but select them when either peer or proxy mode is compiled. Add `bit is_switch_proxy` to `pcie_svt_port_env` configuration and apply:
+Reuse the opposing role/width/generation values from `build_peer_for_topology`, but select them when either peer or proxy mode is compiled. Add `bit is_switch_proxy` to `pcie_svt_port_env` configuration, but retain the normal full Device Agent mode:
 
 ```systemverilog
-if (is_switch_proxy)
-  cfg.dut_model = svt_pcie_device_configuration::RTL;
+if (is_switch_proxy &&
+    (cfg.dut_model == svt_pcie_device_configuration::RTL))
+  `uvm_fatal("SWITCH_PROXY_CFG",
+    "Serial Proxy must remain a full Device Agent")
 ```
 
 Set `is_switch_proxy` to one only for indices `PCIE_SVT_PEER_PORT0` through `PCIE_SVT_PEER_PORT4` in a proxy build and to zero for all five primary indices and every non-proxy build.
 
-Do not apply RTL mode to the five primary agents. In `pcie_svt_env`, create one `pcie_tl_switch` with one USP and four DSPs, five adapters, one registry, and one scoreboard only under `PCIE_USE_SVT_SWITCH_PROXY`. Set `sw_cfg.enum_mode=1` and `sw_cfg.p2p_enable=0`, then connect every adapter to its matching Proxy agent Mapper and switch port.
+In `pcie_svt_env`, create one `pcie_tl_switch` with one USP and four DSPs, five TL callbacks, five adapters, one registry, and one scoreboard only under `PCIE_USE_SVT_SWITCH_PROXY`. Set `sw_cfg.enum_mode=1` and `sw_cfg.p2p_enable=0`. Give each adapter its matching Proxy `pcie_agent.tlp_seqr` and switch port, give each callback its matching adapter, and register each callback on only that Proxy's `pcie_agent.tl`.
 
-In `pcie_svt_all_cfg_spaces_init_vseq`, keep all ten ports in reset validation, but run `REFRESH_CFG`, configuration-image programming, Multi-Endpoint BAR setup, and vendor-warning accounting only for the five primary ports. Emit one `PROXY_CFG_SKIP` for each Proxy Application Agent. The expected R-2020.12 warning count is four, from the four primary Endpoint Target Apps; a Proxy port must never start a Target-App BAR sequence.
+In `pcie_svt_all_cfg_spaces_init_vseq`, keep all ten ports in reset validation and run the normal lower-layer `REFRESH_CFG` for all ten full Device Agents. Run configuration-image programming, Multi-Endpoint BAR setup, and vendor-warning accounting only for the five primary ports. Emit one `PROXY_TARGET_CFG_SKIP` for each Proxy full Device Agent. The expected R-2020.12 warning count is four, from the four primary Endpoint Target Apps; a Proxy port must never start a Target-App BAR or completer-space sequence because the switch core owns its visible configuration and memory response behavior.
 
 - [ ] **Step 4: Bring all five pairs up concurrently**
 
@@ -856,7 +893,7 @@ git commit -m "test: orchestrate SVT switch proxy full flow"
 
 - [ ] **Step 1: Document exact build and run commands**
 
-Add the proxy compile command from Task 7, the API-gate command from Task 1, the two unit-test commands, and the four full-flow commands. Document that `PCIE_USE_SVT_SWITCH_PROXY` is legal only with the switch topology and that it adds five Proxy agents only in that build.
+Add the proxy compile command from Task 7, the API-gate command from Task 1, the switch-core, converter, and adapter unit-test commands, and the four full-flow commands. Document that `PCIE_USE_SVT_SWITCH_PROXY` is legal only with the switch topology and that it adds five full Device Agent Proxy ports only in that build.
 
 - [ ] **Step 2: Run four proxy full-flow cases**
 
@@ -903,7 +940,7 @@ git commit -m "docs: add SVT switch proxy validation matrix"
 
 ## Final Acceptance Checklist
 
-- [ ] Public Mapper probe passed without private state or modified vendor files.
+- [ ] Public TL callback/drop/raw-`tlp_seqr` probe passed over two real Serial links without private state or modified vendor files.
 - [ ] Switch unit tests proved Type-1 identity, byte enables, dynamic BDFs, 64-bit Prefetchable windows, Type conversion, and exact Completion return.
 - [ ] Converter round trips preserved every supported field and payload byte.
 - [ ] Gen4 default, Gen5 default, Gen4 fast, and Gen5 fast each produced five link passes, one enumeration pass, and eight traffic passes.
