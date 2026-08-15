@@ -15,11 +15,14 @@ class pcie_svt_port_env extends uvm_env;
 
   function void apply_profile_to_cfg(
       pcie_svt_port_profile port_profile,
-      svt_pcie_device_configuration device_cfg);
+      svt_pcie_device_configuration device_cfg,
+      bit enable_fast_link_training);
     bit enable_ats;
+    bit enable_direct_speed_up_from_2_5g_to_16g;
     bit [31:0] supported_widths;
     bit [31:0] supported_speeds;
     bit [31:0] selected_speed;
+    svt_pcie_pl_configuration::link_eq_mode_enum link_eq_mode;
 
     if ((port_profile == null) || (device_cfg == null))
       `uvm_fatal("PROFILE", "cannot apply a null port profile or configuration")
@@ -95,6 +98,26 @@ class pcie_svt_port_env extends uvm_env;
       device_cfg.pcie_cfg.pl_cfg.get_target_link_speed_value(),
       device_cfg.pcie_cfg.pl_cfg.get_expected_link_speed_value()), UVM_LOW)
 
+    enable_direct_speed_up_from_2_5g_to_16g = 1'b0;
+    if (enable_fast_link_training) begin
+      if (port_profile.max_gen == 5) begin
+        device_cfg.pcie_cfg.pl_cfg.set_link_eq_attribute_values(
+          svt_pcie_pl_configuration::LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE,
+          1'b0, 3);
+      end
+      else begin
+        enable_direct_speed_up_from_2_5g_to_16g = 1'b1;
+        device_cfg.pcie_cfg.pl_cfg.set_link_eq_attribute_values(
+          svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED,
+          1'b1, 3);
+      end
+    end
+    link_eq_mode = device_cfg.pcie_cfg.pl_cfg.get_link_eq_attribute_values();
+    `uvm_info("PCIE_SVT_FAST_LINK", $sformatf(
+      "profile=%s gen=%0d enabled=%0d eq_mode=%s enable_direct_speed_up_from_2_5g_to_16g=%0d",
+      port_profile.port_id, port_profile.max_gen, enable_fast_link_training,
+      link_eq_mode.name(), enable_direct_speed_up_from_2_5g_to_16g), UVM_LOW)
+
     if (port_profile.role == PCIE_SVT_EP) begin
       device_cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b1;
       if (!device_cfg.target_cfg.exists(0))
@@ -136,7 +159,7 @@ class pcie_svt_port_env extends uvm_env;
       `uvm_fatal("PROFILE", $sformatf(
         "%s: profile role disagrees with Unified HDL device_is_root=%0d",
         profile.port_id, cfg.device_is_root))
-    apply_profile_to_cfg(profile, cfg);
+    apply_profile_to_cfg(profile, cfg, fast_link_training);
     status = svt_pcie_device_status::type_id::create("status", this);
     uvm_config_db#(svt_pcie_device_configuration)::set(
       this, "agent", "cfg", cfg);
