@@ -2,7 +2,7 @@
 
 > Date: 2026-08-15
 >
-> Status: Approved
+> Status: Approved, revised for full-Serial TL callback boundary
 >
 > Validation host: `ubuntu@10.11.10.53`
 >
@@ -101,7 +101,37 @@ Only this build instantiates the five Proxy SVT ports and switch core. The x16
 Endpoint, 2x8 Endpoint, placeholder-DUT, and eventual real-DUT builds retain
 their existing static agent counts and simulation cost.
 
-## 5. API Feasibility Gate
+## 5. Full-Serial API Boundary and Feasibility Gate
+
+### 5.1 Rejected Mapper-on-Serial architecture
+
+R-2020.12 creates `svt_pcie_tlp_mapper` only when
+`svt_pcie_device_configuration::dut_model` is `RTL`. The same documented
+Application Agent mode excludes the lower PCIe Agent, and the official
+Application Agent example uses `SVT_PCIE_UI_PHY_INTERFACE_TYPE_APP` rather
+than a Serial PHY. A directed probe confirmed the consequence: public Mapper
+ports can be created and connected, but the Application Agent has no DL or PL
+service sequencer and cannot control a Serial link.
+
+The Switch Proxy therefore must not set `dut_model=RTL`. Every Proxy port is a
+normal full Device Agent connected to its Unified VIP Serial HDL instance.
+
+Three alternatives were evaluated:
+
+1. **Full Device Agent with public TL callback and TLP sequencer — selected.**
+   This retains the complete Serial stack, captures a received TLP in
+   `svt_pcie_tl_callback::pre_tlp_out_put`, suppresses local application
+   delivery with the callback `drop` argument, and reinjects a cloned TLP on
+   the destination port's public `svt_pcie_agent::tlp_seqr`.
+2. **Application-Agent Mapper sidecars — rejected.** This would add another
+   five non-Serial agents and a second forwarding boundary between each
+   sidecar and full Device Agent, increasing ownership and ordering risk
+   without improving coverage.
+3. **Custom RTL Application-interface switch — rejected for this phase.** It
+   would replace the repository's UVM switch boundary with an additional HDL
+   DUT and materially expand implementation and validation scope.
+
+### 5.2 Directed public-API gate
 
 Implementation starts with an isolated compile-and-run probe. Before the
 switch core or topology is changed, the probe must demonstrate all of the
@@ -115,17 +145,22 @@ following with the shipped R-2020.12 service/API surface:
 5. receive the unchanged address, length, byte enables, Tag/Requester ID where
    applicable, and payload at the far SVT peer.
 
-Candidate receive surfaces include the shipped `pciesvc_*_uvm_api` analysis
-ports, while egress uses an official SVT driver-transaction sequencer or an
-equivalent shipped service API. The probe decides the exact supported surface;
-production code must not depend on private class fields, hierarchical
-`force`/`deposit`, or modified vendor source.
+The receive surface is the documented
+`svt_pcie_tl_callback::pre_tlp_out_put(svt_pcie_tl, svt_pcie_tlp, ref bit)`.
+The callback clones the transaction before setting `drop=1`; it performs no
+blocking work. A repository-owned queue hands the clone to an adapter task.
+The egress adapter starts a repository-owned raw-TLP sequence on the
+documented `svt_pcie_agent::tlp_seqr`. The sequence sends a cloned
+`svt_pcie_tlp` and preserves every supported field. Production code must not
+depend on private class fields, hierarchical `force`/`deposit`, or modified
+vendor source.
 
 The probe also proves single-response ownership. A forwarded Configuration or
-Memory Read must produce exactly one Completion. If the service surface cannot
-observe, suppress, and reinject traffic without private-state access, this
-feature is blocked and implementation stops for a design decision. It must not
-silently fall back to five independent links or claim forwarding coverage.
+Memory Read must produce exactly one Completion. If the public TL callback and
+TLP sequencer cannot observe, suppress, and reinject traffic without
+private-state access, this feature is blocked and implementation stops for a
+design decision. It must not silently fall back to five independent links or
+claim forwarding coverage.
 
 ## 6. Components
 
@@ -147,14 +182,28 @@ link; each proxy DSP behaves as the downstream component on its x4 link. Each
 physical link has a distinct interface ID, reset bit, clock mapping, and
 diagnostic port name.
 
-### 6.2 `pcie_svt_switch_port_adapter`
+### 6.2 `pcie_svt_switch_tl_callback`
+
+One callback object is registered on the public `pcie_agent.tl` of each Proxy
+full Device Agent. Its `pre_tlp_out_put` implementation:
+
+- clones every supported TLP received from that Serial link;
+- sets `drop=1` so Requester/Target applications on the Proxy do not also own
+  or respond to the transaction;
+- places exactly one clone into the corresponding adapter ingress queue; and
+- emits a fatal diagnostic for a null or uncloneable TLP.
+
+The callback never waits, starts a sequence, or calls the switch directly.
+This keeps a function callback nonblocking and prevents reentrant forwarding.
+
+### 6.3 `pcie_svt_switch_port_adapter`
 
 One adapter is created for each Proxy port. It has three responsibilities:
 
-- receive and normalize supported SVT TLPs into `pcie_tl_tlp` objects;
+- drain callback-captured TLPs and normalize them into `pcie_tl_tlp` objects;
 - submit normalized ingress traffic to the matching switch `rx_fifo`; and
 - consume the switch `tx_fifo`, convert the object back to an SVT transaction,
-  and inject it through that port.
+  and inject a clone through that full Device Agent's public `tlp_seqr`.
 
 The first phase supports only the packet classes required for enumeration and
 approved traffic:
@@ -168,7 +217,7 @@ Requester ID, Completer ID, Tag, Completion Status, byte count, lower address,
 and payload. An unsupported TLP received during the approved tests is a fatal
 adapter error rather than an implicit drop.
 
-### 6.3 `pcie_tl_switch` extensions
+### 6.4 `pcie_tl_switch` extensions
 
 The existing switch remains the single routing authority, but its simplified
 configuration behavior must be extended for real enumeration:
@@ -189,10 +238,11 @@ configuration behavior must be extended for real enumeration:
   return Completions to the exact ingress port.
 
 The switch local responder handles accesses to USP/DSP functions. It does not
-consume requests targeting a downstream Endpoint. Proxy SVT Target Apps must
-not independently respond to switch-owned Type-1 functions.
+consume requests targeting a downstream Endpoint. Because the TL callback
+sets `drop=1` before the received TLP reaches the Proxy application layer,
+Proxy SVT Target Apps cannot independently respond to switch-owned requests.
 
-### 6.4 Enumeration result registry
+### 6.5 Enumeration result registry
 
 A shared registry records the official enumeration result for each discovered
 function:
@@ -207,7 +257,7 @@ Traffic sequences obtain Endpoint addresses from this registry or directly
 from `svt_pcie_switch_enumeration_seq_status`. Final Endpoint BDF and BAR
 addresses are never hard-coded in the test.
 
-### 6.5 Scoreboard
+### 6.6 Scoreboard
 
 The proxy scoreboard records a signature at ingress and egress:
 
@@ -225,11 +275,11 @@ value from creating a false pass.
 
 The run uses this strict stage order:
 
-1. create and validate five primary and five Proxy profiles;
+1. create and validate five primary and five full-Device-Agent Proxy profiles;
 2. initialize Endpoint configuration spaces and switch-port configuration
    images;
 3. release all five resets together;
-4. enable both ends of all links concurrently;
+4. enable both full Device Agents on all links concurrently;
 5. require Link Up and LTSSM L0 at both ends; and
 6. check one x16 and four x4 negotiated widths at the selected generation.
 
@@ -309,6 +359,7 @@ Fatal conditions include:
 - missing or duplicate primary/Proxy port registration;
 - any link timeout or negotiated speed/width mismatch;
 - unsupported or lossy TLP conversion;
+- failure to clone a callback TLP or start a raw-TLP egress sequence;
 - more than one responder for a non-posted request;
 - unknown or ambiguous BDF;
 - invalid Type-1 bus/window programming;
@@ -328,7 +379,7 @@ All VCS simulation runs execute on `10.11.10.53` under a Bash login shell.
 
 ### 11.1 Development gates
 
-1. Service-API single-packet compile/run probe.
+1. Public TL-callback/raw-TLP-sequencer single-packet compile/run probe.
 2. Five-link Gen4 default bring-up.
 3. Five-link Gen5 default bring-up.
 4. Dynamic switch enumeration and BAR/window readback.
