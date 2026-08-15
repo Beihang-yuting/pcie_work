@@ -94,6 +94,71 @@ The switch topology must report 24 `MULTI_EP_BAR_CHECK` operations, one RC
 topologies contain only primary RC VIPs, so their Target App BAR initialization
 is intentionally skipped once and twice, respectively.
 
+## Optional fast link training
+
+Pass `+PCIE_FAST_LINK_TRAIN=1` to enable fast link training. Omitting the
+plusarg selects the default value of 0, and an explicit
+`+PCIE_FAST_LINK_TRAIN=0` has the same effect. The value is run-wide and is
+applied uniformly to every active link. The plusarg may appear at most once
+and must use the equals form with exactly `=0` or `=1`; an illegal value, a
+duplicate, or a bare `+PCIE_FAST_LINK_TRAIN` causes a `UVM_FATAL` before any
+agent is created. Runtime generation selection is likewise restricted to the
+validated Gen4 and Gen5 values.
+
+For Gen4, the standard path transitions Gen1 -> Gen3 -> Gen4. The fast path
+transitions Gen1 -> Gen4 while retaining Gen4 equalization through the public
+R-2020.12 full-equalization policy. For Gen5, the fast path uses the public
+R-2020.12 equalization-bypass-to-highest-rate policy
+`LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE` and transitions Gen1 -> Gen5. Initial
+training cannot skip Gen1. R-2020.12 identifies the Gen4 direct mode as
+non-standard; when connecting the VIP to a real DUT, the DUT must support the
+same direct transition. The integration uses only public R-2020.12 APIs and
+does not modify Synopsys source code.
+
+With the x16 peer image already built in `build_peer_x16_red`, the following
+commands reproduce the Gen4 and Gen5 default and fast cases. Explicit `=0` is
+used for the default cases to make the selected policy visible on every
+command line.
+
+```sh
+./build_peer_x16_red/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test \
+  +PCIE_GEN=4 +PCIE_FAST_LINK_TRAIN=0 +UVM_NO_RELNOTES \
+  -l build_peer_x16_red/run_x16_gen4_default_explicit0.log
+
+./build_peer_x16_red/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test \
+  +PCIE_GEN=5 +PCIE_FAST_LINK_TRAIN=0 +UVM_NO_RELNOTES \
+  -l build_peer_x16_red/run_x16_gen5_default_explicit0.log
+
+./build_peer_x16_red/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test \
+  +PCIE_GEN=4 +PCIE_FAST_LINK_TRAIN=1 +UVM_NO_RELNOTES \
+  -l build_peer_x16_red/run_x16_gen4_fast.log
+
+./build_peer_x16_red/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_base_test \
+  +PCIE_GEN=5 +PCIE_FAST_LINK_TRAIN=1 +UVM_NO_RELNOTES \
+  -l build_peer_x16_red/run_x16_gen5_fast.log
+```
+
+The following x16 evidence was verified on `10.11.10.53`. Each log contains
+exactly one primary `LINK_PASS` and finishes with `UVM_WARNING`, `UVM_ERROR`,
+and `UVM_FATAL` counts of 0/0/0.
+
+| Mode | Verified log | `LINK_PASS` result | Observed rate-path evidence |
+| --- | --- | --- | --- |
+| Gen4 default (plusarg omitted) | `build_peer_x16_red/run_wait_target_green.log` | width 16, 16 GT/s | Serial Tx bit periods 0.400000, 0.125000, and 0.062500 ns show Gen1 -> Gen3 -> Gen4. |
+| Gen5 default (plusarg omitted) | `build_peer_x16_red/run_x16_gen5_default.log` | width 16, 32 GT/s | Final Gen5 rate reached. |
+| Gen4 fast | `build_peer_x16_red/run_fast_gen4_green.log` | width 16, 16 GT/s | Only 0.400000 and 0.062500 ns were observed; the Gen2 and Gen3 periods were absent. |
+| Gen5 fast | `build_peer_x16_red/run_fast_gen5_green.log` | width 16, 32 GT/s | Only 0.400000 and 0.031250 ns were observed; the Gen2, Gen3, and Gen4 periods were absent. |
+
+The period evidence above comes from the complete set of
+`Serial Tx bit clk period before applying ssc is` messages in each log. The
+`PCIE_SVT_FAST_LINK` diagnostic reports the requested/configured policy for
+each active profile; use `LINK_PASS` and the final severity counts as the link
+and test outcome rather than treating that diagnostic as final hardware state.
+
 ## Configuration watchdog directed regression
 
 `pcie_svt_watchdog_directed_test.sv` runs the production
