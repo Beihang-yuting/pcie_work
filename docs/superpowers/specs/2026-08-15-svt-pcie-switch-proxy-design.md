@@ -2,7 +2,7 @@
 
 > Date: 2026-08-15
 >
-> Status: Approved in conversation; pending written-spec review
+> Status: Approved
 >
 > Validation host: `ubuntu@10.11.10.53`
 >
