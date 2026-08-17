@@ -18,7 +18,10 @@
 - Stage files under `/home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work`; keep `/home/ubuntu/synopsys/designware_vip_R-2020.12` read-only.
 - Use only declarations documented by the installed R-2020.12 HTML. Do not inspect or modify private vendor implementation source.
 - Do not use hierarchical `force`, `deposit`, a report catcher, severity changes, a Driver App reconstruction path, or synthetic Completion generation.
-- Keep all four active Agents, both real Serial links, Gen4 x4 L0 checks, the 205 ns reset, and `+define+SVT_PCIE_ENABLE_10_BIT_TAGS`.
+- Keep all four active Agents, both real Serial links, explicit public
+  `pl_status.ltssm_state == svt_pcie_types::L0` checks in addition to
+  `link_up`, Gen4 speed, and x4 width, the 205 ns reset, and
+  `+define+SVT_PCIE_ENABLE_10_BIT_TAGS`.
 - Every callback and analysis `write()` method may clone, validate, increment a counter, and call `mailbox::try_put`; it may not wait, perform a blocking `put`, or start a sequence.
 - Treat any unexpected or spurious Completion report from an active Agent as a feasibility failure. Do not suppress or downgrade it.
 - Retain the two Mapper probe files until the full sidecar probe is GREEN. Delete them only in Task 7.
@@ -38,6 +41,7 @@ pcie_svt_uvm_class_reference/html/configuration/class_svt_pcie_configuration.htm
 pcie_svt_uvm_class_reference/html/configuration/class_svt_pcie_device_configuration.html
 pcie_svt_uvm_class_reference/html/configuration/class_svt_pcie_tl_configuration.html
 pcie_svt_uvm_class_reference/html/monitor/class_svt_pcie_tl_monitor.html
+pcie_svt_uvm_class_reference/html/status/class_svt_pcie_pl_status.html
 pcie_svt_uvm_class_reference/html/callback/class_svt_pcie_driver_app_callback.html
 pcie_svt_uvm_class_reference/html/transaction/class_svt_pcie_tlp.html
 ```
@@ -76,14 +80,28 @@ Run:
 ```bash
 ssh ubuntu@10.11.10.53 'bash -lic "
   cd /home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work/svt_pcie_integration/sim
-  test \"\$(grep -a -c TL_PROXY_API_PROBE_PASS build_tl_proxy_probe_cfg_clean/run_cbpool.log || true)\" -eq 0
-  test \"\$(grep -a -c TL_PROXY_API_PROBE_BLOCKED build_tl_proxy_probe_cfg_clean/run_cbpool.log || true)\" -eq 1
-  grep -a -q \"ingress_capture=0 ingress_forward=0 reverse_capture=0 reverse_forward=0\" \
-    build_tl_proxy_probe_cfg_clean/run_cbpool.log
+  set -euo pipefail
+  actual_pass=\$(grep -a -E -c -- \
+    \"^UVM_(INFO|WARNING|ERROR|FATAL)([[:space:]]+[^[:space:]]+)?[[:space:]]+@[[:space:]]+[^:]+:[[:space:]]+[^[:space:]]+[[:space:]]+\\[TL_PROXY_API_PROBE_PASS\\]([[:space:]]|\$)\" \
+    build_tl_proxy_probe_cfg_clean/run_cbpool.log || true)
+  actual_blocked=\$(grep -a -E -c -- \
+    \"^UVM_(INFO|WARNING|ERROR|FATAL)([[:space:]]+[^[:space:]]+)?[[:space:]]+@[[:space:]]+[^:]+:[[:space:]]+[^[:space:]]+[[:space:]]+\\[TL_PROXY_API_PROBE_BLOCKED\\]([[:space:]]|\$)\" \
+    build_tl_proxy_probe_cfg_clean/run_cbpool.log || true)
+  tuple_count=\$(grep -a -F -c -- \
+    \"ingress_capture=0 ingress_forward=0 reverse_capture=0 reverse_forward=0\" \
+    build_tl_proxy_probe_cfg_clean/run_cbpool.log || true)
+  test \"\$actual_pass\" -eq 0
+  test \"\$actual_blocked\" -eq 1
+  test \"\$tuple_count\" -eq 1
+  printf \"actual PASS=%s / actual BLOCKED=%s / tuple=%s\\n\" \
+    \"\$actual_pass\" \"\$actual_blocked\" \"\$tuple_count\"
 "'
 ```
 
-Expected: exit zero. The old active TL callback captured no request and never emitted a PASS marker.
+Expected: exit zero and `actual PASS=0 / actual BLOCKED=1 / tuple=1`. Only
+anchored, real UVM report lines count as markers; the duplicate entries under
+`** Report counts by id` do not count. The old active TL callback captured no
+request and never emitted a PASS marker.
 
 - [ ] **Step 2: Create the log checker before changing the probe**
 
@@ -101,21 +119,41 @@ fi
 mode=$1
 log=$2
 
+case "$mode" in
+  baseline|sidecar-link|full)
+    ;;
+  *)
+    echo "invalid mode: $mode" >&2
+    exit 2
+    ;;
+esac
+
 if [[ ! -r $log ]]; then
   echo "unreadable log: $log" >&2
   exit 2
 fi
 
 count_marker() {
-  grep -a -c -- "$1" "$log" || true
+  grep -a -E -c -- "^UVM_(INFO|WARNING|ERROR|FATAL)([[:space:]]+[^[:space:]]+)?[[:space:]]+@[[:space:]]+[^:]+:[[:space:]]+[^[:space:]]+[[:space:]]+\\[$1\\]([[:space:]]|$)" "$log" || true
+}
+
+check_zero_summary() {
+  local severity=$1
+  local summary_count
+  local zero_count
+
+  summary_count=$(grep -a -E -c -- "^${severity}[[:space:]]*:" "$log" || true)
+  zero_count=$(grep -a -E -c -- "^${severity}[[:space:]]*:[[:space:]]*0[[:space:]]*$" "$log" || true)
+  test "$summary_count" -eq 1
+  test "$zero_count" -eq 1
 }
 
 test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_PROBE_BLOCKED)" -eq 0
-grep -a -q '^UVM_WARNING :    0$' "$log"
-grep -a -q '^UVM_ERROR :    0$' "$log"
-grep -a -q '^UVM_FATAL :    0$' "$log"
+check_zero_summary UVM_WARNING
+check_zero_summary UVM_ERROR
+check_zero_summary UVM_FATAL
 
-if grep -a -Eiq 'unexpected[^[:cntrl:]]*completion|spurious[^[:cntrl:]]*completion' "$log"; then
+if grep -a -Eiq -- 'unexpected[^[:cntrl:]]*completion|spurious[^[:cntrl:]]*completion' "$log"; then
   echo "unexpected/spurious Completion diagnostic found in $log" >&2
   exit 1
 fi
@@ -123,23 +161,30 @@ fi
 case "$mode" in
   baseline)
     test "$(count_marker TL_PROXY_FOUR_ACTIVE_BASELINE_PASS)" -eq 1
+    test "$(count_marker TL_PROXY_SOURCE_DRIVER_END_TRACE)" -eq 0
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_STAGE_A_PASS)" -eq 0
+    test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_LINK_ONLY_PASS)" -eq 0
+    test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_MWR_STAGE_PASS)" -eq 0
+    test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_CFG_STAGE_PASS)" -eq 0
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_PROBE_PASS)" -eq 0
     ;;
   sidecar-link)
+    test "$(count_marker TL_PROXY_FOUR_ACTIVE_BASELINE_PASS)" -eq 0
+    test "$(count_marker TL_PROXY_SOURCE_DRIVER_END_TRACE)" -eq 0
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_STAGE_A_PASS)" -eq 1
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_LINK_ONLY_PASS)" -eq 1
+    test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_MWR_STAGE_PASS)" -eq 0
+    test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_CFG_STAGE_PASS)" -eq 0
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_PROBE_PASS)" -eq 0
     ;;
   full)
+    test "$(count_marker TL_PROXY_FOUR_ACTIVE_BASELINE_PASS)" -eq 0
+    test "$(count_marker TL_PROXY_SOURCE_DRIVER_END_TRACE)" -eq 1
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_STAGE_A_PASS)" -eq 1
+    test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_LINK_ONLY_PASS)" -eq 0
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_MWR_STAGE_PASS)" -eq 1
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_CFG_STAGE_PASS)" -eq 1
     test "$(count_marker TL_PROXY_PASSIVE_SIDECAR_PROBE_PASS)" -eq 1
-    ;;
-  *)
-    echo "invalid mode: $mode" >&2
-    exit 2
     ;;
 esac
 ```
@@ -150,20 +195,120 @@ Mark it executable:
 chmod +x svt_pcie_integration/sim/check_tl_proxy_passive_sidecar_log.sh
 ```
 
-- [ ] **Step 3: Verify the oracle is RED against the superseded log**
+- [ ] **Step 3: Verify the acceptance-oracle boundaries and the old log remains RED**
 
-Run locally:
+Create `/tmp/tl_proxy_passive_sidecar_full_with_summary.log` outside the
+repository with exactly this synthetic valid full log:
+
+```text
+UVM_INFO @ 1000: uvm_test_top [TL_PROXY_PASSIVE_SIDECAR_STAGE_A_PASS] both active links and passive sidecars reached L0
+UVM_INFO @ 2000: uvm_test_top [TL_PROXY_PASSIVE_SIDECAR_MWR_STAGE_PASS] memory write forwarded exactly once
+UVM_INFO @ 3000: uvm_test_top [TL_PROXY_SOURCE_DRIVER_END_TRACE] transaction_type=CFG_RD completion_status=SUCCESSFUL cfg_read_success_count=1
+UVM_INFO @ 4000: uvm_test_top [TL_PROXY_PASSIVE_SIDECAR_CFG_STAGE_PASS] configuration read preserved requester ID and tag
+UVM_INFO @ 5000: uvm_test_top [TL_PROXY_PASSIVE_SIDECAR_PROBE_PASS] passive sidecar probe passed
+
+--- UVM Report Summary ---
+
+** Report counts by id
+[TL_PROXY_PASSIVE_SIDECAR_STAGE_A_PASS] 1
+[TL_PROXY_PASSIVE_SIDECAR_MWR_STAGE_PASS] 1
+[TL_PROXY_SOURCE_DRIVER_END_TRACE] 1
+[TL_PROXY_PASSIVE_SIDECAR_CFG_STAGE_PASS] 1
+[TL_PROXY_PASSIVE_SIDECAR_PROBE_PASS] 1
+
+** Report counts by severity
+UVM_INFO :    5
+UVM_WARNING :    0
+UVM_ERROR :    0
+UVM_FATAL :    0
+```
+
+Create the following additional temporary logs under `/tmp`, never in the
+repository. Every valid/marker-focused log must contain exactly one warning,
+error, and fatal summary line, each with value zero; both `: 0` and `:    0`
+spacing are valid. Marker lines use the real UVM form
+`UVM_INFO optional_file_token @ time: reporter [REPORT_ID] message`.
+
+| Temporary path | Contents and expected profile |
+| --- | --- |
+| `/tmp/tl_proxy_valid_baseline.log` | `baseline`: baseline only; include a file token |
+| `/tmp/tl_proxy_valid_sidecar_link.log` | `sidecar-link`: Stage A and link-only only; omit the file token |
+| `/tmp/tl_proxy_id_body_mention.log` | Full markers except PROBE is only mentioned in the body after `[OTHER_ID]`; reject |
+| `/tmp/tl_proxy_extra_error_nonzero.log` | Valid full plus a second `UVM_ERROR : 1`; reject |
+| `/tmp/tl_proxy_duplicate_error_zero.log` | Valid full plus a duplicate `UVM_ERROR : 0`; reject |
+| `/tmp/tl_proxy_baseline_forbidden_markers.log` | Baseline plus link-only, MWr, and CFG; reject |
+| `/tmp/tl_proxy_sidecar_forbidden_markers.log` | Stage A/link-only plus baseline, MWr, and CFG; reject |
+| `/tmp/tl_proxy_full_forbidden_markers.log` | Valid full plus baseline and link-only; reject |
+| `/tmp/tl_proxy_source_marker_missing.log` | Valid full without `TL_PROXY_SOURCE_DRIVER_END_TRACE`; reject |
+| `/tmp/tl_proxy_source_marker_duplicate.log` | Valid full with two `TL_PROXY_SOURCE_DRIVER_END_TRACE` reports; reject |
+| `/tmp/tl_proxy_baseline_source_marker.log` | Valid baseline plus `TL_PROXY_SOURCE_DRIVER_END_TRACE`; reject |
+| `/tmp/tl_proxy_sidecar_source_marker.log` | Valid sidecar-link plus `TL_PROXY_SOURCE_DRIVER_END_TRACE`; reject |
+| `/tmp/tl_proxy_invalid_mode_malformed.log` | Malformed readable content used with an invalid mode; exit exactly 2 |
+| `/tmp/tl_proxy_checker_option_name/--color=never` | Valid baseline content, passed as bare `--color=never`; accept |
+| `/tmp/tl_proxy_checker_option_name/--color=always` | Valid baseline plus an unexpected Completion diagnostic; reject |
+
+Then run locally from the worktree root:
 
 ```bash
-bash -n svt_pcie_integration/sim/check_tl_proxy_passive_sidecar_log.sh
+set -euo pipefail
+checker=$(pwd)/svt_pcie_integration/sim/check_tl_proxy_passive_sidecar_log.sh
+
+bash -n "$checker"
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck "$checker"
+fi
+
+"$checker" baseline /tmp/tl_proxy_valid_baseline.log
+"$checker" sidecar-link /tmp/tl_proxy_valid_sidecar_link.log
+"$checker" full /tmp/tl_proxy_passive_sidecar_full_with_summary.log
+
+for mode_log in \
+  "full:/tmp/tl_proxy_id_body_mention.log" \
+  "full:/tmp/tl_proxy_extra_error_nonzero.log" \
+  "full:/tmp/tl_proxy_duplicate_error_zero.log" \
+  "baseline:/tmp/tl_proxy_baseline_forbidden_markers.log" \
+  "sidecar-link:/tmp/tl_proxy_sidecar_forbidden_markers.log" \
+  "full:/tmp/tl_proxy_full_forbidden_markers.log" \
+  "full:/tmp/tl_proxy_source_marker_missing.log" \
+  "full:/tmp/tl_proxy_source_marker_duplicate.log" \
+  "baseline:/tmp/tl_proxy_baseline_source_marker.log" \
+  "sidecar-link:/tmp/tl_proxy_sidecar_source_marker.log"; do
+  mode=${mode_log%%:*}
+  log=${mode_log#*:}
+  if "$checker" "$mode" "$log"; then
+    echo "ERROR: acceptance oracle accepted invalid fixture $log" >&2
+    exit 1
+  fi
+done
+
+set +e
+"$checker" invalid-mode /tmp/tl_proxy_invalid_mode_malformed.log
+invalid_mode_status=$?
+set -e
+test "$invalid_mode_status" -eq 2
+
+(
+  cd /tmp/tl_proxy_checker_option_name
+  "$checker" baseline --color=never
+  if "$checker" baseline --color=always; then
+    echo "ERROR: option-like Completion fixture was accepted" >&2
+    exit 1
+  fi
+)
+
 scp ubuntu@10.11.10.53:/home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work/svt_pcie_integration/sim/build_tl_proxy_probe_cfg_clean/run_cbpool.log /tmp/tl_proxy_active_callback_red.log
-if svt_pcie_integration/sim/check_tl_proxy_passive_sidecar_log.sh full /tmp/tl_proxy_active_callback_red.log; then
+if "$checker" full /tmp/tl_proxy_active_callback_red.log; then
   echo "ERROR: the new acceptance oracle accepted old RED evidence" >&2
   exit 1
 fi
 ```
 
-Expected: `bash -n` passes; the checker exits nonzero for the old log.
+Expected: syntax and optional ShellCheck pass; valid baseline, sidecar-link,
+full, and the option-like valid filename are accepted. A body-only marker,
+duplicate/nonzero severity summaries, every forbidden profile-marker
+combination, the option-like Completion log, and the old active-callback log
+are rejected. Invalid mode exits exactly 2 before inspecting malformed log
+content. The report-count summary duplicates do not affect marker counts.
 
 ### Task 2: Add Input-Only HDL Taps and Standalone Passive Agents
 
@@ -486,6 +631,13 @@ if (ingress_sidecar_cfg.is_active || egress_sidecar_cfg.is_active ||
     "passive sidecar configuration invalid");
 ```
 
+`wait_for_links()` must require all four active endpoint status objects to
+report `pl_status.ltssm_state == svt_pcie_types::L0` at the same time as
+`link_up`, `current_speed == SPEED_16_0G`, and
+`negotiated_link_width == 4`. The public R-2020.12 PL-status example waits on
+this LTSSM field directly; `current_speed` alone is not proof that the endpoint
+has entered L0.
+
 After `wait_for_links()` succeeds, emit exactly one Stage A marker:
 
 ```systemverilog
@@ -542,7 +694,10 @@ ssh ubuntu@10.11.10.53 'bash -lic "
 "'
 ```
 
-Expected: VCS creates `simv`; both active links reach Gen4 x4 L0; both passive `tl_mon` handles are non-null; Stage A and link-only markers each appear once; W/E/F is `0/0/0`.
+Expected: VCS creates `simv`; every active endpoint explicitly reports L0 at
+Gen4 x4 before Stage A; both passive `tl_mon` handles are non-null; the
+link-only marker occurs at least 10 us after the last active endpoint enters
+Gen4 L0; Stage A and link-only markers each appear once; W/E/F is `0/0/0`.
 
 If this step fails to bind or decode either standalone SERDES interface, stop Task 1. Do not implement a Driver App fallback.
 
@@ -642,8 +797,8 @@ class tl_proxy_wire_checker extends uvm_component;
   endfunction
 
   function bit wire_equal(svt_pcie_tlp lhs, svt_pcie_tlp rhs);
-    dword_array_t lhs_dwords;
-    dword_array_t rhs_dwords;
+    svt_pcie_types::dword_array_t lhs_dwords;
+    svt_pcie_types::dword_array_t rhs_dwords;
     lhs_dwords = lhs.get_dword_array();
     rhs_dwords = rhs.get_dword_array();
     if (lhs_dwords.size() != rhs_dwords.size())
@@ -694,20 +849,20 @@ class tl_proxy_sidecar_subscriber extends uvm_subscriber #(svt_pcie_tlp);
     super.new(name, parent);
   endfunction
 
-  virtual function void write(svt_pcie_tlp observed);
+  virtual function void write(svt_pcie_tlp t);
     if (control == null)
       `uvm_fatal("TL_PROXY_PASSIVE_SIDECAR_PROBE",
         "sidecar subscriber control is null")
-    if ((checker == null) || (observed == null))
+    if ((checker == null) || (t == null))
       control.fail("sidecar subscriber received a null handle",
         "sidecar subscriber handle missing");
-    checker.observe(role, observed);
+    checker.observe(role, t);
     if ((role == tl_proxy_wire_checker::EGRESS_RX_COMPLETION) &&
-        (observed.tlp_type == svt_pcie_tlp::CPL)) begin
+        (t.tlp_type == svt_pcie_tlp::CPL)) begin
       if (bridge == null)
         checker.control.fail("Egress RX Completion bridge is null",
           "reverse bridge handle missing");
-      bridge.capture_completion(observed);
+      bridge.capture_completion(t);
     end
   endfunction
 endclass
@@ -962,6 +1117,28 @@ Register it on `sink_ep.target[0]`. It must never implement `pre_tx_tlp_put`; th
 
 Keep the directed Memory Write fields exactly as approved, then wait at most 100 us for all Stage B counts. Add `+TL_PROXY_STOP_AFTER_MWR` support after the gate.
 
+Next to the Source Driver's existing explicit-Tag configuration, enable
+Requester-ID user control so the sequence value reaches the wire:
+
+```systemverilog
+source_rc_cfg.driver_cfg[0]
+  .enable_tlp_field_user_control_vector[3] = 1'b1;
+```
+
+After the Memory Write sequence factory create and null check, bind its public
+configuration handle before calling `randomize()`:
+
+```systemverilog
+write_seq.cfg = source_rc_cfg;
+```
+
+Do not constrain the high-level posted Memory Write's transaction `tag`.
+R-2020.12's documented `reasonable_tag` constraint keeps that sequence field
+in the enabled 10-bit range, while the Driver App applies the transaction Tag
+only to non-posted requests. The posted Memory Write wire Tag therefore
+remains `10'h000`, and Task 1's Configuration Read retains the full 10-bit Tag
+preservation proof. Constrain `requester_id == 16'h0000`.
+
 Use this bounded wait before evaluating the exact gate:
 
 ```systemverilog
@@ -983,16 +1160,14 @@ begin
   join_any
   disable fork;
   if (!mwr_ready)
-    control.fail($sformatf(
-      {"Memory Write timeout: ingress_rx=%0d egress_tx=%0d sink=%0d ",
-       "target_capture=%0d mailbox_capture=%0d reinject=%0d sink_write=%0d"},
-      checker.ingress_requests.size(), checker.egress_requests.size(),
-      checker.sink_requests.size(),
-      ingress_target_callback.request_capture_count,
-      bridge.request_capture_count, bridge.request_forward_count,
-      sink_target_callback.write_count),
+    fail_with_full_counter_snapshot(
+      "Memory Write path did not complete within 100 us",
       "Memory Write stage exceeded 100 us");
 end
+
+// Keep every callback and bridge worker active during a fixed quiet window.
+// The exact-count, wire, and field gates below recheck the accumulated state.
+#1us;
 ```
 
 The exact Stage B check is:
@@ -1025,8 +1200,8 @@ if ((checker.ingress_requests[0].address !=
        64'h0000_0000_8000_1040) ||
     (checker.ingress_requests[0].first_dw_be != 4'hf) ||
     (checker.ingress_requests[0].last_dw_be != 4'h0) ||
-    (checker.ingress_requests[0].address_translation != 2'b00) ||
-    (checker.ingress_requests[0].tag != 10'h12a) ||
+    (checker.ingress_requests[0].at != svt_pcie_tlp::UNTRANSLATED) ||
+    (checker.ingress_requests[0].tag != 10'h000) ||
     (checker.ingress_requests[0].requester_id != 16'h0000) ||
     (checker.ingress_requests[0].traffic_class != 3'b000) ||
     (checker.ingress_requests[0].length != 10'd1) ||
@@ -1041,7 +1216,6 @@ if ((checker.ingress_requests[0].address !=
   UVM_NONE)
 
 if ($test$plusargs("TL_PROXY_STOP_AFTER_MWR")) begin
-  #1us;
   phase.drop_objection(this);
   return;
 end
@@ -1065,12 +1239,14 @@ ssh ubuntu@10.11.10.53 'bash -lic "
   ./\$build_dir/simv -no_save +UVM_NO_RELNOTES \
     +TL_PROXY_STOP_AFTER_MWR +ntb_random_seed=1 \
     -l \$build_dir/run.log
-  test \"\$(grep -a -c TL_PROXY_PASSIVE_SIDECAR_STAGE_A_PASS \
-    \$build_dir/run.log || true)\" -eq 1
-  test \"\$(grep -a -c TL_PROXY_PASSIVE_SIDECAR_MWR_STAGE_PASS \
-    \$build_dir/run.log || true)\" -eq 1
-  test \"\$(grep -a -c TL_PROXY_PASSIVE_SIDECAR_PROBE_BLOCKED \
-    \$build_dir/run.log || true)\" -eq 0
+  count_marker() {
+    grep -a -E -c -- \
+      \"^UVM_(INFO|WARNING|ERROR|FATAL)([[:space:]]+[^[:space:]]+)?[[:space:]]+@[[:space:]]+[^:]+:[[:space:]]+[^[:space:]]+[[:space:]]+\\[\$1\\]([[:space:]]|\$)\" \
+      \$build_dir/run.log || true
+  }
+  test \"\$(count_marker TL_PROXY_PASSIVE_SIDECAR_STAGE_A_PASS)\" -eq 1
+  test \"\$(count_marker TL_PROXY_PASSIVE_SIDECAR_MWR_STAGE_PASS)\" -eq 1
+  test \"\$(count_marker TL_PROXY_PASSIVE_SIDECAR_PROBE_BLOCKED)\" -eq 0
   grep -a -q \"^UVM_WARNING :    0\$\" \$build_dir/run.log
   grep -a -q \"^UVM_ERROR :    0\$\" \$build_dir/run.log
   grep -a -q \"^UVM_FATAL :    0\$\" \$build_dir/run.log
@@ -1086,7 +1262,53 @@ Expected: Stage A and MWr markers each appear once, Ingress passive RX equals Eg
 - Modify: `svt_pcie_integration/sim/pcie_svt_tl_proxy_probe.sv:callbacks, final stage, terminal gate`
 - Test: fresh full-traffic VCS run
 
-- [ ] **Step 1: Add the Source Driver transaction-end callback**
+- [ ] **Step 1: Build and verify the minimal passive capability images**
+
+Change both standalone sidecars from `CFG_SPACE_DISABLED` to the documented
+`CFG_SPACE_BACKDOOR_UPDATE` mode. Create one probe-owned
+`uvm_analysis_port #(svt_pcie_tl_service)` per sidecar in `build_phase` and
+connect each port to the corresponding passive
+`pcie_agent.tl_mon.tl_service_in_port` in `connect_phase`.
+
+Before enabling either physical link, initialize only the configuration-space
+structure needed by the passive 10-bit Tag checks. For each sidecar, send and
+wait for these `MON_CONFIG_SPACE_WRITE_ADDR` services in order:
+
+```systemverilog
+write_sidecar_cfg_address(service_port,
+  `SVT_PCIE_CONFIG_SPACE_FUNC_0_CAP_STAT_ADDR, 32'h0010_0000,
+  {sidecar_name, " Status/Command"});
+write_sidecar_cfg_address(service_port,
+  `SVT_PCIE_CONFIG_SPACE_FUNC_0_CAP_PTR_ADDR, 32'h0000_0040,
+  {sidecar_name, " Capability Pointer"});
+write_sidecar_cfg_address(service_port,
+  `SVT_PCIE_CONFIG_SPACE_FUNC_0_BASE_ADDR + 28'h000_0040,
+  32'h0002_0010, {sidecar_name, " PCI Express Capability"});
+```
+
+These three DWORDs enable the conventional capability list, point it to byte
+address 40h, and define PCIe Capability ID 10h with a null next pointer and
+version 2. Every service uses mask `32'hffff_ffff`, waits on the public
+`svt_pcie_tl_service::end_event`, and fails after a bounded 100 us wait. Do
+not load BARs, AER, ATS, or any other capability; this is a minimal checker
+image, not a complete copy of either active Proxy configuration space.
+
+Then set exactly these function-0 fields with
+`MON_CONFIG_SPACE_SET_FIELD`:
+
+| Sidecar / monitored device | Field | Value |
+| --- | --- | --- |
+| Egress / Egress Proxy requester | `SVT_PCIE_PCIE_DEV_CTST_REG_EXTND_TAG_FIELD_EN_FLD` | 1 |
+| Egress / Egress Proxy requester | `SVT_PCIE_PCIE_DEV_2_REG_10_BIT_TAG_REQUESTER_SUPP_FLD` | 1 |
+| Egress / Egress Proxy requester | `SVT_PCIE_PCIE_DEV_CTST_2_REG_10_BIT_TAG_REQUESTER_EN_FLD` | 1 |
+| Ingress / Ingress Proxy completer | `SVT_PCIE_PCIE_DEV_2_REG_10_BIT_TAG_COMPLETER_SUPP_FLD` | 1 |
+
+Issue `MON_CONFIG_SPACE_GET_FIELD` for all four fields, wait on each service's
+`end_event`, and require every returned value to equal one before any link or
+traffic sequence starts. Emit `TL_PROXY_PASSIVE_CFG_TRACE` with the four
+readbacks. Sending a service without successful readback is not acceptance.
+
+- [ ] **Step 2: Add the Source Driver transaction-end callback**
 
 Add:
 
@@ -1096,6 +1318,7 @@ class tl_proxy_source_driver_callback extends svt_pcie_driver_app_callback;
   bit cfg_read_armed;
   int unsigned total_end_count;
   int unsigned cfg_read_end_count;
+  int unsigned cfg_read_success_count;
 
   `uvm_object_utils(tl_proxy_source_driver_callback)
 
@@ -1106,18 +1329,45 @@ class tl_proxy_source_driver_callback extends svt_pcie_driver_app_callback;
   virtual function void transaction_ended(
       svt_pcie_driver_app driver,
       svt_pcie_driver_app_transaction transaction);
-    if (control == null)
-      `uvm_fatal("TL_PROXY_PASSIVE_SIDECAR_PROBE",
-        "Source Driver callback control is null")
+    if (control == null) begin
+      tl_proxy_fatal_without_control(
+        "Source Driver callback control is null",
+        "Source Driver callback control is null");
+      return;
+    end
     if ((driver == null) || (transaction == null))
       control.fail("Source Driver transaction_ended received a null handle",
         "Source Driver callback handle missing");
     total_end_count++;
-    if (cfg_read_armed)
+    if (cfg_read_armed) begin
       cfg_read_end_count++;
+      if ((transaction.transaction_type ==
+             svt_pcie_driver_app_transaction::CFG_RD) &&
+          (transaction.completion_status ==
+             svt_pcie_driver_app_transaction::SUCCESSFUL)) begin
+        cfg_read_success_count++;
+        `uvm_info("TL_PROXY_SOURCE_DRIVER_END_TRACE", $sformatf(
+          {"transaction_type=CFG_RD completion_status=SUCCESSFUL ",
+           "cfg_read_success_count=%0d"}, cfg_read_success_count), UVM_NONE)
+      end else
+        control.fail("armed Source transaction was not a successful CfgRd",
+          "Source Configuration Read did not complete successfully");
+    end
   endfunction
 endclass
 ```
+
+The public R-2020.12 HTML declares both transaction members and the
+`CFG_RD`/`SUCCESSFUL` enum values. Check them only after `cfg_read_armed` is
+set, so the posted Memory Write's documented default `AWAITED` status is not
+treated as failure. Only the successful branch increments
+`cfg_read_success_count` and emits the anchored source trace.
+
+At package scope, keep one `tl_proxy_fatal_without_control()` helper that first
+emits exactly one `TL_PROXY_PASSIVE_SIDECAR_PROBE_BLOCKED` and then calls
+`` `uvm_fatal``. It is the only direct fatal site. `control.fail()` delegates
+to it, and every `control == null` branch calls it inside an explicit block and
+then returns, so no null handle is dereferenced even if report control changes.
 
 Require `source_rc.driver.exists(0)` and `source_rc.driver[0] != null`, then register:
 
@@ -1141,8 +1391,11 @@ begin
     #100us;
   join_any
   disable fork;
-  if (!source_mwr_ended ||
-      (source_driver_callback.total_end_count != 1) ||
+  if (!source_mwr_ended)
+    fail_with_full_counter_snapshot(
+      "Source Memory Write transaction did not end within 100 us",
+      "Source Memory Write Driver transaction-end timeout");
+  if ((source_driver_callback.total_end_count != 1) ||
       (source_driver_callback.cfg_read_end_count != 0))
     control.fail("Source Memory Write Driver transaction-end gate failed",
       "Source Driver did not end the Memory Write exactly once");
@@ -1152,7 +1405,7 @@ end
 Then set `cfg_read_armed=1` immediately before starting the CfgRd sequence. No
 other Source Driver transaction may start after this point.
 
-- [ ] **Step 2: Keep the CfgRd Tag runtime-assigned**
+- [ ] **Step 3: Keep the CfgRd Tag runtime-assigned**
 
 Create the high-level CfgRd sequence with only its documented fields:
 
@@ -1177,9 +1430,17 @@ cfg_read_sequence.start(source_rc.driver_transaction_seqr[0]);
 
 Do not add a Tag property to this sequence and do not construct a replacement Completion. The complete runtime Tag comes from `checker.ingress_requests[1].tag`.
 
-- [ ] **Step 3: Add the 100 us final-stage wait and timeout dump**
+- [ ] **Step 4: Add the 100 us final-stage wait and timeout dump**
 
-Wait until all cumulative counts reach their expected lower bounds, with a parallel `#100us` timeout. On timeout, print all of these values before calling `control.fail`:
+Define one `fail_with_full_counter_snapshot()` helper and call it from the
+link-training wait, Stage B Memory Write wait, Source Memory Write end wait,
+and Stage C request/Completion wait. It emits exactly one
+`TL_PROXY_PASSIVE_SIDECAR_TIMEOUT_TRACE` containing the same complete snapshot
+before calling `control.fail`; no one-off partial timeout formatter is allowed.
+Every wait remains bounded by `#100us` or less.
+
+Wait until all cumulative counts reach their expected lower bounds. The shared
+snapshot contains all of these values:
 
 ```text
 ingress_rx_requests egress_tx_requests sink_requests
@@ -1187,7 +1448,7 @@ egress_rx_completions ingress_tx_completions
 ingress_target_requests egress_target_requests
 request_mailbox_captures request_reinjections
 completion_mailbox_captures completion_reinjections
-sink_writes sink_cfg_reads source_driver_ends source_cfg_ends
+sink_writes sink_cfg_reads source_driver_ends source_cfg_ends source_cfg_successes
 ingress_target_tx egress_target_tx
 ```
 
@@ -1206,40 +1467,34 @@ begin
             (checker.ingress_completions.size() >= 1) &&
             (bridge.request_forward_count >= 2) &&
             (bridge.completion_forward_count >= 1) &&
-            (source_driver_callback.cfg_read_end_count >= 1));
+            (source_driver_callback.cfg_read_end_count >= 1) &&
+            (source_driver_callback.cfg_read_success_count >= 1));
       cfg_path_ready = 1'b1;
     end
     #100us;
   join_any
   disable fork;
-  if (!cfg_path_ready) begin
-    `uvm_info("TL_PROXY_PASSIVE_SIDECAR_TIMEOUT_TRACE", $sformatf(
-      {"ingress_rx=%0d egress_tx=%0d sink=%0d egress_rx_cpl=%0d ",
-       "ingress_tx_cpl=%0d ingress_target=%0d egress_target=%0d ",
-       "request_capture=%0d request_forward=%0d cpl_capture=%0d ",
-       "cpl_forward=%0d sink_write=%0d sink_cfg=%0d driver_end=%0d ",
-       "cfg_end=%0d ingress_target_tx=%0d egress_target_tx=%0d"},
-      checker.ingress_requests.size(), checker.egress_requests.size(),
-      checker.sink_requests.size(), checker.egress_completions.size(),
-      checker.ingress_completions.size(),
-      ingress_target_callback.request_capture_count,
-      egress_target_callback.request_capture_count,
-      bridge.request_capture_count, bridge.request_forward_count,
-      bridge.completion_capture_count, bridge.completion_forward_count,
-      sink_target_callback.write_count, sink_target_callback.cfg_read_count,
-      source_driver_callback.total_end_count,
-      source_driver_callback.cfg_read_end_count,
-      ingress_target_callback.target_tx_count,
-      egress_target_callback.target_tx_count), UVM_NONE)
-    control.fail("Configuration path did not complete within 100 us",
+  if (!cfg_path_ready)
+    fail_with_full_counter_snapshot(
+      "Configuration path did not complete within 100 us",
       "Configuration request/Completion timeout");
-  end
 end
 ```
 
-- [ ] **Step 4: Add the final exact-count and transparent-DWORD checks**
+After the lower-bound wait succeeds, keep all callbacks, subscribers, and
+bridge workers active for a fixed final quiet window:
 
-After the wait, require:
+```systemverilog
+// Keep every callback and bridge worker active before the final gate.
+#1us;
+```
+
+Do not evaluate the exact-count, field, or terminal-PASS gates until this
+quiet window has completed.
+
+- [ ] **Step 5: Add the final exact-count and transparent-DWORD checks**
+
+After the final 1 us quiet window, require:
 
 ```systemverilog
 if ((checker.ingress_requests.size() != 2) ||
@@ -1257,6 +1512,7 @@ if ((checker.ingress_requests.size() != 2) ||
     (sink_target_callback.cfg_read_count != 1) ||
     (source_driver_callback.total_end_count != 2) ||
     (source_driver_callback.cfg_read_end_count != 1) ||
+    (source_driver_callback.cfg_read_success_count != 1) ||
     (ingress_target_callback.target_tx_count != 0) ||
     (egress_target_callback.target_tx_count != 0))
   control.fail("Configuration path exact-count gate failed",
@@ -1282,8 +1538,9 @@ if ((checker.ingress_requests[1].tlp_type !=
     (checker.ingress_requests[1].register_number != 10'h000) ||
     (checker.ingress_requests[1].requester_id != 16'h0000) ||
     (checker.ingress_requests[1].first_dw_be != 4'hf) ||
-    (checker.ingress_requests[1].traffic_class != 3'b000))
-  control.fail("Type-0 Configuration Read fields changed",
+    (checker.ingress_requests[1].traffic_class != 3'b000) ||
+    (checker.ingress_requests[1].tag[9:8] == 2'b00))
+  control.fail("Type-0 Configuration Read fields or 10-bit Tag changed",
     "Configuration Read contract failed");
 
 if ((checker.egress_completions[0].completion_status !=
@@ -1312,9 +1569,12 @@ if ((checker.egress_completions[0].completion_status !=
     "Requester ID/full Tag/Completion contract failed");
 ```
 
-This is the explicit proof that the runtime-assigned full Tag survives request forwarding and Completion return.
+This is the explicit proof that the runtime-assigned full Tag survives request
+forwarding and Completion return. Requiring nonzero `tag[9:8]` proves at
+runtime that the test exercises the 10-bit Tag space rather than merely
+comparing equal legacy-width values. Do not constrain a particular Tag value.
 
-- [ ] **Step 5: Emit only the approved terminal markers**
+- [ ] **Step 6: Emit only the approved terminal markers**
 
 After all checks pass:
 
@@ -1324,14 +1584,59 @@ After all checks pass:
   UVM_NONE)
 `uvm_info("TL_PROXY_PASSIVE_SIDECAR_PROBE_PASS", $sformatf(
   {"two Gen4 x4 Serial links; active=4 passive=2; requests=%0d; ",
-   "completions=%0d; source_cfg_end=%0d; proxy_target_tx=%0d"},
+   "completions=%0d; source_cfg_success=%0d; proxy_target_tx=%0d"},
   bridge.request_forward_count, bridge.completion_forward_count,
-  source_driver_callback.cfg_read_end_count,
+  source_driver_callback.cfg_read_success_count,
   ingress_target_callback.target_tx_count +
     egress_target_callback.target_tx_count), UVM_NONE)
 ```
 
 Do not include the words `unexpected Completion` or `spurious Completion` in successful messages; the acceptance checker reserves those phrases for actual diagnostics.
+
+- [ ] **Step 7: Build and run a fresh full-traffic acceptance test**
+
+Stage the current probe, tap, file list, and checker on `10.11.10.53`, then
+create a new build directory and a new VCS `Mdir`. A reused Task 3 executable
+is RED evidence only and cannot be used for GREEN:
+
+```bash
+ssh ubuntu@10.11.10.53 'bash -lic "
+  set -euo pipefail
+  cd /home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work/svt_pcie_integration/sim
+  export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
+  export PCIE_SVT_ROOT=\$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12
+  build_dir=\$(mktemp -d build_tl_proxy_passive_cfg.XXXXXX)
+
+  vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+    -f pcie_svt_tl_proxy_probe.f -top pcie_svt_tl_proxy_probe_top \
+    -Mdir=\$build_dir/csrc -P pli.tab msglog.o \
+    -o \$build_dir/simv -l \$build_dir/compile.log
+
+  ./\$build_dir/simv -no_save +UVM_NO_RELNOTES \
+    +ntb_random_seed=1 -l \$build_dir/full_traffic.log
+  ./check_tl_proxy_passive_sidecar_log.sh full \
+    \$build_dir/full_traffic.log
+  grep -a -E 'TL_PROXY_CFG_FIELDS_TRACE|TL_PROXY_CFG_GATE_TRACE' \
+    \$build_dir/full_traffic.log
+  echo \$build_dir
+"'
+```
+
+The official full checker is the marker-count oracle. It must exit zero and
+therefore prove Stage A, MWr, the anchored Source Driver successful-CfgRd
+trace, Cfg, and terminal PASS exactly once, BLOCKED zero times, no reserved
+Completion diagnostic, and UVM W/E/F `0/0/0`. Baseline and sidecar-link must
+contain zero Source Driver success traces. The Cfg
+field trace must show a runtime Tag greater than `10'h0ff` and the same value
+on the request, Egress Completion, and Ingress Completion. The exact-gate
+trace must show request queues `2/2/2`, Completion queues `1/1`, Target
+requests `2/0`, bridge counts `2/2/1/1`, sink counts `1/1`, Source Driver
+counts `2/1/1` (all ends/armed CfgRd ends/successful CfgRd ends), and Proxy
+Target TX counts `0/0`. The fresh compile log may
+contain the known `LIB-NO-EXT` warning, but must contain no `SV-ANDNMD` or new
+warning class.
+`TL_PROXY_PASSIVE_CFG_TRACE` must appear once with all four readbacks equal to
+one.
 
 ### Task 5: Run Fresh Acceptance and Measure Sidecar Cost
 
@@ -1401,7 +1706,9 @@ ssh ubuntu@10.11.10.53 'bash -lic "
 
 Expected:
 
-- baseline and sidecar link runs use the same executable, seed, active configuration, link bring-up, and 10 us post-L0 window;
+- baseline and sidecar link runs use the same executable, seed, active
+  configuration, explicit four-endpoint LTSSM-L0 gate, and 10 us post-L0
+  window;
 - all three runs report W/E/F `0/0/0`;
 - both link runs reach Gen4 x4 on both links;
 - the full run emits Stage A, MWr, Cfg, and final PASS exactly once each;

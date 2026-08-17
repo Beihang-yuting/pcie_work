@@ -180,6 +180,77 @@ The period evidence above comes from the complete set of
 each active profile; use `LINK_PASS` and the final severity counts as the link
 and test outcome rather than treating that diagnostic as final hardware state.
 
+## Transaction-layer proxy feasibility probes
+
+### Passive-sidecar transparent TL proxy feasibility probe
+
+The Task 1 probe keeps four active full Device Agents on two Gen4 x4 Serial
+links and adds two standalone passive SERDES sidecars. The sidecars are
+observation-only. The Ingress Target callback clones and suppresses each
+received request, and the bridge worker reinjects the raw request through the
+opposite active Proxy's public `tlp_seqr`. A Completion observed at the Egress
+passive RX is reinjected in the reverse direction by the bridge worker through
+the Ingress active Proxy's public `tlp_seqr`. The checker compares encoded TLP
+DWORD arrays across the independent passive boundaries.
+
+The probe has three runtime modes:
+
+- `+TL_PROXY_LINK_ONLY +TL_PROXY_DISABLE_SIDECARS`: four-active baseline.
+- `+TL_PROXY_LINK_ONLY`: four active plus two passive sidecars, with a fixed
+  10 us (`#10us`) observation window after all four active endpoint status
+  objects explicitly report LTSSM L0 at Gen4 x4. Link-up, speed, and width
+  remain additional gate conditions.
+- No probe mode plusarg: MWr plus CfgRd/CPL transparent traffic.
+
+The accepted Task 1 evidence build is:
+
+```text
+/home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work/svt_pcie_integration/sim/build_tl_proxy_passive_accept.yjoSMU
+```
+
+Retain this build until the implementation and review are complete. The
+accepted run saved GNU `time -v` output alongside the logs as
+`four_active.time`, `two_sidecars.time`, and `full_traffic.time`. The recorded
+measurements are:
+
+`four_active.time`:
+
+```text
+Elapsed (wall clock) time (h:mm:ss or m:ss): 1:40.63
+Maximum resident set size (kbytes): 642812
+```
+
+`two_sidecars.time`:
+
+```text
+Elapsed (wall clock) time (h:mm:ss or m:ss): 2:45.49
+Maximum resident set size (kbytes): 1089384
+```
+
+`full_traffic.time`:
+
+```text
+Elapsed (wall clock) time (h:mm:ss or m:ss): 2:15.47
+Maximum resident set size (kbytes): 1085344
+```
+
+For `two_sidecars - four_active`, the measured delta is `+64.86 s` wall time
+and `+446572 kbytes` peak RSS.
+
+From this `sim` directory, validate the accepted logs with the checker modes
+that correspond to each artifact:
+
+```sh
+build_dir=/home/ubuntu/pcie-svt-switch-proxy.20260815/pcie_work/svt_pcie_integration/sim/build_tl_proxy_passive_accept.yjoSMU
+: "${build_dir:?set build_dir to the fresh build path printed above}"
+./check_tl_proxy_passive_sidecar_log.sh baseline "$build_dir/four_active.log"
+./check_tl_proxy_passive_sidecar_log.sh sidecar-link "$build_dir/two_sidecars.log"
+./check_tl_proxy_passive_sidecar_log.sh full "$build_dir/full_traffic.log"
+```
+
+This evidence is limited to the Task 1 feasibility probe. It does not establish
+PCIe enumeration, routing, or completion of a real switch implementation.
+
 ## Configuration watchdog directed regression
 
 `pcie_svt_watchdog_directed_test.sv` runs the production

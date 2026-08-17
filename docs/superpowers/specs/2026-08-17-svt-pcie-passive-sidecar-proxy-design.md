@@ -86,7 +86,9 @@ The feasibility probe must:
 
 - retain four full active Device Agents forming two complete Serial/DL/PL/TL
   links;
-- retain two physical Gen4 x4 links and wait for L0 on every active endpoint;
+- retain two physical Gen4 x4 links and explicitly require the public
+  `pl_status.ltssm_state == svt_pcie_types::L0` value on every active endpoint,
+  in addition to link-up, Gen4-speed, and x4-width status;
 - use only declarations and behavior documented in the installed R-2020.12
   HTML and public examples;
 - add passive observation through separate standalone SERDES interfaces;
@@ -152,13 +154,17 @@ The passive configuration does not call
 is inapplicable to passive monitors. It binds the documented standalone
 SERDES interface and sets `is_active=0` and `enable_monitor=1`.
 
-The sidecars are observation-only. Their TL configuration-space mode is
-`CFG_SPACE_DISABLED`, a documented monitor mode. This avoids claiming that a
-sidecar owns an accurate copy of the monitored Proxy's configuration space.
-It may disable passive checks that depend on such a copy, but it does not
-disable active-Agent Completion accounting and does not hide reports. The
-probe does not claim passive configuration-space protocol checking as a Task
-1 result.
+The sidecars are observation-only. Their TL configuration-space mode is the
+documented `CFG_SPACE_BACKDOOR_UPDATE`. The probe uses each passive monitor's
+public `tl_service_in_port` to install a minimal checker image: the
+conventional Capability-List indication, one Capability Pointer, one PCI
+Express Capability header, and only the Extended/10-bit Tag fields exercised
+by Task 1. Every field is read back through
+`MON_CONFIG_SPACE_GET_FIELD` before traffic. This image is not an accurate or
+complete copy of the monitored Proxy's configuration space; it deliberately
+does not model BARs, AER, ATS, or unrelated capabilities. The sidecars remain
+input-only and the backdoor services do not alter active-Agent Completion
+accounting or hide reports.
 
 ## 5. Components and Ownership
 
@@ -249,15 +255,23 @@ The source Driver App sends one one-DWORD Memory Write with:
 
 - address `64'h0000_0000_8000_1040`;
 - `first_dw_be=4'hf` and `last_dw_be=4'h0`;
-- Tag `10'h12a`;
+- wire Tag `10'h000`;
 - Requester ID `16'h0000`;
 - Traffic Class zero;
 - unpoisoned data and untranslated address; and
 - payload `32'h4433_2211`.
 
-The Memory Write is posted and must produce no Completion. The ingress and
-egress sidecars must observe one matching request, and the sink Target App
-must receive exactly one request with every directed field unchanged.
+The Memory Write is posted and must produce no Completion. R-2020.12 documents
+the Driver App transaction `tag` as applying only to non-posted requests, so
+the high-level posted Memory Write leaves its transaction Tag under the
+documented `reasonable_tag` constraint while the physical wire Tag remains
+zero.
+The full 10-bit Tag preservation proof remains the non-posted Configuration
+Read in Section 6.2. The Source Driver configuration enables requester-ID user
+control with `enable_tlp_field_user_control_vector[3]`, allowing the sequence's
+Requester ID `16'h0000` to reach the wire. The ingress and egress sidecars must
+observe one matching request, and the sink Target App must receive exactly one
+request with every directed field unchanged.
 
 ### 6.2 Type-0 Configuration Read
 
@@ -273,12 +287,28 @@ Configuration Read for the sink Vendor/Device ID DWORD:
 The source high-level sequence allocates the request Tag. The probe learns
 the actual complete Tag from the observed/captured TLP and requires that exact
 Tag on the Egress TX request and on the returned Completion. The Proxy may not
-substitute a new Tag.
+substitute a new Tag. The runtime acceptance gate additionally requires
+`tag[9:8]` to be nonzero, without constraining a particular value, so the
+traffic proves use and preservation of the 10-bit Tag space rather than only
+equal legacy-width values.
+
+Before links or traffic start, the Egress sidecar's minimal backdoor image
+must report Extended Tag Field Enable, 10-bit Tag Requester Supported, and
+10-bit Tag Requester Enable as set. The Ingress sidecar's image must report
+10-bit Tag Completer Supported as set. These values describe only the active
+Proxy behavior observed by each passive checker; successful SET and GET
+service completion and exact readback are mandatory and do not constitute a
+claim that either monitor owns a full configuration-space model.
 
 The sink returns one successful Completion with one payload DWORD. The Egress
 RX Completion and Ingress TX Completion must match in Completion status,
 Completer ID, Requester ID, full Tag, byte count, lower address, attributes,
-length, and payload. The Source RC Driver App must complete exactly once.
+length, and payload. After the Configuration Read is armed, the Source RC
+Driver App callback must observe exactly one public transaction descriptor
+whose `transaction_type` is `CFG_RD` and whose `completion_status` is
+`SUCCESSFUL`. Only that branch increments the independent success count and
+emits one anchored `TL_PROXY_SOURCE_DRIVER_END_TRACE`; the posted Memory Write
+is not rejected for retaining its documented `AWAITED` status.
 
 ## 7. Staged Feasibility Gates
 
@@ -289,9 +319,14 @@ Before forwarding logic is accepted, a minimal build must prove:
 - four active Agents and two passive Agents compile and elaborate together;
 - each passive Agent has a non-null `pcie_agent.tl_mon`;
 - the passive RX and TX analysis ports are connectable;
-- both active links still reach Gen4 x4 L0; and
+- every active endpoint simultaneously reports `link_up`, Gen4 speed, x4
+  width, and `pl_status.ltssm_state == svt_pcie_types::L0`; and
 - adding the HDL taps and passive decoders introduces no warning, error, or
   fatal.
+
+The R-2020.12 public PL-status example waits directly on `ltssm_state == L0`.
+`current_speed` may be updated outside L0 and therefore cannot, by itself,
+release Stage A or start the fixed post-L0 observation window.
 
 Failure to bind or decode a standalone SERDES sidecar ends Task 1. The design
 does not fall back to Driver App reconstruction.
@@ -310,23 +345,40 @@ The exact stage gate requires:
 - zero Completion observations; and
 - zero Proxy Target transmissions.
 
+After all lower-bound counts are present, Stage B keeps the callbacks and
+bridge workers active for a fixed 1 us quiet window. It then reevaluates the
+complete exact-count, wire, and field gates before emitting the Stage B PASS.
+
 ### 7.3 Stage C: Configuration Read and Completion
 
 The exact final gate requires cumulative request counts of two and:
 
+- one successful pre-traffic readback of all four fields in the two minimal
+  passive capability images;
 - one Type-0 Configuration Read on both request observation boundaries;
 - one Egress passive RX Completion;
 - one Completion-mailbox capture;
 - one completed Ingress raw reinjection;
 - one Ingress passive TX Completion;
-- one successful Source Driver App transaction end;
+- one successful Source Driver App Configuration Read end, proved by exactly
+  one `TL_PROXY_SOURCE_DRIVER_END_TRACE` and an exact success count of one;
 - matching request and Completion comparison pairs;
 - zero duplicate request, Completion, or Target response; and
 - zero unexpected or spurious Completion reports from any active Agent.
 
-All link, request, and Completion waits are bounded to 100 microseconds. A
-timeout prints every callback, observation, capture, reinjection, sink, source,
-and Target-transmit counter before reporting failure.
+All link, request, and Completion waits are bounded to 100 microseconds. Link
+training, Stage B request forwarding, Source Memory Write end, and Stage C
+request/Completion timeouts all call one shared full-snapshot reporter before
+failure. Its stable field set prints every callback, observation, capture,
+reinjection, sink, source-end, Source successful-CfgRd, and Target-transmit
+counter; individual timeout paths may not substitute partial snapshots.
+
+After the Stage C lower-bound wait succeeds, the probe keeps all callbacks,
+passive subscribers, and bridge workers active for a fixed 1 microsecond quiet
+window. Only after that window may it reevaluate every cumulative exact count,
+request and Completion field, transparent-DWORD comparison, nonzero 10-bit Tag
+upper bits, and terminal PASS condition. Any late duplicate or response fails
+this recheck.
 
 ## 8. Reports and Terminal Conditions
 
@@ -334,12 +386,19 @@ Any null handle, clone failure, nonblocking enqueue failure, unsupported TLP,
 field mismatch, duplicate, timeout, passive-drive indication, or unexpected
 Completion emits exactly one
 `TL_PROXY_PASSIVE_SIDECAR_PROBE_BLOCKED` marker before a fatal report.
+One package-level helper owns that marker-plus-fatal sequence and is the only
+direct fatal site. `control.fail()` and every no-control path converge on it;
+no-control branches explicitly return afterward and cannot fall through to a
+null dereference. No report catcher or severity change is used.
 
 Task 1 is GREEN only when a fresh clean VCS build and run on `10.11.10.53`
 produces all of the following:
 
-- both active Serial links at Gen4 x4 L0;
+- every active endpoint explicitly reporting LTSSM L0 at Gen4 x4 before
+  Stage A, with each link-only PASS at least 10 us after that gate;
 - every Stage A, B, and C exact-count gate passing;
+- `TL_PROXY_SOURCE_DRIVER_END_TRACE` exactly once in full traffic and zero
+  times in baseline and sidecar-link profiles;
 - `TL_PROXY_PASSIVE_SIDECAR_PROBE_PASS` exactly once;
 - `TL_PROXY_PASSIVE_SIDECAR_PROBE_BLOCKED` zero times;
 - no unexpected or spurious Completion text; and
