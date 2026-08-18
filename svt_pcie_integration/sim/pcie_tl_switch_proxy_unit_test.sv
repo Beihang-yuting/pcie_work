@@ -1,4 +1,4 @@
-module pcie_tl_switch_proxy_unit_test;
+module pcie_tl_switch_proxy_unit_top;
     import uvm_pkg::*;
     import pcie_tl_switch_pkg::*;
 
