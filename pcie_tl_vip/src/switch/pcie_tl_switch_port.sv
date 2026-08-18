@@ -10,6 +10,21 @@ class pcie_tl_switch_port extends uvm_component;
     int owner_usp = 0;   // DSP 专用: 归属的 USP 索引
     int root_id   = 0;   // USP 专用: 自身根索引
 
+    bit [15:0] bdf;
+    bit [15:0] vendor_id = 16'h20f9;
+    bit [15:0] device_id;
+    bit [15:0] command;
+    bit [15:0] status = 16'h0010;
+    bit [7:0]  revision_id = 8'h01;
+    bit [23:0] class_code = 24'h060400;
+    bit [7:0]  header_type = 8'h01;
+    bit [15:0] pref_base_reg = 16'h0001;
+    bit [15:0] pref_limit_reg = 16'h0001;
+    bit [63:0] pref_base;
+    bit [63:0] pref_limit;
+    bit [31:0] pref_base_upper;
+    bit [31:0] pref_limit_upper;
+
     uvm_tlm_fifo #(pcie_tl_tlp) rx_fifo;
     uvm_tlm_fifo #(pcie_tl_tlp) tx_fifo;
 
@@ -25,6 +40,36 @@ class pcie_tl_switch_port extends uvm_component;
 
     function new(string name = "pcie_tl_switch_port", uvm_component parent = null);
         super.new(name, parent);
+    endfunction
+
+    function automatic bit [31:0] merge_be(bit [31:0] old_value,
+                                            bit [31:0] new_value,
+                                            bit [3:0] be);
+        bit [31:0] result = old_value;
+        foreach (be[i])
+            if (be[i]) result[i*8 +: 8] = new_value[i*8 +: 8];
+        return result;
+    endfunction
+
+    function void init_type1_image(switch_port_role_e image_role,
+                                   int unsigned index,
+                                   bit [15:0] image_bdf);
+        role = image_role;
+        bdf = image_bdf;
+        device_id = (role == SWITCH_USP) ? 16'h5010 : 16'(16'h5020 + index);
+        command = 16'h0000;
+        status = 16'h0010;
+        pref_base_reg = 16'h0001;
+        pref_limit_reg = 16'h0001;
+        pref_base_upper = 32'h0000_0000;
+        pref_limit_upper = 32'h0000_0000;
+        pref_base = 64'h0;
+        pref_limit = 64'h0000_0000_000f_ffff;
+    endfunction
+
+    function void update_pref_window();
+        pref_base = {pref_base_upper, pref_base_reg[15:4], 20'h00000};
+        pref_limit = {pref_limit_upper, pref_limit_reg[15:4], 20'hfffff};
     endfunction
 
     function void build_phase(uvm_phase phase);
@@ -72,25 +117,57 @@ class pcie_tl_switch_port extends uvm_component;
 
     function bit [31:0] cfg_read(bit [11:0] addr);
         case (addr)
+            12'h000: return {device_id, vendor_id};
+            12'h004: return {status, command};
+            12'h008: return {class_code, revision_id};
+            12'h00c: return {8'h00, header_type, 16'h0000};
             12'h018: return {route_entry.subordinate_bus,
                              route_entry.secondary_bus,
                              route_entry.primary_bus, 8'h0};
             12'h020: return {route_entry.mem_limit[31:20], 4'h0,
                              route_entry.mem_base[31:20], 4'h0};
+            12'h024: return {pref_limit_reg, pref_base_reg};
+            12'h028: return pref_base_upper;
+            12'h02c: return pref_limit_upper;
+            12'h034: return 32'h0000_0040;
+            12'h040: return {8'h00,
+                             (role == SWITCH_USP) ? 4'h5 : 4'h6,
+                             4'h2, 8'h00, 8'h10};
             default: return 32'h0;
         endcase
     endfunction
 
     function void cfg_write(bit [11:0] addr, bit [31:0] data, bit [3:0] be);
+        bit [31:0] merged;
         case (addr)
+            12'h004: begin
+                merged = merge_be(cfg_read(addr), data, be);
+                command = merged[15:0];
+            end
             12'h018: begin
-                if (be[1]) route_entry.primary_bus     = data[15:8];
-                if (be[2]) route_entry.secondary_bus   = data[23:16];
-                if (be[3]) route_entry.subordinate_bus = data[31:24];
+                merged = merge_be(cfg_read(addr), data, be);
+                route_entry.primary_bus     = merged[15:8];
+                route_entry.secondary_bus   = merged[23:16];
+                route_entry.subordinate_bus = merged[31:24];
             end
             12'h020: begin
-                if (be[0] || be[1]) route_entry.mem_base[31:20]  = data[15:4];
-                if (be[2] || be[3]) route_entry.mem_limit[31:20] = data[31:20];
+                merged = merge_be(cfg_read(addr), data, be);
+                route_entry.mem_base[31:20]  = merged[15:4];
+                route_entry.mem_limit[31:20] = merged[31:20];
+            end
+            12'h024: begin
+                merged = merge_be(cfg_read(addr), data, be);
+                pref_base_reg  = {merged[15:4], 4'h1};
+                pref_limit_reg = {merged[31:20], 4'h1};
+                update_pref_window();
+            end
+            12'h028: begin
+                pref_base_upper = merge_be(cfg_read(addr), data, be);
+                update_pref_window();
+            end
+            12'h02c: begin
+                pref_limit_upper = merge_be(cfg_read(addr), data, be);
+                update_pref_window();
             end
         endcase
     endfunction
