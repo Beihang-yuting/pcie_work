@@ -1,6 +1,9 @@
 //-----------------------------------------------------------------------------
 // PCIe Transaction Layer VIP - Host-Memory-Free Switch Package
 //-----------------------------------------------------------------------------
+// Compilation contract: use this lightweight package instead of pcie_tl_pkg.
+// Do not compile both packages into the same simulation image because they
+// register the same UVM class names.
 
 package pcie_tl_switch_pkg;
 
