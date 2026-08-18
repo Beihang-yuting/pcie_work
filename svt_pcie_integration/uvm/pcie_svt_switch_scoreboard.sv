@@ -197,14 +197,6 @@ class pcie_svt_switch_scoreboard extends uvm_component;
     selected = -1;
 
     foreach (expected[index]) begin
-      if ((expected[index].ingress == port) &&
-          same_tlp(expected[index], observed)) begin
-        `uvm_fatal("SCOREBOARD_FORWARDING_LOOP",
-                   "TLP returned to its ingress port")
-        return;
-      end
-    end
-    foreach (expected[index]) begin
       if ((expected[index].egress == port) && expected[index].rx_seen &&
           !expected[index].tx_seen && same_tlp(expected[index], observed)) begin
         selected = index;
@@ -218,6 +210,14 @@ class pcie_svt_switch_scoreboard extends uvm_component;
       return;
     end
 
+    foreach (expected[index]) begin
+      if ((expected[index].ingress == port) &&
+          same_tlp(expected[index], observed)) begin
+        `uvm_fatal("SCOREBOARD_FORWARDING_LOOP",
+                   "TLP returned to its ingress port")
+        return;
+      end
+    end
     foreach (expected[index]) begin
       if ((expected[index].egress == port) &&
           same_header(expected[index], observed) &&

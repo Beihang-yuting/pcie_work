@@ -150,7 +150,7 @@ class pcie_svt_switch_port_adapter extends uvm_component;
                  "Proxy TLP sequencer configuration is null or invalid")
       return;
     end
-    injected.cfg = sequencer_cfg;
+    injected.setup_cfg(sequencer_cfg);
     raw_sequence = pcie_svt_raw_tlp_sequence::type_id::create(
       $sformatf("raw_sequence_%0d", egress_forward_count));
     if (raw_sequence == null) begin

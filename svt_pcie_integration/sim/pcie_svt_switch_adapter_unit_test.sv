@@ -6,6 +6,8 @@ package pcie_svt_switch_adapter_unit_test_pkg;
   import pcie_tl_switch_pkg::*;
   import pcie_svt_integration_pkg::*;
 
+  bit callback_drop_probe;
+
   class pcie_svt_null_clone_tlp extends svt_pcie_tlp;
     function new(string name = "pcie_svt_null_clone_tlp");
       super.new(name);
@@ -19,6 +21,7 @@ package pcie_svt_switch_adapter_unit_test_pkg;
   class pcie_svt_collecting_driver extends uvm_driver #(svt_pcie_tlp);
     `uvm_component_utils(pcie_svt_collecting_driver)
 
+    svt_pcie_tlp received[$];
     svt_pcie_tlp collected[$];
 
     function new(string name = "pcie_svt_collecting_driver",
@@ -30,6 +33,7 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       svt_pcie_tlp cloned;
       forever begin
         seq_item_port.get_next_item(req);
+        received.push_back(req);
         if ((req == null) || !$cast(cloned, req.clone()))
           `uvm_fatal("ADAPTER_TEST_DRIVER_CLONE", "driver clone failed")
         collected.push_back(cloned);
@@ -229,6 +233,63 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       disable fork;
     endtask
 
+    function automatic void verify_raw_item(
+        svt_pcie_tlp source_a,
+        svt_pcie_tlp source_b,
+        svt_pcie_tlp converted_source);
+      require(collecting_driver.received.size() == 1,
+              "collecting driver raw-item count mismatch");
+      require(collecting_driver.collected.size() == 1,
+              "collecting driver snapshot count mismatch");
+      require(collecting_driver.received[0].is_fmt_type_valid(),
+              "submitted raw item is not valid through the public TLP API");
+      require((collecting_driver.received[0] != source_a) &&
+              ((source_b == null) ||
+               (collecting_driver.received[0] != source_b)) &&
+              (collecting_driver.received[0] != converted_source),
+              "submitted raw item reused an existing SVT object");
+    endfunction
+
+    task automatic check_cross_route_identical_tlps();
+      svt_pcie_tlp request;
+      request = make_request("cross_route_request");
+      scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                1, 2, request);
+      scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                2, 3, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 2, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 3, request);
+      scoreboard.check_empty();
+    endtask
+
+    task automatic run_scoreboard_cross_route_regression();
+      check_cross_route_identical_tlps();
+      $display("SWITCH_SCOREBOARD_CROSS_ROUTE_PASS");
+    endtask
+
+    task automatic run_setup_cfg_regression();
+      svt_pcie_tlp request;
+      svt_pcie_tlp expected_egress;
+      pcie_tl_tlp normalized;
+      string reason;
+
+      request = make_request("setup_cfg_request");
+      require(pcie_svt_tlp_converter::from_svt(
+                request, normalized, reason),
+              {"setup regression ingress conversion failed: ", reason});
+      require(pcie_svt_tlp_converter::to_svt(
+                normalized, expected_egress, reason),
+              {"setup regression egress conversion failed: ", reason});
+      switch_port.tx_fifo.put(normalized);
+      wait_for_driver_count(1);
+      verify_raw_item(request, null, expected_egress);
+      require(wire_equal(collecting_driver.collected[0], expected_egress),
+              "setup regression raw egress fields changed");
+      $display("SWITCH_SETUP_CFG_PASS");
+    endtask
+
     task automatic run_positive();
       svt_pcie_tlp request;
       svt_pcie_tlp completion;
@@ -310,12 +371,9 @@ package pcie_svt_switch_adapter_unit_test_pkg;
               {"expected egress conversion failed: ", reason});
       switch_port.tx_fifo.put(request_normalized);
       wait_for_driver_count(1);
+      verify_raw_item(request, completion, expected_egress);
       require(wire_equal(collecting_driver.collected[0], expected_egress),
               "raw egress fields changed");
-      require((collecting_driver.collected[0] != request) &&
-              (collecting_driver.collected[0] != completion) &&
-              (collecting_driver.collected[0] != expected_egress),
-              "raw egress was not a fresh independent clone");
       require(wire_equal(request, request_snapshot),
               "egress conversion modified source Request");
       require(request_normalized.kind == TLP_MEM_WR,
@@ -343,6 +401,8 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 5, request);
       scoreboard.check_empty();
 
+      check_cross_route_identical_tlps();
+
       $display("SWITCH_ADAPTER_PASS");
     endtask
 
@@ -350,6 +410,7 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       svt_pcie_tlp request;
       svt_pcie_tlp completion;
       svt_pcie_tlp unsupported;
+      svt_pcie_tlp illegal_tuple;
       pcie_svt_null_clone_tlp bad_clone;
       pcie_svt_raw_tlp_sequence raw_sequence;
       bit drop;
@@ -359,22 +420,39 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       unsupported = new("unsupported_message");
       unsupported.tlp_type = svt_pcie_tlp::MSG_REQ_TO_ROOT;
       unsupported.fmt = svt_pcie_tlp::NO_DATA_4_DWORD;
+      illegal_tuple = new("illegal_tuple");
+      illegal_tuple.tlp_type = svt_pcie_tlp::DMEM_REQ;
+      illegal_tuple.fmt = svt_pcie_tlp::NO_DATA_3_DWORD;
       bad_clone = new("bad_clone");
       bad_clone.tlp_type = svt_pcie_tlp::MEM_REQ;
       bad_clone.fmt = svt_pcie_tlp::NO_DATA_3_DWORD;
 
       case (mode)
         "callback_completion": begin
-          drop = 1'b0;
-          target_callback.post_rx_tlp_get(null, completion, drop);
+          callback_drop_probe = 1'b0;
+          target_callback.post_rx_tlp_get(
+            null, completion, callback_drop_probe);
         end
         "callback_unsupported": begin
-          drop = 1'b0;
-          target_callback.post_rx_tlp_get(null, unsupported, drop);
+          callback_drop_probe = 1'b0;
+          target_callback.post_rx_tlp_get(
+            null, unsupported, callback_drop_probe);
         end
         "callback_null": begin
-          drop = 1'b0;
-          target_callback.post_rx_tlp_get(null, null, drop);
+          callback_drop_probe = 1'b0;
+          target_callback.post_rx_tlp_get(
+            null, null, callback_drop_probe);
+        end
+        "callback_adapter_null": begin
+          callback_drop_probe = 1'b0;
+          target_callback.adapter = null;
+          target_callback.post_rx_tlp_get(
+            null, request, callback_drop_probe);
+        end
+        "callback_illegal_tuple": begin
+          callback_drop_probe = 1'b0;
+          target_callback.post_rx_tlp_get(
+            null, illegal_tuple, callback_drop_probe);
         end
         "callback_clone": begin
           drop = 1'b0;
@@ -437,9 +515,20 @@ package pcie_svt_switch_adapter_unit_test_pkg;
 
     virtual task run_phase(uvm_phase phase);
       string negative_mode;
+      string positive_mode;
       phase.raise_objection(this);
       if ($value$plusargs("ADAPTER_NEGATIVE=%s", negative_mode))
         run_negative(negative_mode);
+      else if ($value$plusargs("ADAPTER_POSITIVE=%s", positive_mode)) begin
+        case (positive_mode)
+          "scoreboard_cross_route":
+            run_scoreboard_cross_route_regression();
+          "setup_cfg": run_setup_cfg_regression();
+          default:
+            `uvm_fatal("SWITCH_ADAPTER_BAD_MODE",
+                       {"unknown positive mode: ", positive_mode})
+        endcase
+      end
       else
         run_positive();
       #1ns;
@@ -453,4 +542,22 @@ module pcie_svt_switch_adapter_unit_top;
   import pcie_svt_switch_adapter_unit_test_pkg::*;
 
   initial run_test("pcie_svt_switch_adapter_unit_test");
+
+  final begin
+    string negative_mode;
+    if ($value$plusargs("ADAPTER_NEGATIVE=%s", negative_mode)) begin
+      case (negative_mode)
+        "callback_completion",
+        "callback_unsupported",
+        "callback_null",
+        "callback_adapter_null",
+        "callback_illegal_tuple": begin
+          if (callback_drop_probe)
+            $display("CALLBACK_DROP_PASS mode=%s", negative_mode);
+          else
+            $display("CALLBACK_DROP_FAIL mode=%s", negative_mode);
+        end
+      endcase
+    end
+  end
 endmodule

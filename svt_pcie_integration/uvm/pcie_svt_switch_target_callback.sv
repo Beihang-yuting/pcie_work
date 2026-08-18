@@ -35,21 +35,25 @@ class pcie_svt_switch_target_callback extends svt_pcie_target_app_callback;
       svt_pcie_tlp transaction,
       ref bit drop);
     if (adapter == null) begin
+      drop = 1'b1;
       `uvm_fatal("TARGET_CALLBACK_ADAPTER_NULL",
                  "Proxy Target callback adapter is null")
       return;
     end
     if (transaction == null) begin
+      drop = 1'b1;
       `uvm_fatal("TARGET_CALLBACK_NULL",
                  "Proxy Target callback received a null TLP")
       return;
     end
     if (transaction.tlp_type == svt_pcie_tlp::CPL) begin
+      drop = 1'b1;
       `uvm_fatal("TARGET_CALLBACK_COMPLETION",
                  "Proxy Target callback rejects Completion TLPs")
       return;
     end
     if (!is_supported_request(transaction)) begin
+      drop = 1'b1;
       `uvm_fatal("TARGET_CALLBACK_UNSUPPORTED",
                  "Proxy Target callback rejects unsupported TLPs")
       return;
