@@ -17,10 +17,12 @@ import host_mem_pkg::*;
 //   - silently swallows the cross-root detection mechanism (violations counter
 //     must have fired at least for the deliberate probes).
 //
-// Injected error seqs (poisoned / malformed / tag_conflict / unexpected_cpl)
+// Injected error seqs (poisoned / malformed / tag_conflict)
 // DELIBERATELY raise UVM_ERROR and pollute the scoreboards, so per the agreed
 // criterion PASS = isolation + no-hang; scoreboard mismatch/unexpected counts
 // are reported for visibility but NOT asserted clean.
+// Unknown-Completion fatal handling is covered independently by the
+// SWITCH_NEG_UNKNOWN_CPL unit-test mode; a positive stress run must not inject it.
 //
 // cross_root_check_enable = 0 so deliberate probes (and any random error TLP
 // that happens to cross a root) log as info and still bump the counter.
@@ -32,7 +34,7 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
     int writes_per_ep  = 2500;   // random MWr per EP   (4 EP -> 10000)
     int reads_per_root = 1500;   // random MRd per root (2    -> 3000, same tags)
     int dma_per_ep     = 1000;   // EP DMA upstream     (4 EP -> 4000)
-    int err_iters      = 250;    // err-seq cycles/root (2*4*250 -> 2000)
+    int err_iters      = 250;    // err-seq iterations per root
     int probes_per_dir = 50;     // cross-root probes   (2 dir -> 100)
 
     // ---- topology ----
@@ -69,7 +71,7 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
         cfg.completion_check_enable = 1;
         cfg.data_integrity_enable   = 1;
         cfg.ep_auto_response        = 1;
-        // Error seqs (poisoned/malformed/tag_conflict/unexpected_cpl) DELIBERATELY
+        // Error seqs (poisoned/malformed/tag_conflict) DELIBERATELY
         // pollute the scoreboards; PASS = isolation + no-hang (see check_phase).
         // Downgrade SCB mismatch/unexpected FAIL -> warning so the injected noise
         // does not raise UVM_ERROR while real checks (MRSTRESS_FAIL) stay strict.
@@ -302,10 +304,11 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
         rd.start(env.v_seqr.rc_seqr_arr[root]);
     endtask
 
-    // Cycle the four error sequence kinds on the given root's RC sequencer.
+    // Cycle the three non-fatal error sequence kinds on the given root's RC
+    // sequencer. Unknown Completions are fatal and covered by the unit negative.
     task inject_err(int root, int n);
         uvm_sequencer #(pcie_tl_tlp) seqr = env.v_seqr.rc_seqr_arr[root];
-        case (n & 3)
+        case (n % 3)
             0: begin pcie_tl_err_poisoned_seq      s =
                  pcie_tl_err_poisoned_seq::type_id::create($sformatf("err_pois_r%0d_%0d", root, n));
                  s.start(seqr); end
@@ -314,9 +317,6 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
                  s.start(seqr); end
             2: begin pcie_tl_err_tag_conflict_seq  s =
                  pcie_tl_err_tag_conflict_seq::type_id::create($sformatf("err_tag_r%0d_%0d", root, n));
-                 s.start(seqr); end
-            3: begin pcie_tl_err_unexpected_cpl_seq s =
-                 pcie_tl_err_unexpected_cpl_seq::type_id::create($sformatf("err_ucpl_r%0d_%0d", root, n));
                  s.start(seqr); end
         endcase
     endtask

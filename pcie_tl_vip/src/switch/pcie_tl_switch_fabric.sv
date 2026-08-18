@@ -41,10 +41,6 @@ class pcie_tl_switch_fabric extends uvm_object;
             pcie_tl_cfg_tlp cfg_tlp;
             if ($cast(cfg_tlp, tlp)) begin
                 bit [7:0] target_bus = cfg_tlp.completer_id[15:8];
-                // Check if targeting the switch itself (any root's USP bus is local)
-                for (int u = 0; u < num_usp; u++)
-                    if (target_bus == ports[u].route_entry.secondary_bus)
-                        return SWITCH_ROUTE_LOCAL;
                 return route_by_id(target_bus, ingress_port_id);
             end
         end
@@ -112,7 +108,8 @@ class pcie_tl_switch_fabric extends uvm_object;
                     nonpref_match =
                         (addr >= {32'h0, ports[i].route_entry.mem_base}) &&
                         (addr <= {32'h0, ports[i].route_entry.mem_limit});
-                if (ports[i].pref_base <= ports[i].pref_limit)
+                if (ports[i].pref_window_programmed &&
+                    ports[i].pref_base <= ports[i].pref_limit)
                     pref_match = (addr >= ports[i].pref_base) &&
                                  (addr <= ports[i].pref_limit);
             end

@@ -24,6 +24,7 @@ class pcie_tl_switch_port extends uvm_component;
     bit [63:0] pref_limit;
     bit [31:0] pref_base_upper;
     bit [31:0] pref_limit_upper;
+    bit        pref_window_programmed;
 
     uvm_tlm_fifo #(pcie_tl_tlp) rx_fifo;
     uvm_tlm_fifo #(pcie_tl_tlp) tx_fifo;
@@ -65,6 +66,7 @@ class pcie_tl_switch_port extends uvm_component;
         pref_limit_upper = 32'h0000_0000;
         pref_base = 64'h0;
         pref_limit = 64'h0000_0000_000f_ffff;
+        pref_window_programmed = 1'b0;
     endfunction
 
     function void update_pref_window();
@@ -160,14 +162,17 @@ class pcie_tl_switch_port extends uvm_component;
                 pref_base_reg  = {merged[15:4], 4'h1};
                 pref_limit_reg = {merged[31:20], 4'h1};
                 update_pref_window();
+                pref_window_programmed = 1'b1;
             end
             12'h028: begin
                 pref_base_upper = merge_be(cfg_read(addr), data, be);
                 update_pref_window();
+                pref_window_programmed = 1'b1;
             end
             12'h02c: begin
                 pref_limit_upper = merge_be(cfg_read(addr), data, be);
                 update_pref_window();
+                pref_window_programmed = 1'b1;
             end
         endcase
     endfunction

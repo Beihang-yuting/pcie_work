@@ -85,6 +85,8 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
     //=========================================================================
     task run_phase(uvm_phase phase);
         int num_eps;
+        bit [63:0] host_allocs[$];
+        bit [63:0] dev_allocs[$];
         phase.raise_objection(this);
         `uvm_info("SW_UM", "=== Switch Unified-Memory Test START ===", UVM_LOW)
 
@@ -117,6 +119,7 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
                 pcie_tl_mem_rd_seq rd_seq;
 
                 a = env.host_mem.alloc(sz, 64);
+                host_allocs.push_back(a);
                 make_golden(golden, 8'hA0 + ep * 8'h10, sz);
                 env.host_mem.write_mem(a, golden);
 
@@ -132,7 +135,6 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
                 // Verify backing store unchanged
                 env.host_mem.read_mem(a, sz, rd);
                 compare_bytes(rd, golden, sz, $sformatf("A:EP%0d_RD_HOST", ep));
-                env.host_mem.free(a);
             end
 
             `uvm_info("SW_UM", $sformatf("--- EP[%0d] Phase B: MWr to host_mem (posted-MWr fix) ---", ep), UVM_LOW)
@@ -152,6 +154,7 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
                 pcie_tl_mem_wr_seq wr_seq;
 
                 a2 = env.host_mem.alloc(sz, 64);
+                host_allocs.push_back(a2);
 
                 wr_seq = pcie_tl_mem_wr_seq::type_id::create($sformatf("ep%0d_wr_host", ep));
                 wr_seq.addr     = a2;
@@ -168,7 +171,6 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
                 `uvm_info("SW_UM", $sformatf(
                     "B:EP%0d_WR_HOST OK -- host_mem[0x%0h][0] = 0x%02h (write stored)",
                     ep, a2, rd2[0]), UVM_LOW)
-                env.host_mem.free(a2);
             end
 
             `uvm_info("SW_UM", $sformatf("--- EP[%0d] Phase C: RC MWr/MRd to dev_mem[%0d] ---", ep, ep), UVM_LOW)
@@ -189,6 +191,7 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
                 pcie_tl_mem_rd_seq rd_rc;
 
                 b = env.dev_mem[ep].alloc(sz, 64);
+                dev_allocs.push_back(b);
 
                 wr_rc = pcie_tl_mem_wr_seq::type_id::create($sformatf("rc_wr_dev%0d", ep));
                 wr_rc.addr     = b;
@@ -212,7 +215,6 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
                 `uvm_info("SW_UM", $sformatf(
                     "C:RC_RD_DEV%0d OK -- dev_mem[0x%0h][0] = 0x%02h (write+read completed)",
                     ep, b, rd_b[0]), UVM_LOW)
-                env.dev_mem[ep].free(b);
             end
         end
 
@@ -220,6 +222,10 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
         // Phase D: Leak checks
         //=====================================================================
         `uvm_info("SW_UM", "--- Phase D: Leak checks ---", UVM_LOW)
+        foreach (host_allocs[i])
+            env.host_mem.free(host_allocs[i]);
+        foreach (dev_allocs[i])
+            env.dev_mem[i].free(dev_allocs[i]);
         env.host_mem.leak_check();
         for (int i = 0; i < num_eps; i++)
             env.dev_mem[i].leak_check();

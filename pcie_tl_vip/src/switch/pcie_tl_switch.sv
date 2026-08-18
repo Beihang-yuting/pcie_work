@@ -77,18 +77,23 @@ class pcie_tl_switch extends uvm_component;
             usps[r].port_id = r;
             usps[r].root_id = r;
             usps[r].init_type1_image(SWITCH_USP, r,
-                                     16'(sw_cfg.switch_bdf + (r << 3)));
+                                     {sw_cfg.usp_sec_bus[r], 8'h00});
         end
         usp = usps[0];   // alias for back-compat (single-root)
 
         dsp = new[nd];
         for (int i = 0; i < nd; i++) begin
             bit [15:0] dsp_bdf;
+            int owner_local_dev = 0;
             dsp[i] = pcie_tl_switch_port::type_id::create($sformatf("dsp_%0d", i), this);
             dsp[i].role      = SWITCH_DSP;
             dsp[i].port_id   = nu + i;
             dsp[i].owner_usp = sw_cfg.dsp_owner[i];
-            dsp_bdf = {8'(sw_cfg.usp_secondary_bus + 1), 5'(i), 3'b000};
+            for (int j = 0; j < i; j++)
+                if (sw_cfg.dsp_owner[j] == sw_cfg.dsp_owner[i])
+                    owner_local_dev++;
+            dsp_bdf = {8'(sw_cfg.usp_sec_bus[dsp[i].owner_usp] + 1),
+                       5'(owner_local_dev), 3'b000};
             dsp[i].init_type1_image(SWITCH_DSP, i, dsp_bdf);
         end
 
@@ -110,8 +115,10 @@ class pcie_tl_switch extends uvm_component;
         if (!sw_cfg.enum_mode) begin
             for (int r = 0; r < sw_cfg.num_usp; r++)
                 usps[r].apply_config(sw_cfg, r);   // r = root index → per-root usp_*[r] domain
-            for (int i = 0; i < sw_cfg.num_ds_ports; i++)
+            for (int i = 0; i < sw_cfg.num_ds_ports; i++) begin
                 dsp[i].apply_config(sw_cfg, i);
+                dsp[i].command[1] = 1'b1;
+            end
         end
     endfunction
 
@@ -151,12 +158,17 @@ class pcie_tl_switch extends uvm_component;
         bit is_completion;
         switch_np_key_t key;
         pcie_tl_tlp forwarded_tlp;
+        pcie_tl_cpl_tlp completion_tlp;
+        int local_target_port;
+        int unsigned completion_byte_count;
+        bit final_completion;
 
         // Skip null or empty TLPs (from monitor polling or uninitialized objects)
         if (tlp == null || (tlp.length == 0 && tlp.payload.size() == 0 &&
             tlp.kind == TLP_MEM_RD && tlp.requester_id == 0))
             return;
 
+        local_target_port = SWITCH_ROUTE_DROP;
         is_completion = (tlp.get_category() == TLP_CAT_COMPLETION);
         if (is_completion) begin
             key = switch_np_key(tlp.requester_id, tlp.tag);
@@ -164,7 +176,33 @@ class pcie_tl_switch extends uvm_component;
                 `uvm_fatal("SWITCH_UNKNOWN_CPL", $sformatf(
                     "requester=%04h tag=%03h", tlp.requester_id, tlp.tag))
             dst = outstanding_ingress[key];
-            outstanding_ingress.delete(key);
+            final_completion = 1'b1;
+            if ($cast(completion_tlp, tlp) &&
+                completion_tlp.kind inside {TLP_CPLD, TLP_CPLD_LK} &&
+                completion_tlp.cpl_status == CPL_STATUS_SC) begin
+                completion_byte_count = (completion_tlp.byte_count == 0) ?
+                                        4096 : completion_tlp.byte_count;
+                final_completion =
+                    (completion_tlp.payload.size() >= completion_byte_count);
+            end
+            if (final_completion)
+                outstanding_ingress.delete(key);
+        end else if (tlp.kind inside {TLP_CFG_RD0, TLP_CFG_WR0,
+                                      TLP_CFG_RD1, TLP_CFG_WR1}) begin
+            pcie_tl_cfg_tlp cfg_tlp;
+            if (!$cast(cfg_tlp, tlp))
+                `uvm_fatal("SWITCH_CFG_CAST",
+                           "Configuration kind has non-Configuration object")
+            local_target_port = local_port_for_bdf(cfg_tlp.completer_id);
+            if (local_target_port != SWITCH_ROUTE_DROP) begin
+                if (fabric.root_of(local_target_port) !=
+                    fabric.root_of(ingress_port_id))
+                    dst = SWITCH_ROUTE_CROSS_ROOT;
+                else
+                    dst = SWITCH_ROUTE_LOCAL;
+            end else begin
+                dst = fabric.route(tlp, ingress_port_id);
+            end
         end else begin
             dst = fabric.route(tlp, ingress_port_id);
         end
@@ -179,7 +217,7 @@ class pcie_tl_switch extends uvm_component;
 
         case (dst)
             SWITCH_ROUTE_LOCAL: begin
-                handle_local_config(tlp, ingress_port_id);
+                handle_local_config(tlp, ingress_port_id, local_target_port);
             end
             SWITCH_ROUTE_DROP: begin
                 total_dropped++;
@@ -265,19 +303,18 @@ class pcie_tl_switch extends uvm_component;
         endcase
     endtask
 
-    protected task handle_local_config(pcie_tl_tlp tlp, int ingress_port_id);
+    protected task handle_local_config(pcie_tl_tlp tlp, int ingress_port_id,
+                                       int target_port);
         pcie_tl_cfg_tlp cfg_tlp;
         pcie_tl_cpl_tlp cpl;
 
         if (!$cast(cfg_tlp, tlp)) return;
 
-        // NOTE: dev_num→port mapping assumes single-root layout (USP at port 0).
-        // For num_usp==1 this is byte-equivalent. Multi-root config-completion
-        // (root-aware dev_num mapping) is a follow-up; current tests do not exercise it.
+        if (target_port < 0 || target_port >= all_ports.size())
+            `uvm_fatal("SWITCH_LOCAL_CFG", $sformatf(
+                "invalid target port %0d for BDF %04h",
+                target_port, cfg_tlp.completer_id))
         begin
-            int dev_num = cfg_tlp.completer_id[7:3];
-            int target_port = (dev_num < all_ports.size()) ? dev_num : 0;
-
             if (tlp.kind inside {TLP_CFG_RD0, TLP_CFG_RD1}) begin
                 bit [31:0] data = all_ports[target_port].cfg_read({cfg_tlp.reg_num, 2'b00});
                 cpl = pcie_tl_cpl_tlp::type_id::create("sw_cfg_cpl");
@@ -289,7 +326,7 @@ class pcie_tl_switch extends uvm_component;
                 cpl.length       = 1;
                 cpl.requester_id = tlp.requester_id;
                 cpl.tag          = tlp.tag;
-                cpl.completer_id = sw_cfg.switch_bdf;
+                cpl.completer_id = all_ports[target_port].bdf;
                 cpl.cpl_status   = CPL_STATUS_SC;
                 cpl.byte_count   = 4;
                 cpl.lower_addr   = {cfg_tlp.reg_num[0], 2'b00};
@@ -313,7 +350,7 @@ class pcie_tl_switch extends uvm_component;
                 cpl.length       = 0;
                 cpl.requester_id = tlp.requester_id;
                 cpl.tag          = tlp.tag;
-                cpl.completer_id = sw_cfg.switch_bdf;
+                cpl.completer_id = all_ports[target_port].bdf;
                 cpl.cpl_status   = CPL_STATUS_SC;
                 cpl.byte_count   = 0;
                 cpl.lower_addr   = 0;
