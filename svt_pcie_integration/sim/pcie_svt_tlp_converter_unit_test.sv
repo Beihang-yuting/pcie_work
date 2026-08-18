@@ -408,6 +408,26 @@ package pcie_svt_tlp_converter_unit_test_pkg;
                 {labels[index], ": cloned success reason not empty"});
         check_round_trip(index, source, round_trip,
                          {labels[index], "/clone"});
+        if (source.tlp_prefixes.size() != 0) begin
+          require(cloned_normalized.prefixes[0] != normalized.prefixes[0],
+                  {labels[index], ": clone aliased prefix handle"});
+          cloned_normalized.prefixes[0].raw_dw =
+            source.tlp_prefixes[0] ^ 32'h0000_0001;
+          require(normalized.prefixes[0].raw_dw == source.tlp_prefixes[0],
+                  {labels[index], ": clone prefix mutation changed original"});
+          round_trip = new("stale_original_after_clone_mutation");
+          reason = "stale";
+          require(pcie_svt_tlp_converter::to_svt(normalized,
+                                                 round_trip, reason),
+                  {labels[index],
+                   ": original to_svt after clone mutation failed: ",
+                   reason});
+          require(reason == "",
+                  {labels[index],
+                   ": original success reason after clone mutation not empty"});
+          check_round_trip(index, source, round_trip,
+                           {labels[index], "/original-after-clone-mutation"});
+        end
       end
 
       source = make_vector(1);
@@ -497,6 +517,56 @@ package pcie_svt_tlp_converter_unit_test_pkg;
               "inconsistent normalized has_prefix was accepted");
       require((round_trip == null) && (reason != ""),
               "has_prefix rejection contract failed");
+
+      begin
+        pcie_tl_prefix null_prefix;
+        source = make_vector(1);
+        require(pcie_svt_tlp_converter::from_svt(source,
+                                                 normalized, reason),
+                {"null prefix setup failed: ", reason});
+        normalized.prefixes.push_back(null_prefix);
+        normalized.has_prefix = 1'b1;
+        round_trip = new("stale_null_prefix_to");
+        reason = "";
+        require(!pcie_svt_tlp_converter::to_svt(normalized,
+                                                round_trip, reason),
+                "null normalized prefix handle was accepted");
+        require((round_trip == null) && (reason != ""),
+                "null prefix rejection contract failed");
+      end
+
+      begin
+        pcie_tl_mem_tlp base_mem;
+        svt_pcie_tlp stale_round_trip;
+        base_mem = new("base_mem_without_svt_provenance");
+        base_mem.kind = TLP_MEM_WR;
+        base_mem.fmt = FMT_3DW_WITH_DATA;
+        base_mem.type_f = TLP_TYPE_MEM_WR;
+        base_mem.length = 10'd1;
+        base_mem.requester_id = 16'h1200;
+        base_mem.tag = 10'h155;
+        base_mem.addr = 64'h0000_0000_1234_5000;
+        base_mem.first_be = 4'hf;
+        base_mem.last_be = 4'h0;
+        base_mem.is_64bit = 1'b0;
+        base_mem.payload = new[4];
+        base_mem.payload[0] = 8'ha1;
+        base_mem.payload[1] = 8'hb2;
+        base_mem.payload[2] = 8'hc3;
+        base_mem.payload[3] = 8'hd4;
+        stale_round_trip = new("stale_base_mem_round_trip");
+        round_trip = stale_round_trip;
+        reason = "stale";
+        require(pcie_svt_tlp_converter::to_svt(base_mem,
+                                               round_trip, reason),
+                {"base normalized Memory conversion failed: ", reason});
+        require(reason == "",
+                "base normalized Memory success reason not empty");
+        require((round_trip != null) && (round_trip != stale_round_trip),
+                "base normalized Memory did not replace stale output");
+        require(round_trip.tlp_type == svt_pcie_tlp::MEM_REQ,
+                "base normalized Memory Write was emitted as DMEM_REQ");
+      end
 
       begin
         pcie_tl_cfg_tlp base_cfg;

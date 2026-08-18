@@ -29,6 +29,24 @@ class pcie_svt_tlp_metadata extends uvm_object;
   endfunction
 endclass
 
+class pcie_svt_prefix_copy_helper;
+  static function void deep_copy_prefixes(
+      pcie_tl_tlp source, pcie_tl_tlp destination);
+    pcie_tl_prefix prefix;
+
+    destination.prefixes.delete();
+    foreach (source.prefixes[prefix_index]) begin
+      prefix = null;
+      if (source.prefixes[prefix_index] != null) begin
+        prefix = new(source.prefixes[prefix_index].get_name());
+        prefix.prefix_type = source.prefixes[prefix_index].prefix_type;
+        prefix.raw_dw = source.prefixes[prefix_index].raw_dw;
+      end
+      destination.prefixes.push_back(prefix);
+    end
+  endfunction
+endclass
+
 class pcie_svt_mem_tlp extends pcie_tl_mem_tlp;
   `uvm_object_utils(pcie_svt_mem_tlp)
 
@@ -44,6 +62,7 @@ class pcie_svt_mem_tlp extends pcie_tl_mem_tlp;
     super.do_copy(rhs);
     if (!$cast(rhs_, rhs))
       return;
+    pcie_svt_prefix_copy_helper::deep_copy_prefixes(rhs_, this);
     at = rhs_.at;
     if (rhs_.metadata == null) begin
       metadata = null;
@@ -70,6 +89,7 @@ class pcie_svt_cfg_tlp extends pcie_tl_cfg_tlp;
     super.do_copy(rhs);
     if (!$cast(rhs_, rhs))
       return;
+    pcie_svt_prefix_copy_helper::deep_copy_prefixes(rhs_, this);
     at           = rhs_.at;
     completer_id = rhs_.completer_id;
     reg_num      = rhs_.reg_num;
@@ -99,6 +119,7 @@ class pcie_svt_cpl_tlp extends pcie_tl_cpl_tlp;
     super.do_copy(rhs);
     if (!$cast(rhs_, rhs))
       return;
+    pcie_svt_prefix_copy_helper::deep_copy_prefixes(rhs_, this);
     at = rhs_.at;
     if (rhs_.metadata == null) begin
       metadata = null;
