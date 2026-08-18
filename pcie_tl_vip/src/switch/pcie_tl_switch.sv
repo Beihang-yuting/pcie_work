@@ -19,6 +19,10 @@ class pcie_tl_switch extends uvm_component;
     //--- Routing Fabric ---
     pcie_tl_switch_fabric  fabric;
 
+    //--- Dynamic routing state ---
+    int local_bdf_to_port[bit [15:0]];
+    int outstanding_ingress[switch_np_key_t];
+
     //--- Statistics ---
     int total_routed   = 0;
     int total_dropped  = 0;
@@ -27,6 +31,28 @@ class pcie_tl_switch extends uvm_component;
 
     function new(string name = "pcie_tl_switch", uvm_component parent = null);
         super.new(name, parent);
+    endfunction
+
+    function int unsigned outstanding_count();
+        return outstanding_ingress.num();
+    endfunction
+
+    function void refresh_local_bdf_map();
+        local_bdf_to_port.delete();
+        foreach (all_ports[i]) begin
+            bit [15:0] local_bdf = all_ports[i].bdf;
+            if (local_bdf_to_port.exists(local_bdf))
+                `uvm_fatal("SWITCH_DUP_BDF", $sformatf(
+                    "bdf=%04h ports=%0d,%0d", local_bdf,
+                    local_bdf_to_port[local_bdf], i))
+            local_bdf_to_port[local_bdf] = i;
+        end
+    endfunction
+
+    function int local_port_for_bdf(bit [15:0] bdf);
+        if (local_bdf_to_port.exists(bdf))
+            return local_bdf_to_port[bdf];
+        return SWITCH_ROUTE_DROP;
     endfunction
 
     function void build_phase(uvm_phase phase);
@@ -50,15 +76,20 @@ class pcie_tl_switch extends uvm_component;
             usps[r].role    = SWITCH_USP;
             usps[r].port_id = r;
             usps[r].root_id = r;
+            usps[r].init_type1_image(SWITCH_USP, r,
+                                     16'(sw_cfg.switch_bdf + (r << 3)));
         end
         usp = usps[0];   // alias for back-compat (single-root)
 
         dsp = new[nd];
         for (int i = 0; i < nd; i++) begin
+            bit [15:0] dsp_bdf;
             dsp[i] = pcie_tl_switch_port::type_id::create($sformatf("dsp_%0d", i), this);
             dsp[i].role      = SWITCH_DSP;
             dsp[i].port_id   = nu + i;
             dsp[i].owner_usp = sw_cfg.dsp_owner[i];
+            dsp_bdf = {8'(sw_cfg.usp_secondary_bus + 1), 5'(i), 3'b000};
+            dsp[i].init_type1_image(SWITCH_DSP, i, dsp_bdf);
         end
 
         all_ports = new[nu + nd];
@@ -70,6 +101,8 @@ class pcie_tl_switch extends uvm_component;
         fabric.num_ports  = nu + nd;
         fabric.num_usp    = nu;
         fabric.p2p_enable = sw_cfg.p2p_enable;
+
+        refresh_local_bdf_map();
     endfunction
 
     function void connect_phase(uvm_phase phase);
@@ -115,16 +148,29 @@ class pcie_tl_switch extends uvm_component;
 
     protected task route_and_forward(pcie_tl_tlp tlp, int ingress_port_id);
         int dst;
+        bit is_completion;
+        switch_np_key_t key;
+        pcie_tl_tlp forwarded_tlp;
 
         // Skip null or empty TLPs (from monitor polling or uninitialized objects)
         if (tlp == null || (tlp.length == 0 && tlp.payload.size() == 0 &&
             tlp.kind == TLP_MEM_RD && tlp.requester_id == 0))
             return;
 
-        dst = fabric.route(tlp, ingress_port_id);
+        is_completion = (tlp.get_category() == TLP_CAT_COMPLETION);
+        if (is_completion) begin
+            key = switch_np_key(tlp.requester_id, tlp.tag);
+            if (!outstanding_ingress.exists(key))
+                `uvm_fatal("SWITCH_UNKNOWN_CPL", $sformatf(
+                    "requester=%04h tag=%03h", tlp.requester_id, tlp.tag))
+            dst = outstanding_ingress[key];
+            outstanding_ingress.delete(key);
+        end else begin
+            dst = fabric.route(tlp, ingress_port_id);
+        end
 
         // If routed back to ingress, redirect: DSP self-route → owning USP, USP self-route → drop
-        if (dst == ingress_port_id) begin
+        if (!is_completion && dst == ingress_port_id) begin
             if (ingress_port_id >= sw_cfg.num_usp)
                 dst = fabric.usp_port_id(all_ports[ingress_port_id].owner_usp); // DSP→self: upstream
             else
@@ -163,7 +209,49 @@ class pcie_tl_switch extends uvm_component;
             end
             default: begin
                 if (dst >= 0 && dst < all_ports.size()) begin
-                    all_ports[dst].tx_fifo.put(tlp);
+                    forwarded_tlp = tlp;
+                    if (tlp.kind inside {TLP_CFG_RD0, TLP_CFG_WR0,
+                                         TLP_CFG_RD1, TLP_CFG_WR1}) begin
+                        pcie_tl_cfg_tlp source_cfg;
+                        pcie_tl_cfg_tlp cloned_cfg;
+
+                        if (!$cast(source_cfg, tlp))
+                            `uvm_fatal("SWITCH_CFG_CAST",
+                                       "Configuration kind has non-Configuration object")
+                        if (!$cast(cloned_cfg, source_cfg.clone()))
+                            `uvm_fatal("SWITCH_CFG_CLONE",
+                                       "Unable to clone Configuration Request")
+
+                        // pcie_tl_cfg_tlp has no subclass do_copy(), so preserve
+                        // its fields explicitly. The base clone handles the
+                        // remaining common fields except Address Type.
+                        cloned_cfg.at           = source_cfg.at;
+                        cloned_cfg.completer_id = source_cfg.completer_id;
+                        cloned_cfg.reg_num      = source_cfg.reg_num;
+                        cloned_cfg.first_be     = source_cfg.first_be;
+
+                        if ((tlp.kind inside {TLP_CFG_RD1, TLP_CFG_WR1}) &&
+                            (source_cfg.completer_id[15:8] ==
+                             all_ports[dst].route_entry.secondary_bus)) begin
+                            if (tlp.kind == TLP_CFG_RD1)
+                                cloned_cfg.kind = TLP_CFG_RD0;
+                            else
+                                cloned_cfg.kind = TLP_CFG_WR0;
+                            cloned_cfg.type_f = TLP_TYPE_CFG_RD0;
+                        end
+                        forwarded_tlp = cloned_cfg;
+                    end
+
+                    if (tlp.get_category() == TLP_CAT_NON_POSTED) begin
+                        key = switch_np_key(tlp.requester_id, tlp.tag);
+                        if (outstanding_ingress.exists(key))
+                            `uvm_fatal("SWITCH_DUP_NP", $sformatf(
+                                "requester=%04h tag=%03h",
+                                tlp.requester_id, tlp.tag))
+                        outstanding_ingress[key] = ingress_port_id;
+                    end
+
+                    all_ports[dst].tx_fifo.put(forwarded_tlp);
                     all_ports[dst].forwarded_count++;
                     total_routed++;
                     if (ingress_port_id >= sw_cfg.num_usp && dst >= sw_cfg.num_usp)

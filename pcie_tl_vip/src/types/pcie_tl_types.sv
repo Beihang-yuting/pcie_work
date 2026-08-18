@@ -267,6 +267,13 @@ typedef enum int {
     SWITCH_DSP
 } switch_port_role_e;
 
+typedef bit [25:0] switch_np_key_t;
+
+function automatic switch_np_key_t switch_np_key(bit [15:0] requester_id,
+                                                   bit [9:0] tag);
+    return {requester_id, tag};
+endfunction
+
 // Switch routing result
 typedef enum int {
     SWITCH_ROUTE_USP    = 0,

@@ -30,11 +30,10 @@ class pcie_tl_switch_fabric extends uvm_object;
     // Returns: 0=USP, 1..N=DSP, or SWITCH_ROUTE_LOCAL/DROP/BCAST
     //=========================================================================
     function int route(pcie_tl_tlp tlp, int ingress_port_id);
-        // 1. Completion routing (ID-based)
+        // Completion ownership is tracked by pcie_tl_switch using the full
+        // Requester ID/Tag key. Never infer a Completion route from bus ranges.
         if (tlp.get_category() == TLP_CAT_COMPLETION) begin
-            pcie_tl_cpl_tlp cpl;
-            if ($cast(cpl, tlp))
-                return route_by_id(cpl.requester_id[15:8], ingress_port_id);
+            return SWITCH_ROUTE_DROP;
         end
 
         // 2. Config routing (ID-based)
@@ -102,8 +101,23 @@ class pcie_tl_switch_fabric extends uvm_object;
     protected function int route_by_address(bit [63:0] addr, int ingress_port_id);
         int ir = root_of(ingress_port_id);
         for (int i = num_usp; i < num_ports; i++) begin
-            if (addr >= {32'h0, ports[i].route_entry.mem_base} &&
-                addr <= {32'h0, ports[i].route_entry.mem_limit}) begin
+            bit nonpref_match;
+            bit pref_match;
+
+            nonpref_match = 0;
+            pref_match = 0;
+            if (ports[i].command[1]) begin
+                if (ports[i].route_entry.mem_base <=
+                    ports[i].route_entry.mem_limit)
+                    nonpref_match =
+                        (addr >= {32'h0, ports[i].route_entry.mem_base}) &&
+                        (addr <= {32'h0, ports[i].route_entry.mem_limit});
+                if (ports[i].pref_base <= ports[i].pref_limit)
+                    pref_match = (addr >= ports[i].pref_base) &&
+                                 (addr <= ports[i].pref_limit);
+            end
+
+            if (nonpref_match || pref_match) begin
                 if (ports[i].owner_usp != ir) return SWITCH_ROUTE_CROSS_ROOT;
                 if (ingress_port_id >= num_usp && i != ingress_port_id && !p2p_enable)
                     return usp_port_id(ir);
