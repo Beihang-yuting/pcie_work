@@ -1,3 +1,115 @@
+class pcie_svt_tlp_metadata extends uvm_object;
+  `uvm_object_utils(pcie_svt_tlp_metadata)
+
+  bit source_was_dmem;
+  bit [3:0] cfg_last_dw_be;
+  bit ln;
+  svt_pcie_tlp::ph_enum ph;
+  bit [15:0] st;
+  int num_local_tlp_prefixes;
+  int num_end_to_end_tlp_prefixes;
+
+  function new(string name = "pcie_svt_tlp_metadata");
+    super.new(name);
+    ph = svt_pcie_tlp::BIDIRECTIONAL;
+  endfunction
+
+  virtual function void do_copy(uvm_object rhs);
+    pcie_svt_tlp_metadata rhs_;
+    super.do_copy(rhs);
+    if (!$cast(rhs_, rhs))
+      return;
+    source_was_dmem           = rhs_.source_was_dmem;
+    cfg_last_dw_be            = rhs_.cfg_last_dw_be;
+    ln                        = rhs_.ln;
+    ph                        = rhs_.ph;
+    st                        = rhs_.st;
+    num_local_tlp_prefixes    = rhs_.num_local_tlp_prefixes;
+    num_end_to_end_tlp_prefixes = rhs_.num_end_to_end_tlp_prefixes;
+  endfunction
+endclass
+
+class pcie_svt_mem_tlp extends pcie_tl_mem_tlp;
+  `uvm_object_utils(pcie_svt_mem_tlp)
+
+  pcie_svt_tlp_metadata metadata;
+
+  function new(string name = "pcie_svt_mem_tlp");
+    super.new(name);
+    metadata = new("metadata");
+  endfunction
+
+  virtual function void do_copy(uvm_object rhs);
+    pcie_svt_mem_tlp rhs_;
+    super.do_copy(rhs);
+    if (!$cast(rhs_, rhs))
+      return;
+    at = rhs_.at;
+    if (rhs_.metadata == null) begin
+      metadata = null;
+    end else begin
+      if (metadata == null)
+        metadata = new("metadata");
+      metadata.copy(rhs_.metadata);
+    end
+  endfunction
+endclass
+
+class pcie_svt_cfg_tlp extends pcie_tl_cfg_tlp;
+  `uvm_object_utils(pcie_svt_cfg_tlp)
+
+  pcie_svt_tlp_metadata metadata;
+
+  function new(string name = "pcie_svt_cfg_tlp");
+    super.new(name);
+    metadata = new("metadata");
+  endfunction
+
+  virtual function void do_copy(uvm_object rhs);
+    pcie_svt_cfg_tlp rhs_;
+    super.do_copy(rhs);
+    if (!$cast(rhs_, rhs))
+      return;
+    at           = rhs_.at;
+    completer_id = rhs_.completer_id;
+    reg_num      = rhs_.reg_num;
+    first_be     = rhs_.first_be;
+    if (rhs_.metadata == null) begin
+      metadata = null;
+    end else begin
+      if (metadata == null)
+        metadata = new("metadata");
+      metadata.copy(rhs_.metadata);
+    end
+  endfunction
+endclass
+
+class pcie_svt_cpl_tlp extends pcie_tl_cpl_tlp;
+  `uvm_object_utils(pcie_svt_cpl_tlp)
+
+  pcie_svt_tlp_metadata metadata;
+
+  function new(string name = "pcie_svt_cpl_tlp");
+    super.new(name);
+    metadata = new("metadata");
+  endfunction
+
+  virtual function void do_copy(uvm_object rhs);
+    pcie_svt_cpl_tlp rhs_;
+    super.do_copy(rhs);
+    if (!$cast(rhs_, rhs))
+      return;
+    at = rhs_.at;
+    if (rhs_.metadata == null) begin
+      metadata = null;
+    end else begin
+      if (metadata == null)
+        metadata = new("metadata");
+      metadata.copy(rhs_.metadata);
+    end
+  endfunction
+endclass
+
 class pcie_svt_tlp_converter;
 
   static function bit svt_fmt_to_normalized(
@@ -94,8 +206,26 @@ class pcie_svt_tlp_converter;
     endcase
   endfunction
 
+  static function pcie_svt_tlp_metadata get_metadata(
+      pcie_tl_tlp normalized);
+    pcie_svt_mem_tlp mem_tlp;
+    pcie_svt_cfg_tlp cfg_tlp;
+    pcie_svt_cpl_tlp cpl_tlp;
+
+    if ($cast(mem_tlp, normalized))
+      return mem_tlp.metadata;
+    if ($cast(cfg_tlp, normalized))
+      return cfg_tlp.metadata;
+    if ($cast(cpl_tlp, normalized))
+      return cpl_tlp.metadata;
+    return null;
+  endfunction
+
   static function void copy_common_from_svt(
-      svt_pcie_tlp source, pcie_tl_tlp normalized);
+      svt_pcie_tlp source, pcie_tl_tlp normalized,
+      pcie_svt_tlp_metadata metadata);
+    pcie_tl_prefix prefix;
+
     normalized.tc           = source.traffic_class;
     normalized.th           = source.th;
     normalized.td           = source.td;
@@ -107,15 +237,34 @@ class pcie_svt_tlp_converter;
     normalized.length       = source.length;
     normalized.requester_id = source.requester_id;
     normalized.tag          = source.tag;
+    normalized.prefixes.delete();
+    foreach (source.tlp_prefixes[prefix_index]) begin
+      prefix = new($sformatf("prefix_%0d", prefix_index));
+      prefix.raw_dw = source.tlp_prefixes[prefix_index];
+      prefix.prefix_type =
+        tlp_prefix_type_e'(source.tlp_prefixes[prefix_index][31:24]);
+      normalized.prefixes.push_back(prefix);
+    end
+    normalized.has_prefix = (source.tlp_prefixes.size() != 0);
     normalized.payload      = new[source.payload.size() * 4];
     foreach (source.payload[dword_index])
       for (int unsigned byte_index = 0; byte_index < 4; byte_index++)
         normalized.payload[dword_index * 4 + byte_index] =
           source.payload[dword_index][8 * byte_index +: 8];
+    metadata.ln = source.ln;
+    metadata.ph = source.ph;
+    metadata.st = source.st;
+    metadata.num_local_tlp_prefixes = source.num_local_tlp_prefixes;
+    metadata.num_end_to_end_tlp_prefixes =
+      source.num_end_to_end_tlp_prefixes;
   endfunction
 
   static function void copy_common_to_svt(
-      pcie_tl_tlp normalized, svt_pcie_tlp round_trip);
+      pcie_tl_tlp normalized, svt_pcie_tlp round_trip,
+      pcie_svt_tlp_metadata metadata);
+    int num_local_tlp_prefixes;
+    int num_end_to_end_tlp_prefixes;
+
     round_trip.traffic_class         = normalized.tc;
     round_trip.th                    = normalized.th;
     round_trip.td                    = normalized.td;
@@ -127,6 +276,33 @@ class pcie_svt_tlp_converter;
     round_trip.length                = normalized.length;
     round_trip.requester_id          = normalized.requester_id;
     round_trip.tag                   = normalized.tag;
+    round_trip.tlp_prefixes.delete();
+    num_local_tlp_prefixes = 0;
+    num_end_to_end_tlp_prefixes = 0;
+    foreach (normalized.prefixes[prefix_index]) begin
+      round_trip.tlp_prefixes.push_back(
+        normalized.prefixes[prefix_index].raw_dw);
+      if (normalized.prefixes[prefix_index].is_local())
+        num_local_tlp_prefixes++;
+      else
+        num_end_to_end_tlp_prefixes++;
+    end
+    if (metadata == null) begin
+      round_trip.ln = 1'b0;
+      round_trip.ph = svt_pcie_tlp::BIDIRECTIONAL;
+      round_trip.st = 16'h0000;
+      round_trip.num_local_tlp_prefixes = num_local_tlp_prefixes;
+      round_trip.num_end_to_end_tlp_prefixes =
+        num_end_to_end_tlp_prefixes;
+    end else begin
+      round_trip.ln = metadata.ln;
+      round_trip.ph = metadata.ph;
+      round_trip.st = metadata.st;
+      round_trip.num_local_tlp_prefixes =
+        metadata.num_local_tlp_prefixes;
+      round_trip.num_end_to_end_tlp_prefixes =
+        metadata.num_end_to_end_tlp_prefixes;
+    end
     round_trip.payload = new[normalized.payload.size() / 4];
     foreach (round_trip.payload[dword_index]) begin
       round_trip.payload[dword_index] = '0;
@@ -143,9 +319,9 @@ class pcie_svt_tlp_converter;
     tlp_fmt_e normalized_fmt;
     tlp_kind_e normalized_kind;
     tlp_type_e normalized_type;
-    pcie_tl_mem_tlp mem_tlp;
-    pcie_tl_cfg_tlp cfg_tlp;
-    pcie_tl_cpl_tlp cpl_tlp;
+    pcie_svt_mem_tlp mem_tlp;
+    pcie_svt_cfg_tlp cfg_tlp;
+    pcie_svt_cpl_tlp cpl_tlp;
     cpl_status_e normalized_status;
 
     normalized = null;
@@ -157,6 +333,25 @@ class pcie_svt_tlp_converter;
     if (!svt_fmt_to_normalized(source.fmt, normalized_fmt)) begin
       reason = $sformatf("unsupported SVT Fmt value %0d", source.fmt);
       return 1'b0;
+    end
+    if ((source.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,
+                            svt_pcie_tlp::NO_DATA_4_DWORD}) &&
+        (source.payload.size() != 0)) begin
+      reason = "no-data SVT Fmt cannot carry payload data";
+      return 1'b0;
+    end
+    if (source.tlp_type inside {svt_pcie_tlp::MEM_REQ,
+                                svt_pcie_tlp::DMEM_REQ}) begin
+      if (source.address[1:0] != 2'b00) begin
+        reason = "SVT Memory address is not DWORD aligned";
+        return 1'b0;
+      end
+      if ((source.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,
+                              svt_pcie_tlp::WITH_DATA_3_DWORD}) &&
+          (source.address[63:32] != 32'h0000_0000)) begin
+        reason = "3-DWORD SVT Memory address exceeds 32 bits";
+        return 1'b0;
+      end
     end
 
     case (source.tlp_type)
@@ -191,6 +386,7 @@ class pcie_svt_tlp_converter;
         normalized_type = TLP_TYPE_MEM_RD;
         mem_tlp = new("normalized_dmem_tlp");
         normalized = mem_tlp;
+        mem_tlp.metadata.source_was_dmem = 1'b1;
         mem_tlp.addr      = source.address;
         mem_tlp.first_be  = source.first_dw_be;
         mem_tlp.last_be   = source.last_dw_be;
@@ -215,6 +411,7 @@ class pcie_svt_tlp_converter;
         end
         cfg_tlp = new("normalized_cfg_tlp");
         normalized = cfg_tlp;
+        cfg_tlp.metadata.cfg_last_dw_be = source.last_dw_be;
         cfg_tlp.completer_id = {source.bus_number, source.device_number,
                                 source.function_number};
         cfg_tlp.reg_num      = source.register_number;
@@ -252,7 +449,7 @@ class pcie_svt_tlp_converter;
     normalized.kind   = normalized_kind;
     normalized.fmt    = normalized_fmt;
     normalized.type_f = normalized_type;
-    copy_common_from_svt(source, normalized);
+    copy_common_from_svt(source, normalized, get_metadata(normalized));
     return 1'b1;
   endfunction
 
@@ -265,6 +462,7 @@ class pcie_svt_tlp_converter;
     pcie_tl_cpl_tlp cpl_tlp;
     svt_pcie_tlp::fmt_enum svt_fmt;
     svt_pcie_tlp::completion_status_enum svt_status;
+    pcie_svt_tlp_metadata metadata;
 
     round_trip = null;
     reason = "";
@@ -281,6 +479,17 @@ class pcie_svt_tlp_converter;
       reason = "normalized payload size is not DWORD aligned";
       return 1'b0;
     end
+    if (normalized.has_prefix != (normalized.prefixes.size() != 0)) begin
+      reason = "normalized has_prefix does not match prefix queue";
+      return 1'b0;
+    end
+    foreach (normalized.prefixes[prefix_index]) begin
+      if (normalized.prefixes[prefix_index] == null) begin
+        reason = $sformatf("normalized prefix %0d is null", prefix_index);
+        return 1'b0;
+      end
+    end
+    metadata = get_metadata(normalized);
 
     case (normalized.kind)
       TLP_MEM_RD: begin
@@ -362,11 +571,27 @@ class pcie_svt_tlp_converter;
       end
     endcase
 
+    if (normalized.kind inside {TLP_MEM_RD, TLP_MEM_WR}) begin
+      if (mem_tlp.addr[1:0] != 2'b00) begin
+        reason = "normalized Memory address is not DWORD aligned";
+        return 1'b0;
+      end
+      if ((normalized.fmt inside {FMT_3DW_NO_DATA, FMT_3DW_WITH_DATA}) &&
+          (mem_tlp.addr[63:32] != 32'h0000_0000)) begin
+        reason = "3-DWORD normalized Memory address exceeds 32 bits";
+        return 1'b0;
+      end
+    end
+
     round_trip = new("round_trip_svt_tlp");
     round_trip.fmt = svt_fmt;
     case (normalized.kind)
       TLP_MEM_RD, TLP_MEM_WR: begin
-        round_trip.tlp_type    = svt_pcie_tlp::MEM_REQ;
+        round_trip.tlp_type = ((normalized.kind == TLP_MEM_WR) &&
+                               (metadata != null) &&
+                               metadata.source_was_dmem) ?
+                              svt_pcie_tlp::DMEM_REQ :
+                              svt_pcie_tlp::MEM_REQ;
         round_trip.address     = mem_tlp.addr;
         round_trip.first_dw_be = mem_tlp.first_be;
         round_trip.last_dw_be  = mem_tlp.last_be;
@@ -378,7 +603,8 @@ class pcie_svt_tlp_converter;
         round_trip.function_number = cfg_tlp.completer_id[2:0];
         round_trip.register_number = cfg_tlp.reg_num;
         round_trip.first_dw_be     = cfg_tlp.first_be;
-        round_trip.last_dw_be      = 4'h0;
+        round_trip.last_dw_be = (metadata == null) ?
+                                4'h0 : metadata.cfg_last_dw_be;
       end
       TLP_CFG_RD1, TLP_CFG_WR1: begin
         round_trip.tlp_type        = svt_pcie_tlp::TYPE_1_CFG_REQ;
@@ -387,7 +613,8 @@ class pcie_svt_tlp_converter;
         round_trip.function_number = cfg_tlp.completer_id[2:0];
         round_trip.register_number = cfg_tlp.reg_num;
         round_trip.first_dw_be     = cfg_tlp.first_be;
-        round_trip.last_dw_be      = 4'h0;
+        round_trip.last_dw_be = (metadata == null) ?
+                                4'h0 : metadata.cfg_last_dw_be;
       end
       TLP_CPL, TLP_CPLD: begin
         round_trip.tlp_type            = svt_pcie_tlp::CPL;
@@ -398,7 +625,7 @@ class pcie_svt_tlp_converter;
         round_trip.lower_address        = cpl_tlp.lower_addr;
       end
     endcase
-    copy_common_to_svt(normalized, round_trip);
+    copy_common_to_svt(normalized, round_trip, metadata);
     return 1'b1;
   endfunction
 

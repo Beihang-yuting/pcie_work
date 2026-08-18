@@ -60,11 +60,22 @@ package pcie_svt_tlp_converter_unit_test_pkg;
 
     function automatic svt_pcie_tlp make_vector(int unsigned index);
       svt_pcie_tlp source;
+      bit [2:0] attr_pattern;
       source = new($sformatf("source_%0d", index));
       source.traffic_class        = ((index % 7) + 1);
-      source.attr_relaxed_ordering = 1'b1;
-      source.attr_id_order         = 1'b1;
-      source.attr_no_snoop         = 1'b1;
+      case (index)
+        0: attr_pattern = 3'b001;
+        1: attr_pattern = 3'b010;
+        2: attr_pattern = 3'b100;
+        3: attr_pattern = 3'b011;
+        4: attr_pattern = 3'b101;
+        5: attr_pattern = 3'b110;
+        6: attr_pattern = 3'b001;
+        default: attr_pattern = 3'b100;
+      endcase
+      source.attr_relaxed_ordering = attr_pattern[0];
+      source.attr_id_order         = attr_pattern[1];
+      source.attr_no_snoop         = attr_pattern[2];
       source.th                    = 1'b1;
       source.td                    = 1'b1;
       source.ep                    = 1'b1;
@@ -72,6 +83,12 @@ package pcie_svt_tlp_converter_unit_test_pkg;
       source.requester_id          = 16'h8100 + index;
       source.tag                   = 10'h280 + index;
       source.payload               = new[0];
+      source.tlp_prefixes.delete();
+      source.num_local_tlp_prefixes = 0;
+      source.num_end_to_end_tlp_prefixes = 0;
+      source.ln = 1'b0;
+      source.ph = svt_pcie_tlp::BIDIRECTIONAL;
+      source.st = 16'h0000;
 
       case (index)
         0: begin
@@ -81,6 +98,13 @@ package pcie_svt_tlp_converter_unit_test_pkg;
           source.length      = 10'd3;
           source.first_dw_be = 4'h7;
           source.last_dw_be  = 4'he;
+          source.tlp_prefixes.push_back(32'h8000_5a00);
+          source.tlp_prefixes.push_back(32'h9100_1234);
+          source.num_local_tlp_prefixes = 1;
+          source.num_end_to_end_tlp_prefixes = 1;
+          source.ln = 1'b1;
+          source.ph = svt_pcie_tlp::TARGET;
+          source.st = 16'ha55a;
         end
         1: begin
           source.tlp_type    = svt_pcie_tlp::MEM_REQ;
@@ -101,7 +125,7 @@ package pcie_svt_tlp_converter_unit_test_pkg;
                        svt_pcie_tlp::NO_DATA_3_DWORD;
           source.length          = 10'd1;
           source.first_dw_be     = 4'h6;
-          source.last_dw_be      = 4'h0;
+          source.last_dw_be      = 4'h9;
           source.bus_number      = 8'h40 + index;
           source.device_number   = 5'h10 + index;
           source.function_number = index[2:0];
@@ -158,6 +182,19 @@ package pcie_svt_tlp_converter_unit_test_pkg;
               {label_name, ": Requester ID mismatch"});
       require(normalized.tag == source.tag,
               {label_name, ": 10-bit Tag mismatch"});
+      require(normalized.has_prefix == (source.tlp_prefixes.size() != 0),
+              {label_name, ": has_prefix mismatch"});
+      require(normalized.prefixes.size() == source.tlp_prefixes.size(),
+              {label_name, ": prefix count mismatch"});
+      foreach (source.tlp_prefixes[prefix_index]) begin
+        require(normalized.prefixes[prefix_index] != null,
+                $sformatf("%s: prefix %0d is null", label_name,
+                          prefix_index));
+        require(normalized.prefixes[prefix_index].raw_dw ==
+                source.tlp_prefixes[prefix_index],
+                $sformatf("%s: prefix %0d raw DWORD mismatch", label_name,
+                          prefix_index));
+      end
       require(normalized.payload.size() == source.payload.size() * 4,
               {label_name, ": payload byte count mismatch"});
       foreach (normalized.payload[byte_index])
@@ -187,6 +224,24 @@ package pcie_svt_tlp_converter_unit_test_pkg;
                     svt_pcie_tlp::NO_DATA_4_DWORD,
                     svt_pcie_tlp::WITH_DATA_4_DWORD}),
                   {label_name, ": address width mismatch"});
+          if (index == 1) begin
+            require(mem_tlp.payload[0] == 8'h11,
+                    {label_name, ": address byte 0 is not 0x11"});
+            require(mem_tlp.payload[1] == 8'h22,
+                    {label_name, ": address byte 1 is not 0x22"});
+            require(mem_tlp.payload[2] == 8'h33,
+                    {label_name, ": address byte 2 is not 0x33"});
+            require(mem_tlp.payload[3] == 8'h44,
+                    {label_name, ": address byte 3 is not 0x44"});
+            require(mem_tlp.payload[4] == 8'h55,
+                    {label_name, ": address byte 4 is not 0x55"});
+            require(mem_tlp.payload[5] == 8'h66,
+                    {label_name, ": address byte 5 is not 0x66"});
+            require(mem_tlp.payload[6] == 8'h77,
+                    {label_name, ": address byte 6 is not 0x77"});
+            require(mem_tlp.payload[7] == 8'h88,
+                    {label_name, ": address byte 7 is not 0x88"});
+          end
         end
         2, 3, 4, 5: begin
           require($cast(cfg_tlp, normalized),
@@ -244,6 +299,25 @@ package pcie_svt_tlp_converter_unit_test_pkg;
               {label_name, ": round-trip Requester ID mismatch"});
       require(actual.tag == expected.tag,
               {label_name, ": round-trip 10-bit Tag mismatch"});
+      require(actual.ln == expected.ln,
+              {label_name, ": round-trip LN mismatch"});
+      require(actual.ph == expected.ph,
+              {label_name, ": round-trip PH mismatch"});
+      require(actual.st == expected.st,
+              {label_name, ": round-trip ST mismatch"});
+      require(actual.num_local_tlp_prefixes ==
+              expected.num_local_tlp_prefixes,
+              {label_name, ": round-trip local prefix count mismatch"});
+      require(actual.num_end_to_end_tlp_prefixes ==
+              expected.num_end_to_end_tlp_prefixes,
+              {label_name, ": round-trip E2E prefix count mismatch"});
+      require(actual.tlp_prefixes.size() == expected.tlp_prefixes.size(),
+              {label_name, ": round-trip prefix queue size mismatch"});
+      foreach (expected.tlp_prefixes[prefix_index])
+        require(actual.tlp_prefixes[prefix_index] ==
+                expected.tlp_prefixes[prefix_index],
+                $sformatf("%s: round-trip prefix %0d mismatch", label_name,
+                          prefix_index));
 
       case (index)
         0, 1: begin
@@ -265,6 +339,8 @@ package pcie_svt_tlp_converter_unit_test_pkg;
                   {label_name, ": round-trip register number mismatch"});
           require(actual.first_dw_be == expected.first_dw_be,
                   {label_name, ": round-trip first BE mismatch"});
+          require(actual.last_dw_be == expected.last_dw_be,
+                  {label_name, ": round-trip last BE mismatch"});
         end
         6, 7: begin
           require(actual.completer_id == expected.completer_id,
@@ -298,6 +374,8 @@ package pcie_svt_tlp_converter_unit_test_pkg;
       pcie_tl_tlp normalized;
       svt_pcie_tlp source;
       svt_pcie_tlp round_trip;
+      pcie_tl_tlp cloned_normalized;
+      pcie_tl_mem_tlp mem_tlp;
       string reason;
 
       phase.raise_objection(this);
@@ -318,6 +396,18 @@ package pcie_svt_tlp_converter_unit_test_pkg;
                 {labels[index], ": to_svt failed: ", reason});
         require(reason == "", {labels[index], ": success reason not empty"});
         check_round_trip(index, source, round_trip, labels[index]);
+
+        require($cast(cloned_normalized, normalized.clone()),
+                {labels[index], ": normalized clone failed"});
+        round_trip = null;
+        reason = "stale";
+        require(pcie_svt_tlp_converter::to_svt(cloned_normalized,
+                                               round_trip, reason),
+                {labels[index], ": cloned to_svt failed: ", reason});
+        require(reason == "",
+                {labels[index], ": cloned success reason not empty"});
+        check_round_trip(index, source, round_trip,
+                         {labels[index], "/clone"});
       end
 
       source = make_vector(1);
@@ -326,6 +416,113 @@ package pcie_svt_tlp_converter_unit_test_pkg;
               {"DMEM_REQ/data alias was rejected: ", reason});
       require(normalized.kind == TLP_MEM_WR,
               "DMEM_REQ/data alias did not normalize to TLP_MEM_WR");
+      round_trip = null;
+      reason = "stale";
+      require(pcie_svt_tlp_converter::to_svt(normalized, round_trip, reason),
+              {"DMEM_REQ/data to_svt failed: ", reason});
+      require(round_trip.tlp_type == svt_pcie_tlp::DMEM_REQ,
+              "DMEM_REQ/data silently changed to MEM_REQ");
+      check_round_trip(1, source, round_trip, "DMEM_REQ/data");
+      require($cast(cloned_normalized, normalized.clone()),
+              "DMEM_REQ normalized clone failed");
+      round_trip = null;
+      reason = "stale";
+      require(pcie_svt_tlp_converter::to_svt(cloned_normalized,
+                                             round_trip, reason),
+              {"DMEM_REQ cloned to_svt failed: ", reason});
+      require(round_trip.tlp_type == svt_pcie_tlp::DMEM_REQ,
+              "DMEM_REQ clone lost DMEM provenance");
+
+      source = make_vector(0);
+      source.payload = new[1];
+      source.payload[0] = 32'hdead_beef;
+      normalized = new("stale_no_data_payload");
+      reason = "";
+      require(!pcie_svt_tlp_converter::from_svt(source, normalized, reason),
+              "no-data Fmt with payload was accepted by from_svt");
+      require(normalized == null,
+              "no-data payload rejection did not clear normalized output");
+      require(reason != "", "no-data payload rejection had no reason");
+
+      source = make_vector(1);
+      source.address[1] = 1'b1;
+      normalized = new("stale_unaligned_from");
+      reason = "";
+      require(!pcie_svt_tlp_converter::from_svt(source, normalized, reason),
+              "unaligned SVT Memory address was accepted");
+      require((normalized == null) && (reason != ""),
+              "unaligned from_svt rejection contract failed");
+
+      source = make_vector(1);
+      source.address[63:32] = 32'h0000_0001;
+      normalized = new("stale_high_3dw_from");
+      reason = "";
+      require(!pcie_svt_tlp_converter::from_svt(source, normalized, reason),
+              "3DW SVT Memory address above 4GB was accepted");
+      require((normalized == null) && (reason != ""),
+              "3DW high-address from_svt rejection contract failed");
+
+      source = make_vector(1);
+      require(pcie_svt_tlp_converter::from_svt(source, normalized, reason),
+              {"to_svt address setup failed: ", reason});
+      require($cast(mem_tlp, normalized),
+              "to_svt address setup did not produce Memory subtype");
+      mem_tlp.addr[1] = 1'b1;
+      round_trip = new("stale_unaligned_to");
+      reason = "";
+      require(!pcie_svt_tlp_converter::to_svt(normalized,
+                                              round_trip, reason),
+              "unaligned normalized Memory address was accepted");
+      require((round_trip == null) && (reason != ""),
+              "unaligned to_svt rejection contract failed");
+
+      mem_tlp.addr[1] = 1'b0;
+      mem_tlp.addr[63:32] = 32'h0000_0001;
+      round_trip = new("stale_high_3dw_to");
+      reason = "";
+      require(!pcie_svt_tlp_converter::to_svt(normalized,
+                                              round_trip, reason),
+              "3DW normalized Memory address above 4GB was accepted");
+      require((round_trip == null) && (reason != ""),
+              "3DW high-address to_svt rejection contract failed");
+
+      source = make_vector(1);
+      require(pcie_svt_tlp_converter::from_svt(source, normalized, reason),
+              {"has_prefix setup failed: ", reason});
+      normalized.has_prefix = 1'b1;
+      round_trip = new("stale_has_prefix_to");
+      reason = "";
+      require(!pcie_svt_tlp_converter::to_svt(normalized,
+                                              round_trip, reason),
+              "inconsistent normalized has_prefix was accepted");
+      require((round_trip == null) && (reason != ""),
+              "has_prefix rejection contract failed");
+
+      begin
+        pcie_tl_cfg_tlp base_cfg;
+        base_cfg = new("base_cfg_without_svt_provenance");
+        base_cfg.kind = TLP_CFG_WR0;
+        base_cfg.fmt = FMT_3DW_WITH_DATA;
+        base_cfg.type_f = TLP_TYPE_CFG_WR0;
+        base_cfg.length = 10'd1;
+        base_cfg.requester_id = 16'h2200;
+        base_cfg.tag = 10'h2aa;
+        base_cfg.completer_id = 16'h3300;
+        base_cfg.reg_num = 10'h155;
+        base_cfg.first_be = 4'hf;
+        base_cfg.payload = new[4];
+        base_cfg.payload[0] = 8'h11;
+        base_cfg.payload[1] = 8'h22;
+        base_cfg.payload[2] = 8'h33;
+        base_cfg.payload[3] = 8'h44;
+        round_trip = null;
+        reason = "stale";
+        require(pcie_svt_tlp_converter::to_svt(base_cfg,
+                                               round_trip, reason),
+                {"base normalized Cfg conversion failed: ", reason});
+        require(round_trip.last_dw_be == 4'h0,
+                "base normalized Cfg did not default last_dw_be to zero");
+      end
 
       source = new("unsupported_message");
       source.tlp_type = svt_pcie_tlp::MSG_REQ_TO_ROOT;
