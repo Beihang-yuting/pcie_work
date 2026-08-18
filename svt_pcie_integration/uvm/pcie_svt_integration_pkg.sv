@@ -11,6 +11,11 @@ package pcie_svt_integration_pkg;
   `include "pcie_svt_profile_set.sv"
   `include "pcie_svt_cfg_space_builder.sv"
   `include "pcie_svt_tlp_converter.sv"
+  `include "sequences/pcie_svt_raw_tlp_sequence.sv"
+  `include "pcie_svt_switch_scoreboard.sv"
+  `include "pcie_svt_switch_port_adapter.sv"
+  `include "pcie_svt_switch_sidecar_subscriber.sv"
+  `include "pcie_svt_switch_target_callback.sv"
 
   function automatic pcie_svt_topology_e compiled_topology();
 `ifdef PCIE_TOPO_EP_X16
