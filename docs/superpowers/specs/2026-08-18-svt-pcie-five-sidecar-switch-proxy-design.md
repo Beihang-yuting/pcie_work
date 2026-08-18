@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-18
 
-**Status:** Approved in design review; pending written-spec confirmation
+**Status:** Approved
 
 **Validation host:** `ubuntu@10.11.10.53`
 

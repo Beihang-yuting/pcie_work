@@ -1,5 +1,11 @@
 # SVT PCIe Switch Proxy Implementation Plan
 
+> **Superseded after Task 2:** Task 1 and Task 2 remain historical execution
+> evidence. Do not execute Task 3 through Task 12 from this document; their
+> active-TL-callback architecture was disproved by R-2020.12 simulation.
+> Continue with
+> `docs/superpowers/plans/2026-08-18-svt-pcie-five-sidecar-switch-proxy.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build and prove a verification-only 1x16 USP plus 4x4 DSP PCIe Switch Proxy that uses five full R-2020.12 Serial SVT links, dynamically enumerates four downstream Endpoints, and forwards the approved eight traffic paths.
