@@ -76,7 +76,10 @@ class pcie_tl_switch extends uvm_component;
             usps[r].role    = SWITCH_USP;
             usps[r].port_id = r;
             usps[r].root_id = r;
+            // Root 0 preserves the public single-root identity contract.
+            // Additional roots use their root-qualified secondary-bus BDF.
             usps[r].init_type1_image(SWITCH_USP, r,
+                                     (r == 0) ? sw_cfg.switch_bdf :
                                      {sw_cfg.usp_sec_bus[r], 8'h00});
         end
         usp = usps[0];   // alias for back-compat (single-root)
@@ -161,11 +164,10 @@ class pcie_tl_switch extends uvm_component;
         pcie_tl_cpl_tlp completion_tlp;
         int local_target_port;
         int unsigned completion_byte_count;
+        int unsigned completion_data_capacity;
         bit final_completion;
 
-        // Skip null or empty TLPs (from monitor polling or uninitialized objects)
-        if (tlp == null || (tlp.length == 0 && tlp.payload.size() == 0 &&
-            tlp.kind == TLP_MEM_RD && tlp.requester_id == 0))
+        if (tlp == null)
             return;
 
         local_target_port = SWITCH_ROUTE_DROP;
@@ -182,8 +184,12 @@ class pcie_tl_switch extends uvm_component;
                 completion_tlp.cpl_status == CPL_STATUS_SC) begin
                 completion_byte_count = (completion_tlp.byte_count == 0) ?
                                         4096 : completion_tlp.byte_count;
+                completion_data_capacity =
+                    ((completion_tlp.length == 0) ?
+                     4096 : completion_tlp.length * 4) -
+                    completion_tlp.lower_addr[1:0];
                 final_completion =
-                    (completion_tlp.payload.size() >= completion_byte_count);
+                    (completion_data_capacity >= completion_byte_count);
             end
             if (final_completion)
                 outstanding_ingress.delete(key);

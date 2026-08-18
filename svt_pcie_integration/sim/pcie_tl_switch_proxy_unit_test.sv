@@ -8,6 +8,8 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
     pcie_tl_switch        sw;
     pcie_tl_switch_config mr_cfg;
     pcie_tl_switch        mr_sw;
+    pcie_tl_switch_config custom_bdf_cfg;
+    pcie_tl_switch        custom_bdf_sw;
     pcie_tl_switch_port   unit_usp;
     pcie_tl_switch_port   unit_dsp;
 
@@ -33,6 +35,13 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         mr_cfg.cross_root_check_enable = 0;
         mr_sw = pcie_tl_switch::type_id::create("mr_sw", this);
         mr_sw.sw_cfg = mr_cfg;
+
+        custom_bdf_cfg = new("custom_bdf_cfg");
+        custom_bdf_cfg.num_ds_ports = 1;
+        custom_bdf_cfg.init_defaults();
+        custom_bdf_cfg.switch_bdf = 16'h0500;
+        custom_bdf_sw = pcie_tl_switch::type_id::create("custom_bdf_sw", this);
+        custom_bdf_sw.sw_cfg = custom_bdf_cfg;
 
         unit_usp = new("unit_usp", this);
         unit_dsp = new("unit_dsp", this);
@@ -138,6 +147,107 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         if (cpl.completer_id != target_bdf)
             $fatal(1, "%s completer expected=%04h actual=%04h",
                    label, target_bdf, cpl.completer_id);
+    endtask
+
+    task automatic check_length_zero_mrd_route();
+        pcie_tl_mem_tlp req;
+        pcie_tl_cpl_tlp cpl;
+        pcie_tl_tlp forwarded;
+        pcie_tl_tlp returned;
+
+        req = pcie_tl_mem_tlp::type_id::create("length_zero_mrd");
+        req.kind         = TLP_MEM_RD;
+        req.fmt          = FMT_3DW_NO_DATA;
+        req.type_f       = TLP_TYPE_MEM_RD;
+        req.length       = 10'h000; // PCIe encoding for 1024 DW
+        req.requester_id = 16'h0000;
+        req.tag          = 10'h158;
+        req.addr         = {32'h0, cfg.ds_mem_base[0] + 32'h1000};
+        req.is_64bit     = 1'b0;
+        req.first_be     = 4'hf;
+        req.last_be      = 4'hf;
+
+        sw.usp.rx_fifo.put(req);
+        get_tlp_with_timeout(sw.dsp[0].tx_fifo, forwarded,
+                             "4096-byte Memory Read forwarding");
+        if (forwarded != req)
+            $fatal(1, "4096-byte Memory Read was not forwarded unchanged");
+        check_route(sw.outstanding_count(), 1,
+                    "4096-byte Memory Read outstanding");
+
+        cpl = pcie_tl_cpl_tlp::type_id::create("length_zero_terminal_cpl");
+        cpl.kind         = TLP_CPL;
+        cpl.fmt          = FMT_3DW_NO_DATA;
+        cpl.type_f       = TLP_TYPE_CPL;
+        cpl.requester_id = req.requester_id;
+        cpl.tag          = req.tag;
+        cpl.completer_id = 16'h02f8;
+        cpl.cpl_status   = CPL_STATUS_UR;
+        sw.dsp[0].rx_fifo.put(cpl);
+        get_tlp_with_timeout(sw.usp.tx_fifo, returned,
+                             "4096-byte Memory Read terminal Completion");
+        check_route(sw.outstanding_count(), 0,
+                    "4096-byte Memory Read ownership drained");
+    endtask
+
+    task automatic check_unaligned_split_completion();
+        pcie_tl_mem_tlp req;
+        pcie_tl_cpl_tlp cpl;
+        pcie_tl_tlp forwarded;
+        pcie_tl_tlp returned;
+
+        req = pcie_tl_mem_tlp::type_id::create("unaligned_split_req");
+        req.kind         = TLP_MEM_RD;
+        req.fmt          = FMT_3DW_NO_DATA;
+        req.type_f       = TLP_TYPE_MEM_RD;
+        req.length       = 10'd17;
+        req.requester_id = 16'h0000;
+        req.tag          = 10'h159;
+        req.addr         = {32'h0, cfg.ds_mem_base[0] + 32'h300};
+        req.is_64bit     = 1'b0;
+        req.first_be     = 4'h8;
+        req.last_be      = 4'h1;
+        sw.usp.rx_fifo.put(req);
+        get_tlp_with_timeout(sw.dsp[0].tx_fifo, forwarded,
+                             "unaligned split request forwarding");
+        check_route(sw.outstanding_count(), 1,
+                    "unaligned split request outstanding");
+
+        cpl = pcie_tl_cpl_tlp::type_id::create("unaligned_split_first");
+        cpl.kind         = TLP_CPLD;
+        cpl.fmt          = FMT_3DW_WITH_DATA;
+        cpl.type_f       = TLP_TYPE_CPL;
+        cpl.length       = 10'd16;
+        cpl.requester_id = req.requester_id;
+        cpl.tag          = req.tag;
+        cpl.completer_id = 16'h02f8;
+        cpl.cpl_status   = CPL_STATUS_SC;
+        cpl.byte_count   = 12'd62;
+        cpl.lower_addr   = 7'h03;
+        cpl.payload      = new[64];
+        sw.dsp[0].rx_fifo.put(cpl);
+        get_tlp_with_timeout(sw.usp.tx_fifo, returned,
+                             "first unaligned split Completion return");
+        check_route(sw.outstanding_count(), 1,
+                    "intermediate unaligned split Completion keeps route");
+
+        cpl = pcie_tl_cpl_tlp::type_id::create("unaligned_split_final");
+        cpl.kind         = TLP_CPLD;
+        cpl.fmt          = FMT_3DW_WITH_DATA;
+        cpl.type_f       = TLP_TYPE_CPL;
+        cpl.length       = 10'd1;
+        cpl.requester_id = req.requester_id;
+        cpl.tag          = req.tag;
+        cpl.completer_id = 16'h02f8;
+        cpl.cpl_status   = CPL_STATUS_SC;
+        cpl.byte_count   = 12'd1;
+        cpl.lower_addr   = 7'h00;
+        cpl.payload      = new[4];
+        sw.dsp[0].rx_fifo.put(cpl);
+        get_tlp_with_timeout(sw.usp.tx_fifo, returned,
+                             "final unaligned split Completion return");
+        check_route(sw.outstanding_count(), 0,
+                    "final unaligned split Completion drains route");
     endtask
 
     task automatic run_type1_config_tests();
@@ -314,6 +424,8 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         bit [63:0] saved_pref_limit;
 
         run_type1_config_tests();
+        check_length_zero_mrd_route();
+        check_unaligned_split_completion();
 
         sw.refresh_local_bdf_map();
         check_route(sw.local_port_for_bdf(16'h0100), 0, "USP BDF");
@@ -321,6 +433,14 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         check_route(sw.local_port_for_bdf(16'h0208), 2, "DSP1 BDF");
         check_route(sw.local_port_for_bdf(16'h0210), 3, "DSP2 BDF");
         check_route(sw.local_port_for_bdf(16'h0218), 4, "DSP3 BDF");
+
+        custom_bdf_sw.refresh_local_bdf_map();
+        check_route(custom_bdf_sw.local_port_for_bdf(16'h0500), 0,
+                    "custom single-root USP BDF");
+        check_route(custom_bdf_sw.local_port_for_bdf(16'h0100),
+                    SWITCH_ROUTE_DROP, "old default USP BDF is absent");
+        check_local_cfg_read(custom_bdf_sw, 0, 16'h0500, 32'h5010_20f9,
+                             10'h15a, "custom single-root local access");
 
         foreach (sw.dsp[i]) begin
             if (!sw.dsp[i].command[1])
