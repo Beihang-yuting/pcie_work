@@ -5,10 +5,12 @@ package pcie_svt_integration_pkg;
   `include "uvm_macros.svh"
   import svt_uvm_pkg::*;
   import svt_pcie_uvm_pkg::*;
+  import pcie_tl_switch_pkg::*;
 
   `include "pcie_svt_profile.sv"
   `include "pcie_svt_profile_set.sv"
   `include "pcie_svt_cfg_space_builder.sv"
+  `include "pcie_svt_tlp_converter.sv"
 
   function automatic pcie_svt_topology_e compiled_topology();
 `ifdef PCIE_TOPO_EP_X16
