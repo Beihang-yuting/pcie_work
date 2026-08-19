@@ -217,9 +217,12 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
     task automatic check_enum_local_cfg_access(
         tlp_kind_e request_kind,
         bit [15:0] target_bdf,
+        bit [9:0] reg_num,
         bit [9:0] tag,
         bit [15:0] expected_completer_id,
         bit [11:0] expected_byte_count,
+        bit [6:0] expected_lower_addr,
+        bit [31:0] expected_payload,
         string label
     );
         pcie_tl_cfg_tlp request;
@@ -229,26 +232,31 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         pcie_tl_cpl_tlp snapshot_cpl;
         tlp_kind_e expected_completion_kind;
         int unsigned event_index;
+        logic [31:0] response_payload;
+        logic [31:0] snapshot_payload;
 
         request = pcie_tl_cfg_tlp::type_id::create(
             $sformatf("enum_cfg_%03h", tag));
         request.kind         = request_kind;
-        request.fmt          = (request_kind == TLP_CFG_WR0) ?
+        request.fmt          = (request_kind inside {TLP_CFG_WR0,
+                                                      TLP_CFG_WR1}) ?
                                FMT_3DW_WITH_DATA : FMT_3DW_NO_DATA;
-        request.type_f       = TLP_TYPE_CFG_RD0;
+        request.type_f       = (request_kind inside {TLP_CFG_RD1,
+                                                     TLP_CFG_WR1}) ?
+                               TLP_TYPE_CFG_RD1 : TLP_TYPE_CFG_RD0;
         request.length       = 1;
         request.requester_id = 16'h0001;
         request.tag          = tag;
         request.completer_id = target_bdf;
-        request.reg_num      = 10'h000;
+        request.reg_num      = reg_num;
         request.first_be     = 4'hf;
-        if (request_kind == TLP_CFG_WR0) begin
+        if (request_kind inside {TLP_CFG_WR0, TLP_CFG_WR1}) begin
             request.payload = new[4];
             foreach (request.payload[i])
                 request.payload[i] = 8'hff;
             expected_completion_kind = TLP_CPL;
         end else begin
-            if (request_kind !== TLP_CFG_RD0)
+            if (!(request_kind inside {TLP_CFG_RD0, TLP_CFG_RD1}))
                 $fatal(1, "%s unsupported request kind %s",
                        label, request_kind.name());
             expected_completion_kind = TLP_CPLD;
@@ -268,6 +276,29 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
                    (cpl == null) ? "null" : cpl.kind.name(),
                    (cpl == null) ? 16'hxxxx : cpl.completer_id,
                    (cpl == null) ? 12'hxxx : cpl.byte_count);
+        if ((cpl.requester_id !== request.requester_id) ||
+            (cpl.tag !== request.tag) ||
+            (cpl.cpl_status !== CPL_STATUS_SC))
+            $fatal(1,
+                   "%s completion correlation/status expected requester=%04h tag=%03h status=SC actual requester=%04h tag=%03h status=%s",
+                   label, request.requester_id, request.tag,
+                   cpl.requester_id, cpl.tag,
+                   cpl.cpl_status.name());
+        if (expected_completion_kind == TLP_CPLD) begin
+            if (cpl.payload.size() != 4)
+                $fatal(1, "%s expected a 4-byte payload actual=%0d",
+                       label, cpl.payload.size());
+            response_payload = {cpl.payload[3], cpl.payload[2],
+                                cpl.payload[1], cpl.payload[0]};
+            if (response_payload !== expected_payload)
+                $fatal(1, "%s payload expected=%08h actual=%08h",
+                       label, expected_payload, response_payload);
+        end
+        if (cpl.lower_addr !== expected_lower_addr)
+            $fatal(1,
+                   "%s lower_addr expected=%02h actual=%02h after payload=%08h",
+                   label, expected_lower_addr, cpl.lower_addr,
+                   response_payload);
 
         if (enum_route_collector.events.size() != (event_index + 1))
             $fatal(1,
@@ -286,33 +317,75 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
             !$cast(snapshot_cpl, route_event.egress_tlp))
             $fatal(1, "%s route snapshot contract failed", label);
         if ((snapshot_cpl.completer_id !== expected_completer_id) ||
-            (snapshot_cpl.byte_count !== expected_byte_count))
+            (snapshot_cpl.byte_count !== expected_byte_count) ||
+            (snapshot_cpl.lower_addr !== expected_lower_addr))
             $fatal(1,
-                   "%s snapshot expected completer=%04h byte_count=%0d actual completer=%04h byte_count=%0d",
+                   "%s snapshot expected completer=%04h byte_count=%0d lower_addr=%02h actual completer=%04h byte_count=%0d lower_addr=%02h",
                    label, expected_completer_id, expected_byte_count,
-                   snapshot_cpl.completer_id, snapshot_cpl.byte_count);
+                   expected_lower_addr,
+                   snapshot_cpl.completer_id, snapshot_cpl.byte_count,
+                   snapshot_cpl.lower_addr);
+        if ((snapshot_cpl.requester_id !== request.requester_id) ||
+            (snapshot_cpl.tag !== request.tag) ||
+            (snapshot_cpl.cpl_status !== CPL_STATUS_SC))
+            $fatal(1,
+                   "%s snapshot correlation/status expected requester=%04h tag=%03h status=SC actual requester=%04h tag=%03h status=%s",
+                   label, request.requester_id, request.tag,
+                   snapshot_cpl.requester_id,
+                   snapshot_cpl.tag, snapshot_cpl.cpl_status.name());
+        if (expected_completion_kind == TLP_CPLD) begin
+            if (snapshot_cpl.payload.size() != 4)
+                $fatal(1,
+                       "%s snapshot expected a 4-byte payload actual=%0d",
+                       label, snapshot_cpl.payload.size());
+            snapshot_payload = {snapshot_cpl.payload[3],
+                                snapshot_cpl.payload[2],
+                                snapshot_cpl.payload[1],
+                                snapshot_cpl.payload[0]};
+            if (snapshot_payload !== expected_payload)
+                $fatal(1,
+                       "%s snapshot payload expected=%08h actual=%08h",
+                       label, expected_payload, snapshot_payload);
+        end
     endtask
 
     task automatic check_enum_local_cfg_write_completion();
         enum_sw.refresh_local_bdf_map();
 
         check_enum_local_cfg_access(
-            TLP_CFG_WR0, 16'h0100, 10'h197, 16'h0000, 12'd4,
+            TLP_CFG_RD0, 16'h0100, 10'h000, 10'h197,
+            16'h0000, 12'd4, 7'h00, 32'h5010_20f9,
+            "enum USP0 pre-write Configuration Read response");
+        check_enum_local_cfg_access(
+            TLP_CFG_WR0, 16'h0100, 10'h000, 10'h198,
+            16'h0100, 12'd4, 7'h00, 32'h0000_0000,
             "enum USP0 first Configuration Write response");
         check_enum_local_cfg_access(
-            TLP_CFG_RD0, 16'h0100, 10'h198, 16'h0100, 12'd4,
+            TLP_CFG_RD0, 16'h0100, 10'h003, 10'h199,
+            16'h0100, 12'd4, 7'h00, 32'h0001_0000,
+            "enum USP0 Header Type Configuration Read response");
+        check_enum_local_cfg_access(
+            TLP_CFG_RD0, 16'h0100, 10'h000, 10'h19a,
+            16'h0100, 12'd4, 7'h00, 32'h5010_20f9,
             "enum USP0 post-write Configuration Read response");
         check_enum_local_cfg_access(
-            TLP_CFG_WR0, 16'h0200, 10'h199, 16'h0000, 12'd4,
+            TLP_CFG_RD1, 16'h0200, 10'h000, 10'h19b,
+            16'h0000, 12'd4, 7'h00, 32'h5020_20f9,
+            "enum DSP0 pre-write Configuration Read response");
+        check_enum_local_cfg_access(
+            TLP_CFG_WR1, 16'h0200, 10'h000, 10'h19c,
+            16'h0200, 12'd4, 7'h00, 32'h0000_0000,
             "enum DSP0 first Configuration Write response");
         check_enum_local_cfg_access(
-            TLP_CFG_RD0, 16'h0200, 10'h19a, 16'h0200, 12'd4,
+            TLP_CFG_RD1, 16'h0200, 10'h000, 10'h19d,
+            16'h0200, 12'd4, 7'h00, 32'h5020_20f9,
             "enum DSP0 post-write Configuration Read response");
         check_enum_local_cfg_access(
-            TLP_CFG_RD0, 16'h0100, 10'h19b, 16'h0100, 12'd4,
+            TLP_CFG_RD0, 16'h0100, 10'h000, 10'h19e,
+            16'h0100, 12'd4, 7'h00, 32'h5010_20f9,
             "enum USP0 final Configuration Read response");
 
-        $display("SWITCH_ENUM_LOCAL_CFG_CPL_PASS usp_first=0000/4 usp_post=0100 dsp0_first=0000/4 dsp0_post=0200 usp_recheck=0100 snapshots=5");
+        $display("SWITCH_ENUM_LOCAL_CFG_CPL_PASS usp_pre=0000/4 usp_first=0100/4 header=00010000/00 usp_post=0100 dsp0_pre=0000/4 dsp0_first=0200/4 dsp0_post=0200 usp_recheck=0100 snapshots=8");
     endtask
 
     task automatic check_length_zero_mrd_route();

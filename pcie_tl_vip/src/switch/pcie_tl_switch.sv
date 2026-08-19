@@ -384,7 +384,7 @@ class pcie_tl_switch extends uvm_component;
                     16'h0000 : all_ports[target_port].bdf;
                 cpl.cpl_status   = CPL_STATUS_SC;
                 cpl.byte_count   = 4;
-                cpl.lower_addr   = {cfg_tlp.reg_num[0], 2'b00};
+                cpl.lower_addr   = 0;
                 cpl.payload      = new[4];
                 cpl.payload[0]   = data[7:0];
                 cpl.payload[1]   = data[15:8];
@@ -399,6 +399,9 @@ class pcie_tl_switch extends uvm_component;
                 if (tlp.payload.size() >= 4)
                     data = {tlp.payload[3], tlp.payload[2], tlp.payload[1], tlp.payload[0]};
                 all_ports[target_port].cfg_write({cfg_tlp.reg_num, 2'b00}, data, cfg_tlp.first_be);
+                if (sw_cfg.enum_mode &&
+                    (tlp.kind inside {TLP_CFG_WR0, TLP_CFG_WR1}))
+                    enum_cfg_write_completed[target_port] = 1'b1;
                 cpl = pcie_tl_cpl_tlp::type_id::create("sw_cfg_cpl");
                 cpl.kind         = TLP_CPL;
                 cpl.fmt          = FMT_3DW_NO_DATA;
@@ -415,8 +418,6 @@ class pcie_tl_switch extends uvm_component;
                 cpl.cpl_status   = CPL_STATUS_SC;
                 cpl.byte_count   = sw_cfg.enum_mode ? 4 : 0;
                 cpl.lower_addr   = 0;
-                if (sw_cfg.enum_mode)
-                    enum_cfg_write_completed[target_port] = 1'b1;
                 publish_route_event(PCIE_TL_ROUTE_LOCAL_RESPONSE,
                                     ingress_port_id, ingress_port_id,
                                     SWITCH_ROUTE_LOCAL, tlp, cpl);
