@@ -452,6 +452,199 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         $display("SWITCH_PACKAGE_SMOKE_PASS");
     endtask
 
+    task automatic check_route_snapshot_subtypes();
+        pcie_tl_switch_route_event route_event;
+        pcie_tl_io_tlp io_source;
+        pcie_tl_io_tlp io_ingress;
+        pcie_tl_io_tlp io_egress;
+        pcie_tl_msg_tlp msg_source;
+        pcie_tl_msg_tlp msg_ingress;
+        pcie_tl_msg_tlp msg_egress;
+        pcie_tl_vendor_tlp vendor_source;
+        pcie_tl_vendor_tlp vendor_ingress;
+        pcie_tl_vendor_tlp vendor_egress;
+        pcie_tl_ltr_tlp ltr_source;
+        pcie_tl_ltr_tlp ltr_ingress;
+        pcie_tl_ltr_tlp ltr_egress;
+        bit io_fields_ok;
+        bit msg_fields_ok;
+        bit vendor_fields_ok;
+        bit ltr_fields_ok;
+        bit clone_ok;
+
+        clone_ok = 1'b1;
+
+        io_source = pcie_tl_io_tlp::type_id::create("snapshot_io_source");
+        io_source.kind = TLP_IO_RD;
+        io_source.fmt = FMT_3DW_NO_DATA;
+        io_source.type_f = TLP_TYPE_IO_RD;
+        io_source.length = 1;
+        io_source.addr = 32'hcafe_ba80;
+        io_source.first_be = 4'hd;
+        route_event = new("snapshot_io_event");
+        route_event.action = PCIE_TL_ROUTE_FORWARD;
+        route_event.set_snapshots(io_source, io_source);
+        if (!$cast(io_ingress, route_event.ingress_tlp) ||
+            !$cast(io_egress, route_event.egress_tlp))
+            $fatal(1, "IO route snapshot dynamic type changed");
+        io_fields_ok =
+            (io_ingress.addr == 32'hcafe_ba80) &&
+            (io_egress.addr == 32'hcafe_ba80) &&
+            (io_ingress.first_be == 4'hd) &&
+            (io_egress.first_be == 4'hd);
+        clone_ok &= (io_ingress != io_source) &&
+                    (io_egress != io_source) &&
+                    (io_ingress != io_egress);
+        io_source.addr = 32'h0;
+        io_source.first_be = 4'h0;
+        clone_ok &= (io_ingress.addr == 32'hcafe_ba80) &&
+                    (io_egress.addr == 32'hcafe_ba80) &&
+                    (io_ingress.first_be == 4'hd) &&
+                    (io_egress.first_be == 4'hd);
+
+        msg_source = pcie_tl_msg_tlp::type_id::create("snapshot_msg_source");
+        msg_source.kind = TLP_MSG;
+        msg_source.fmt = FMT_4DW_NO_DATA;
+        msg_source.type_f = TLP_TYPE_MSG_ID;
+        msg_source.msg_code = MSG_ERR_FATAL;
+        msg_source.msg_addr = 64'h1234_5678_9abc_def0;
+        msg_source.target_id = 16'ha5c3;
+        route_event = new("snapshot_msg_event");
+        route_event.action = PCIE_TL_ROUTE_FORWARD;
+        route_event.set_snapshots(msg_source, msg_source);
+        if (!$cast(msg_ingress, route_event.ingress_tlp) ||
+            !$cast(msg_egress, route_event.egress_tlp))
+            $fatal(1, "Message route snapshot dynamic type changed");
+        msg_fields_ok =
+            (msg_ingress.msg_code == MSG_ERR_FATAL) &&
+            (msg_egress.msg_code == MSG_ERR_FATAL) &&
+            (msg_ingress.msg_addr == 64'h1234_5678_9abc_def0) &&
+            (msg_egress.msg_addr == 64'h1234_5678_9abc_def0) &&
+            (msg_ingress.target_id == 16'ha5c3) &&
+            (msg_egress.target_id == 16'ha5c3);
+        clone_ok &= (msg_ingress != msg_source) &&
+                    (msg_egress != msg_source) &&
+                    (msg_ingress != msg_egress);
+        msg_source.msg_code = MSG_UNLOCK;
+        msg_source.msg_addr = 64'h0;
+        msg_source.target_id = 16'h0;
+        clone_ok &=
+            (msg_ingress.msg_code == MSG_ERR_FATAL) &&
+            (msg_egress.msg_code == MSG_ERR_FATAL) &&
+            (msg_ingress.msg_addr == 64'h1234_5678_9abc_def0) &&
+            (msg_egress.msg_addr == 64'h1234_5678_9abc_def0) &&
+            (msg_ingress.target_id == 16'ha5c3) &&
+            (msg_egress.target_id == 16'ha5c3);
+
+        vendor_source = pcie_tl_vendor_tlp::type_id::create(
+            "snapshot_vendor_source");
+        vendor_source.kind = TLP_VENDOR_MSGD;
+        vendor_source.fmt = FMT_4DW_WITH_DATA;
+        vendor_source.type_f = TLP_TYPE_VENDOR_MSG;
+        vendor_source.vendor_id = 16'h1af4;
+        vendor_source.vendor_data = new[3];
+        vendor_source.vendor_data[0] = 8'h12;
+        vendor_source.vendor_data[1] = 8'h34;
+        vendor_source.vendor_data[2] = 8'h56;
+        route_event = new("snapshot_vendor_event");
+        route_event.action = PCIE_TL_ROUTE_FORWARD;
+        route_event.set_snapshots(vendor_source, vendor_source);
+        if (!$cast(vendor_ingress, route_event.ingress_tlp) ||
+            !$cast(vendor_egress, route_event.egress_tlp))
+            $fatal(1, "Vendor route snapshot dynamic type changed");
+        vendor_fields_ok =
+            (vendor_ingress.vendor_id == 16'h1af4) &&
+            (vendor_egress.vendor_id == 16'h1af4) &&
+            (vendor_ingress.vendor_data.size() == 3) &&
+            (vendor_egress.vendor_data.size() == 3) &&
+            (vendor_ingress.vendor_data[0] == 8'h12) &&
+            (vendor_ingress.vendor_data[1] == 8'h34) &&
+            (vendor_ingress.vendor_data[2] == 8'h56) &&
+            (vendor_egress.vendor_data[0] == 8'h12) &&
+            (vendor_egress.vendor_data[1] == 8'h34) &&
+            (vendor_egress.vendor_data[2] == 8'h56);
+        clone_ok &= (vendor_ingress != vendor_source) &&
+                    (vendor_egress != vendor_source) &&
+                    (vendor_ingress != vendor_egress);
+        vendor_source.vendor_id = 16'h0;
+        vendor_source.vendor_data[0] = 8'hff;
+        vendor_source.vendor_data = new[1];
+        vendor_source.vendor_data[0] = 8'hee;
+        clone_ok &=
+            (vendor_ingress.vendor_id == 16'h1af4) &&
+            (vendor_egress.vendor_id == 16'h1af4) &&
+            (vendor_ingress.vendor_data.size() == 3) &&
+            (vendor_egress.vendor_data.size() == 3) &&
+            (vendor_ingress.vendor_data[0] == 8'h12) &&
+            (vendor_ingress.vendor_data[1] == 8'h34) &&
+            (vendor_ingress.vendor_data[2] == 8'h56) &&
+            (vendor_egress.vendor_data[0] == 8'h12) &&
+            (vendor_egress.vendor_data[1] == 8'h34) &&
+            (vendor_egress.vendor_data[2] == 8'h56);
+
+        ltr_source = pcie_tl_ltr_tlp::type_id::create("snapshot_ltr_source");
+        ltr_source.kind = TLP_LTR;
+        ltr_source.fmt = FMT_4DW_WITH_DATA;
+        ltr_source.type_f = TLP_TYPE_MSG_RC;
+        ltr_source.length = 1;
+        ltr_source.snoop_latency_value = 10'h2a5;
+        ltr_source.snoop_latency_scale = 3'h5;
+        ltr_source.snoop_requirement = 1'b1;
+        ltr_source.no_snoop_latency_value = 10'h15a;
+        ltr_source.no_snoop_latency_scale = 3'h3;
+        ltr_source.no_snoop_requirement = 1'b1;
+        route_event = new("snapshot_ltr_event");
+        route_event.action = PCIE_TL_ROUTE_FORWARD;
+        route_event.set_snapshots(ltr_source, ltr_source);
+        if (!$cast(ltr_ingress, route_event.ingress_tlp) ||
+            !$cast(ltr_egress, route_event.egress_tlp))
+            $fatal(1, "LTR route snapshot dynamic type changed");
+        ltr_fields_ok =
+            (ltr_ingress.snoop_latency_value == 10'h2a5) &&
+            (ltr_egress.snoop_latency_value == 10'h2a5) &&
+            (ltr_ingress.snoop_latency_scale == 3'h5) &&
+            (ltr_egress.snoop_latency_scale == 3'h5) &&
+            (ltr_ingress.snoop_requirement == 1'b1) &&
+            (ltr_egress.snoop_requirement == 1'b1) &&
+            (ltr_ingress.no_snoop_latency_value == 10'h15a) &&
+            (ltr_egress.no_snoop_latency_value == 10'h15a) &&
+            (ltr_ingress.no_snoop_latency_scale == 3'h3) &&
+            (ltr_egress.no_snoop_latency_scale == 3'h3) &&
+            (ltr_ingress.no_snoop_requirement == 1'b1) &&
+            (ltr_egress.no_snoop_requirement == 1'b1);
+        clone_ok &= (ltr_ingress != ltr_source) &&
+                    (ltr_egress != ltr_source) &&
+                    (ltr_ingress != ltr_egress);
+        ltr_source.snoop_latency_value = 10'h0;
+        ltr_source.snoop_latency_scale = 3'h0;
+        ltr_source.snoop_requirement = 1'b0;
+        ltr_source.no_snoop_latency_value = 10'h0;
+        ltr_source.no_snoop_latency_scale = 3'h0;
+        ltr_source.no_snoop_requirement = 1'b0;
+        clone_ok &=
+            (ltr_ingress.snoop_latency_value == 10'h2a5) &&
+            (ltr_egress.snoop_latency_value == 10'h2a5) &&
+            (ltr_ingress.snoop_latency_scale == 3'h5) &&
+            (ltr_egress.snoop_latency_scale == 3'h5) &&
+            (ltr_ingress.snoop_requirement == 1'b1) &&
+            (ltr_egress.snoop_requirement == 1'b1) &&
+            (ltr_ingress.no_snoop_latency_value == 10'h15a) &&
+            (ltr_egress.no_snoop_latency_value == 10'h15a) &&
+            (ltr_ingress.no_snoop_latency_scale == 3'h3) &&
+            (ltr_egress.no_snoop_latency_scale == 3'h3) &&
+            (ltr_ingress.no_snoop_requirement == 1'b1) &&
+            (ltr_egress.no_snoop_requirement == 1'b1);
+
+        if (!io_fields_ok || !msg_fields_ok || !vendor_fields_ok ||
+            !ltr_fields_ok || !clone_ok)
+            $fatal(1,
+                   "route snapshot subtype fields lost io=%0b msg=%0b vendor=%0b ltr=%0b clone=%0b",
+                   io_fields_ok, msg_fields_ok, vendor_fields_ok,
+                   ltr_fields_ok, clone_ok);
+
+        $display("SWITCH_ROUTE_SNAPSHOT_SUBTYPES_PASS io=1 msg=1 vendor=1 ltr=1 clone=1");
+    endtask
+
     task automatic run_positive_tests();
         pcie_tl_mem_tlp route_req;
         pcie_tl_mem_tlp nonpref_req;
@@ -506,6 +699,7 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         int bcast_event_index;
 
         run_type1_config_tests();
+        check_route_snapshot_subtypes();
         check_length_zero_mrd_route();
         check_unaligned_split_completion();
 

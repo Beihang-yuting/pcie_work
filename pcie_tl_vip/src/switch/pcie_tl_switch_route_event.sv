@@ -52,6 +52,14 @@ class pcie_tl_switch_route_event extends uvm_object;
         pcie_tl_tlp result;
         pcie_tl_cfg_tlp source_cfg;
         pcie_tl_cfg_tlp result_cfg;
+        pcie_tl_io_tlp source_io;
+        pcie_tl_io_tlp result_io;
+        pcie_tl_msg_tlp source_msg;
+        pcie_tl_msg_tlp result_msg;
+        pcie_tl_vendor_tlp source_vendor;
+        pcie_tl_vendor_tlp result_vendor;
+        pcie_tl_ltr_tlp source_ltr;
+        pcie_tl_ltr_tlp result_ltr;
         pcie_tl_prefix prefix;
 
         if ((source == null) || !$cast(result, source.clone()) ||
@@ -82,6 +90,53 @@ class pcie_tl_switch_route_event extends uvm_object;
             result_cfg.completer_id = source_cfg.completer_id;
             result_cfg.reg_num = source_cfg.reg_num;
             result_cfg.first_be = source_cfg.first_be;
+        end
+        if ($cast(source_io, source)) begin
+            if (!$cast(result_io, result)) begin
+                `uvm_fatal("SWITCH_ROUTE_EVENT_CLONE",
+                           {label, ": IO clone type changed"})
+                return null;
+            end
+            result_io.addr = source_io.addr;
+            result_io.first_be = source_io.first_be;
+        end
+        if ($cast(source_msg, source)) begin
+            if (!$cast(result_msg, result)) begin
+                `uvm_fatal("SWITCH_ROUTE_EVENT_CLONE",
+                           {label, ": Message clone type changed"})
+                return null;
+            end
+            result_msg.msg_code = source_msg.msg_code;
+            result_msg.msg_addr = source_msg.msg_addr;
+            result_msg.target_id = source_msg.target_id;
+        end
+        if ($cast(source_vendor, source)) begin
+            if (!$cast(result_vendor, result)) begin
+                `uvm_fatal("SWITCH_ROUTE_EVENT_CLONE",
+                           {label, ": Vendor clone type changed"})
+                return null;
+            end
+            result_vendor.vendor_id = source_vendor.vendor_id;
+            result_vendor.vendor_data =
+                new[source_vendor.vendor_data.size()](source_vendor.vendor_data);
+        end
+        if ($cast(source_ltr, source)) begin
+            if (!$cast(result_ltr, result)) begin
+                `uvm_fatal("SWITCH_ROUTE_EVENT_CLONE",
+                           {label, ": LTR clone type changed"})
+                return null;
+            end
+            result_ltr.snoop_latency_value =
+                source_ltr.snoop_latency_value;
+            result_ltr.snoop_latency_scale =
+                source_ltr.snoop_latency_scale;
+            result_ltr.snoop_requirement = source_ltr.snoop_requirement;
+            result_ltr.no_snoop_latency_value =
+                source_ltr.no_snoop_latency_value;
+            result_ltr.no_snoop_latency_scale =
+                source_ltr.no_snoop_latency_scale;
+            result_ltr.no_snoop_requirement =
+                source_ltr.no_snoop_requirement;
         end
         return result;
     endfunction
