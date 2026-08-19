@@ -2,6 +2,10 @@
 // PCIe Transaction Layer VIP - Switch Top-Level
 //-----------------------------------------------------------------------------
 
+// The full pcie_tl_pkg includes this class directly, while the lightweight
+// switch package includes the route-event type earlier in its package body.
+`include "switch/pcie_tl_switch_route_event.sv"
+
 class pcie_tl_switch extends uvm_component;
     `uvm_component_utils(pcie_tl_switch)
 
@@ -23,6 +27,10 @@ class pcie_tl_switch extends uvm_component;
     int local_bdf_to_port[bit [15:0]];
     int outstanding_ingress[switch_np_key_t];
 
+    //--- Route observation ---
+    uvm_analysis_port #(pcie_tl_switch_route_event) route_observed_port;
+    longint unsigned next_route_event_id;
+
     //--- Statistics ---
     int total_routed   = 0;
     int total_dropped  = 0;
@@ -31,6 +39,27 @@ class pcie_tl_switch extends uvm_component;
 
     function new(string name = "pcie_tl_switch", uvm_component parent = null);
         super.new(name, parent);
+        route_observed_port = new("route_observed_port", this);
+        next_route_event_id = 0;
+    endfunction
+
+    protected function void publish_route_event(
+        pcie_tl_switch_route_action_e action,
+        int ingress_port, int egress_port, int route_code,
+        pcie_tl_tlp ingress_tlp, pcie_tl_tlp egress_tlp);
+        pcie_tl_switch_route_event route_event;
+
+        route_event = pcie_tl_switch_route_event::type_id::create(
+            $sformatf("route_event_%0d", next_route_event_id));
+        if (route_event == null)
+            `uvm_fatal("SWITCH_ROUTE_EVENT_CREATE", "event creation failed")
+        route_event.event_id = next_route_event_id++;
+        route_event.action = action;
+        route_event.ingress_port = ingress_port;
+        route_event.egress_port = egress_port;
+        route_event.route_code = route_code;
+        route_event.set_snapshots(ingress_tlp, egress_tlp);
+        route_observed_port.write(route_event);
     endfunction
 
     function int unsigned outstanding_count();
@@ -228,12 +257,18 @@ class pcie_tl_switch extends uvm_component;
             SWITCH_ROUTE_DROP: begin
                 total_dropped++;
                 all_ports[ingress_port_id].dropped_count++;
+                publish_route_event(PCIE_TL_ROUTE_DROP,
+                                    ingress_port_id, SWITCH_ROUTE_DROP, dst,
+                                    tlp, null);
                 `uvm_info("SWITCH", $sformatf("DROPPED from port %0d: %s",
                     ingress_port_id, tlp.convert2string()), UVM_MEDIUM)
             end
             SWITCH_ROUTE_CROSS_ROOT: begin
                 total_dropped++;
                 fabric.cross_root_violations++;
+                publish_route_event(PCIE_TL_ROUTE_DROP,
+                                    ingress_port_id, SWITCH_ROUTE_DROP, dst,
+                                    tlp, null);
                 if (sw_cfg.cross_root_check_enable)
                     `uvm_error("CROSS_ROOT", $sformatf("跨根丢弃 from port %0d: %s",
                         ingress_port_id, tlp.convert2string()))
@@ -244,6 +279,9 @@ class pcie_tl_switch extends uvm_component;
             SWITCH_ROUTE_BCAST: begin
                 int ir = fabric.root_of(ingress_port_id);
                 total_bcast++;
+                publish_route_event(PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST,
+                                    ingress_port_id, SWITCH_ROUTE_BCAST,
+                                    SWITCH_ROUTE_BCAST, tlp, tlp);
                 for (int i = sw_cfg.num_usp; i < all_ports.size(); i++) begin
                     if (i != ingress_port_id && all_ports[i].owner_usp == ir) begin
                         all_ports[i].tx_fifo.put(tlp);
@@ -295,6 +333,9 @@ class pcie_tl_switch extends uvm_component;
                         outstanding_ingress[key] = ingress_port_id;
                     end
 
+                    publish_route_event(PCIE_TL_ROUTE_FORWARD,
+                                        ingress_port_id, dst, dst,
+                                        tlp, forwarded_tlp);
                     all_ports[dst].tx_fifo.put(forwarded_tlp);
                     all_ports[dst].forwarded_count++;
                     total_routed++;
@@ -302,6 +343,9 @@ class pcie_tl_switch extends uvm_component;
                         total_p2p++;  // DSP→DSP (num_usp==1: ingress>0 && dst>0)
                 end else begin
                     total_dropped++;
+                    publish_route_event(PCIE_TL_ROUTE_DROP,
+                                        ingress_port_id, SWITCH_ROUTE_DROP,
+                                        dst, tlp, null);
                     `uvm_warning("SWITCH", $sformatf("Bad route dst=%0d from port %0d",
                         dst, ingress_port_id))
                 end
@@ -341,6 +385,9 @@ class pcie_tl_switch extends uvm_component;
                 cpl.payload[1]   = data[15:8];
                 cpl.payload[2]   = data[23:16];
                 cpl.payload[3]   = data[31:24];
+                publish_route_event(PCIE_TL_ROUTE_LOCAL_RESPONSE,
+                                    ingress_port_id, ingress_port_id,
+                                    SWITCH_ROUTE_LOCAL, tlp, cpl);
                 all_ports[ingress_port_id].tx_fifo.put(cpl);
             end else begin
                 bit [31:0] data = 0;
@@ -360,6 +407,9 @@ class pcie_tl_switch extends uvm_component;
                 cpl.cpl_status   = CPL_STATUS_SC;
                 cpl.byte_count   = 0;
                 cpl.lower_addr   = 0;
+                publish_route_event(PCIE_TL_ROUTE_LOCAL_RESPONSE,
+                                    ingress_port_id, ingress_port_id,
+                                    SWITCH_ROUTE_LOCAL, tlp, cpl);
                 all_ports[ingress_port_id].tx_fifo.put(cpl);
             end
         end

@@ -1,6 +1,45 @@
 import uvm_pkg::*;
 import pcie_tl_switch_pkg::*;
 
+class pcie_tl_route_event_collector extends uvm_component;
+    `uvm_component_utils(pcie_tl_route_event_collector)
+
+    uvm_analysis_imp #(pcie_tl_switch_route_event,
+                       pcie_tl_route_event_collector) analysis_export;
+    pcie_tl_switch source_switch;
+    pcie_tl_switch_route_event events[$];
+
+    function new(string name = "pcie_tl_route_event_collector",
+                 uvm_component parent = null);
+        super.new(name, parent);
+        analysis_export = new("analysis_export", this);
+    endfunction
+
+    function void write(pcie_tl_switch_route_event route_event);
+        if (route_event == null)
+            `uvm_fatal("ROUTE_EVENT_TEST", "collector received null event")
+        if (route_event.action == PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST) begin
+            int ingress_root;
+            ingress_root = source_switch.fabric.root_of(
+                route_event.ingress_port);
+            for (int i = source_switch.sw_cfg.num_usp;
+                 i < source_switch.all_ports.size(); i++) begin
+                if ((i != route_event.ingress_port) &&
+                    (source_switch.all_ports[i].owner_usp == ingress_root) &&
+                    (source_switch.all_ports[i].tx_fifo.used() != 0))
+                    `uvm_fatal("ROUTE_EVENT_ORDER",
+                               "broadcast event was not published before fan-out")
+            end
+        end
+        if ((route_event.action inside {PCIE_TL_ROUTE_FORWARD,
+                                        PCIE_TL_ROUTE_LOCAL_RESPONSE}) &&
+            (source_switch.all_ports[route_event.egress_port].tx_fifo.used() != 0))
+            `uvm_fatal("ROUTE_EVENT_ORDER",
+                       "event was not published before egress FIFO put")
+        events.push_back(route_event);
+    endfunction
+endclass
+
 class pcie_tl_switch_proxy_unit_test extends uvm_test;
     `uvm_component_utils(pcie_tl_switch_proxy_unit_test)
 
@@ -12,6 +51,7 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
     pcie_tl_switch        custom_bdf_sw;
     pcie_tl_switch_port   unit_usp;
     pcie_tl_switch_port   unit_dsp;
+    pcie_tl_route_event_collector route_collector;
 
     function new(string name = "pcie_tl_switch_proxy_unit_test",
                  uvm_component parent = null);
@@ -45,6 +85,15 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
 
         unit_usp = new("unit_usp", this);
         unit_dsp = new("unit_dsp", this);
+
+        route_collector = pcie_tl_route_event_collector::type_id::create(
+            "route_collector", this);
+        route_collector.source_switch = sw;
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        super.connect_phase(phase);
+        sw.route_observed_port.connect(route_collector.analysis_export);
     endfunction
 
     function void pre_abort();
@@ -154,6 +203,8 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         pcie_tl_cpl_tlp cpl;
         pcie_tl_tlp forwarded;
         pcie_tl_tlp returned;
+        pcie_tl_switch_route_event route_event;
+        int event_index;
 
         req = pcie_tl_mem_tlp::type_id::create("length_zero_mrd");
         req.kind         = TLP_MEM_RD;
@@ -167,11 +218,24 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         req.first_be     = 4'hf;
         req.last_be      = 4'hf;
 
+        event_index = route_collector.events.size();
         sw.usp.rx_fifo.put(req);
         get_tlp_with_timeout(sw.dsp[0].tx_fifo, forwarded,
                              "4096-byte Memory Read forwarding");
         if (forwarded != req)
             $fatal(1, "4096-byte Memory Read was not forwarded unchanged");
+        if (route_collector.events.size() <= event_index)
+            $fatal(1, "ordinary forward route event was not observed");
+        route_event = route_collector.events[event_index];
+        if ((route_event.action != PCIE_TL_ROUTE_FORWARD) ||
+            (route_event.ingress_port != 0) ||
+            (route_event.egress_port != 1) ||
+            (route_event.route_code != 1) ||
+            (route_event.ingress_tlp.kind != TLP_MEM_RD) ||
+            (route_event.egress_tlp.kind != TLP_MEM_RD) ||
+            (route_event.ingress_tlp == req) ||
+            (route_event.egress_tlp == forwarded))
+            $fatal(1, "ordinary forward route event contract failed");
         check_route(sw.outstanding_count(), 1,
                     "4096-byte Memory Read outstanding");
 
@@ -396,8 +460,12 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         pcie_tl_cfg_tlp unknown_cfg_req;
         pcie_tl_cfg_tlp cfg_req;
         pcie_tl_cfg_tlp routed_cfg;
+        pcie_tl_cfg_tlp event_ingress_cfg;
+        pcie_tl_cfg_tlp event_egress_cfg;
         pcie_tl_cpl_tlp cpl;
         pcie_tl_cpl_tlp local_cpl;
+        pcie_tl_cpl_tlp event_ingress_cpl;
+        pcie_tl_cpl_tlp event_egress_cpl;
         pcie_tl_tlp     forwarded;
         pcie_tl_tlp     returned_cpl;
         pcie_tl_tlp     local_response;
@@ -407,7 +475,9 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         pcie_tl_cfg_tlp mr_down_forwarded;
         pcie_tl_cfg_tlp mr_cross_req;
         pcie_tl_cfg_tlp cfg_wr_req;
+        pcie_tl_cfg_tlp local_cfg_wr_req;
         pcie_tl_cfg_tlp routed_cfg_wr;
+        pcie_tl_msg_tlp bcast_req;
         pcie_tl_cpl_tlp mr_cpl;
         pcie_tl_cpl_tlp wr_cpl;
         pcie_tl_mem_tlp split_req;
@@ -415,6 +485,7 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         pcie_tl_tlp     mr_forwarded;
         pcie_tl_tlp     mr_returned;
         pcie_tl_tlp     cfg_wr_forwarded;
+        pcie_tl_tlp     bcast_forwarded;
         pcie_tl_tlp     wr_returned;
         pcie_tl_tlp     split_forwarded;
         pcie_tl_tlp     split_returned;
@@ -422,6 +493,17 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         bit [31:0] saved_mem_limit;
         bit [63:0] saved_pref_base;
         bit [63:0] saved_pref_limit;
+        pcie_tl_switch_route_event route_event;
+        pcie_tl_switch_route_event cfg_route_event;
+        pcie_tl_switch_route_event cfg_wr_route_event;
+        pcie_tl_switch_route_event bcast_route_event;
+        int local_read_event_index;
+        int local_write_event_index;
+        int drop_event_index;
+        int cfg_event_index;
+        int completion_event_index;
+        int cfg_wr_event_index;
+        int bcast_event_index;
 
         run_type1_config_tests();
         check_length_zero_mrd_route();
@@ -558,6 +640,7 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         exact_cfg_req.completer_id = 16'h0208;
         exact_cfg_req.reg_num      = 10'h000;
         exact_cfg_req.first_be     = 4'hf;
+        local_read_event_index = route_collector.events.size();
         sw.usp.rx_fifo.put(exact_cfg_req);
         get_tlp_with_timeout(sw.usp.tx_fifo, local_response,
                              "exact DSP1 BDF local response");
@@ -566,6 +649,50 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         local_data = {local_cpl.payload[3], local_cpl.payload[2],
                       local_cpl.payload[1], local_cpl.payload[0]};
         check_eq(local_data, 32'h5021_20f9, "exact DSP1 BDF vendor/device");
+        if (route_collector.events.size() <= local_read_event_index)
+            $fatal(1, "local Configuration Read route event was not observed");
+        route_event = route_collector.events[local_read_event_index];
+        if ((route_event.action != PCIE_TL_ROUTE_LOCAL_RESPONSE) ||
+            (route_event.ingress_port != 0) ||
+            (route_event.egress_port != 0) ||
+            (route_event.route_code != SWITCH_ROUTE_LOCAL) ||
+            (route_event.ingress_tlp.kind != TLP_CFG_RD1) ||
+            (route_event.egress_tlp.kind != TLP_CPLD))
+            $fatal(1, "local Configuration Read route event contract failed");
+
+        local_cfg_wr_req = pcie_tl_cfg_tlp::type_id::create(
+            "local_cfg_wr_req");
+        local_cfg_wr_req.kind         = TLP_CFG_WR1;
+        local_cfg_wr_req.fmt          = FMT_3DW_WITH_DATA;
+        local_cfg_wr_req.type_f       = TLP_TYPE_CFG_WR1;
+        local_cfg_wr_req.length       = 1;
+        local_cfg_wr_req.requester_id = 16'h0000;
+        local_cfg_wr_req.tag          = 10'h142;
+        local_cfg_wr_req.completer_id = 16'h0208;
+        local_cfg_wr_req.reg_num      = 10'h001;
+        local_cfg_wr_req.first_be     = 4'b0011;
+        local_cfg_wr_req.payload      = new[4];
+        local_cfg_wr_req.payload[0]   = 8'h02;
+        local_cfg_wr_req.payload[1]   = 8'h00;
+        local_cfg_wr_req.payload[2]   = 8'h00;
+        local_cfg_wr_req.payload[3]   = 8'h00;
+        local_write_event_index = route_collector.events.size();
+        sw.usp.rx_fifo.put(local_cfg_wr_req);
+        get_tlp_with_timeout(sw.usp.tx_fifo, local_response,
+                             "exact DSP1 BDF local write response");
+        if (!$cast(local_cpl, local_response) ||
+            local_cpl.kind != TLP_CPL)
+            $fatal(1, "Exact DSP1 BDF local write did not return Completion");
+        if (route_collector.events.size() <= local_write_event_index)
+            $fatal(1, "local Configuration Write route event was not observed");
+        route_event = route_collector.events[local_write_event_index];
+        if ((route_event.action != PCIE_TL_ROUTE_LOCAL_RESPONSE) ||
+            (route_event.ingress_port != 0) ||
+            (route_event.egress_port != 0) ||
+            (route_event.route_code != SWITCH_ROUTE_LOCAL) ||
+            (route_event.ingress_tlp.kind != TLP_CFG_WR1) ||
+            (route_event.egress_tlp.kind != TLP_CPL))
+            $fatal(1, "local Configuration Write route event contract failed");
 
         unknown_cfg_req = pcie_tl_cfg_tlp::type_id::create("unknown_cfg_req");
         unknown_cfg_req.kind         = TLP_CFG_RD1;
@@ -577,8 +704,76 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         unknown_cfg_req.completer_id = 16'h0108;
         unknown_cfg_req.reg_num      = 10'h000;
         unknown_cfg_req.first_be     = 4'hf;
+        drop_event_index = route_collector.events.size();
         sw.usp.rx_fifo.put(unknown_cfg_req);
         expect_no_tlp(sw.usp.tx_fifo, "unknown exact BDF response");
+        if (route_collector.events.size() <= drop_event_index)
+            $fatal(1, "drop route event was not observed");
+        route_event = route_collector.events[drop_event_index];
+        if ((route_event.action != PCIE_TL_ROUTE_DROP) ||
+            (route_event.ingress_port != 0) ||
+            (route_event.egress_port != SWITCH_ROUTE_DROP) ||
+            (route_event.route_code != SWITCH_ROUTE_DROP) ||
+            (route_event.ingress_tlp.kind != TLP_CFG_RD1) ||
+            (route_event.egress_tlp != null))
+            $fatal(1, "drop route event contract failed");
+
+        bcast_req = pcie_tl_msg_tlp::type_id::create("bcast_req");
+        bcast_req.kind         = TLP_MSG;
+        bcast_req.fmt          = FMT_4DW_NO_DATA;
+        bcast_req.type_f       = TLP_TYPE_MSG_BCAST;
+        bcast_req.tc           = 3'h4;
+        bcast_req.at           = 2'b10;
+        bcast_req.length       = 0;
+        bcast_req.requester_id = 16'h0000;
+        bcast_req.tag          = 10'h143;
+        bcast_req.prefixes.push_back(
+            pcie_tl_prefix::create_pasid(20'h54321, 1'b0, 1'b1));
+        bcast_req.has_prefix = 1'b1;
+        bcast_event_index = route_collector.events.size();
+        sw.usp.rx_fifo.put(bcast_req);
+        foreach (sw.dsp[i]) begin
+            get_tlp_with_timeout(sw.dsp[i].tx_fifo, bcast_forwarded,
+                                 $sformatf("broadcast forwarding to DSP%0d", i));
+            if (bcast_forwarded != bcast_req)
+                $fatal(1, "broadcast forwarding to DSP%0d changed the TLP", i);
+        end
+        if (route_collector.events.size() != (bcast_event_index + 1))
+            $fatal(1, "broadcast expected exactly one route event, got %0d",
+                   route_collector.events.size() - bcast_event_index);
+        bcast_route_event = route_collector.events[bcast_event_index];
+        if ((bcast_route_event.action !=
+             PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST) ||
+            (bcast_route_event.ingress_port != 0) ||
+            (bcast_route_event.egress_port != SWITCH_ROUTE_BCAST) ||
+            (bcast_route_event.route_code != SWITCH_ROUTE_BCAST) ||
+            (bcast_route_event.ingress_tlp == null) ||
+            (bcast_route_event.egress_tlp == null) ||
+            (bcast_route_event.ingress_tlp == bcast_req) ||
+            (bcast_route_event.egress_tlp == bcast_req) ||
+            (bcast_route_event.ingress_tlp == bcast_route_event.egress_tlp) ||
+            (bcast_route_event.ingress_tlp.kind != TLP_MSG) ||
+            (bcast_route_event.egress_tlp.kind != TLP_MSG) ||
+            (bcast_route_event.ingress_tlp.at != 2'b10) ||
+            (bcast_route_event.egress_tlp.at != 2'b10) ||
+            (bcast_route_event.ingress_tlp.prefixes.size() != 1) ||
+            (bcast_route_event.egress_tlp.prefixes.size() != 1) ||
+            (bcast_route_event.ingress_tlp.prefixes[0] ==
+             bcast_req.prefixes[0]) ||
+            (bcast_route_event.egress_tlp.prefixes[0] ==
+             bcast_req.prefixes[0]) ||
+            (bcast_route_event.ingress_tlp.prefixes[0] ==
+             bcast_route_event.egress_tlp.prefixes[0]))
+            $fatal(1, "broadcast route event contract failed");
+        bcast_req.at = 2'b00;
+        bcast_req.prefixes[0].raw_dw = 32'h9100_0000;
+        if ((bcast_route_event.ingress_tlp.at != 2'b10) ||
+            (bcast_route_event.egress_tlp.at != 2'b10) ||
+            (bcast_route_event.ingress_tlp.prefixes[0].raw_dw !=
+             32'h9145_4321) ||
+            (bcast_route_event.egress_tlp.prefixes[0].raw_dw !=
+             32'h9145_4321))
+            $fatal(1, "broadcast snapshots changed with original request");
 
         route_req = pcie_tl_mem_tlp::type_id::create("route_req");
         route_req.kind         = TLP_MEM_RD;
@@ -643,7 +838,11 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         cfg_req.cq_route.valid      = 1'b1;
         cfg_req.cq_route.target_bdf = 16'h02f8;
         cfg_req.cq_route.target_func = 8'h3c;
+        cfg_req.prefixes.push_back(
+            pcie_tl_prefix::create_pasid(20'h12345, 1'b1, 1'b0));
+        cfg_req.has_prefix = 1'b1;
 
+        cfg_event_index = route_collector.events.size();
         sw.usp.rx_fifo.put(cfg_req);
         get_tlp_with_timeout(sw.dsp[0].tx_fifo, forwarded,
                              "Type-1 Configuration Read forwarding");
@@ -679,6 +878,32 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         if ((cfg_req.kind != TLP_CFG_RD1) ||
             (cfg_req.type_f != TLP_TYPE_CFG_RD1))
             $fatal(1, "Source Type-1 Configuration Request was mutated");
+        if (route_collector.events.size() <= cfg_event_index)
+            $fatal(1, "Cfg1-to-Cfg0 route event was not observed");
+        cfg_route_event = route_collector.events[cfg_event_index];
+        if ((cfg_route_event.action != PCIE_TL_ROUTE_FORWARD) ||
+            (cfg_route_event.ingress_port != 0) ||
+            (cfg_route_event.egress_port != 1) ||
+            (cfg_route_event.route_code != 1) ||
+            (cfg_route_event.ingress_tlp.kind != TLP_CFG_RD1) ||
+            (cfg_route_event.egress_tlp.kind != TLP_CFG_RD0) ||
+            !$cast(event_ingress_cfg, cfg_route_event.ingress_tlp) ||
+            !$cast(event_egress_cfg, cfg_route_event.egress_tlp) ||
+            (event_ingress_cfg.at != 2'b10) ||
+            (event_egress_cfg.at != 2'b10) ||
+            (event_ingress_cfg.completer_id != 16'h02f8) ||
+            (event_egress_cfg.completer_id != 16'h02f8) ||
+            (event_ingress_cfg.reg_num != 10'h2a5) ||
+            (event_egress_cfg.reg_num != 10'h2a5) ||
+            (event_ingress_cfg.first_be != 4'ha) ||
+            (event_egress_cfg.first_be != 4'ha) ||
+            (event_ingress_cfg.prefixes.size() != 1) ||
+            (event_egress_cfg.prefixes.size() != 1) ||
+            (event_ingress_cfg.prefixes[0].raw_dw !=
+             cfg_req.prefixes[0].raw_dw) ||
+            (event_egress_cfg.prefixes[0].raw_dw !=
+             cfg_req.prefixes[0].raw_dw))
+            $fatal(1, "Cfg1-to-Cfg0 route event contract failed");
         check_route(sw.outstanding_count(), 1,
                     "one outstanding non-posted request");
 
@@ -690,12 +915,47 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         cpl.tag          = 10'h155;
         cpl.completer_id = 16'h02f8;
         cpl.cpl_status   = CPL_STATUS_SC;
+        cpl.tc           = 3'h6;
+        cpl.attr         = 3'b011;
+        cpl.at           = 2'b01;
+        cpl.bcm          = 1'b1;
+        cpl.byte_count   = 12'h321;
+        cpl.lower_addr   = 7'h45;
 
+        completion_event_index = route_collector.events.size();
         sw.dsp[0].rx_fifo.put(cpl);
         get_tlp_with_timeout(sw.usp.tx_fifo, returned_cpl,
                              "Completion return to USP");
         if (returned_cpl != cpl)
             $fatal(1, "Completion did not return unchanged to the USP");
+        if (route_collector.events.size() <= completion_event_index)
+            $fatal(1, "Completion route event was not observed");
+        route_event = route_collector.events[completion_event_index];
+        if ((route_event.action != PCIE_TL_ROUTE_FORWARD) ||
+            (route_event.ingress_port != 1) ||
+            (route_event.egress_port != 0) ||
+            (route_event.route_code != 0) ||
+            !$cast(event_ingress_cpl, route_event.ingress_tlp) ||
+            !$cast(event_egress_cpl, route_event.egress_tlp) ||
+            (event_ingress_cpl.kind != cpl.kind) ||
+            (event_egress_cpl.kind != cpl.kind) ||
+            (event_ingress_cpl.requester_id != cpl.requester_id) ||
+            (event_egress_cpl.requester_id != cpl.requester_id) ||
+            (event_ingress_cpl.tag != cpl.tag) ||
+            (event_egress_cpl.tag != cpl.tag) ||
+            (event_ingress_cpl.completer_id != cpl.completer_id) ||
+            (event_egress_cpl.completer_id != cpl.completer_id) ||
+            (event_ingress_cpl.cpl_status != cpl.cpl_status) ||
+            (event_egress_cpl.cpl_status != cpl.cpl_status) ||
+            (event_ingress_cpl.at != cpl.at) ||
+            (event_egress_cpl.at != cpl.at) ||
+            (event_ingress_cpl.bcm != cpl.bcm) ||
+            (event_egress_cpl.bcm != cpl.bcm) ||
+            (event_ingress_cpl.byte_count != cpl.byte_count) ||
+            (event_egress_cpl.byte_count != cpl.byte_count) ||
+            (event_ingress_cpl.lower_addr != cpl.lower_addr) ||
+            (event_egress_cpl.lower_addr != cpl.lower_addr))
+            $fatal(1, "Completion route event contract failed");
         check_route(sw.outstanding_count(), 0,
                     "outstanding requests drained by Completion");
 
@@ -717,6 +977,9 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         cfg_wr_req.payload[1]   = 8'h22;
         cfg_wr_req.payload[2]   = 8'h33;
         cfg_wr_req.payload[3]   = 8'h44;
+        cfg_wr_req.prefixes.push_back(pcie_tl_prefix::create_mriov(8'h5a));
+        cfg_wr_req.has_prefix = 1'b1;
+        cfg_wr_event_index = route_collector.events.size();
         sw.usp.rx_fifo.put(cfg_wr_req);
         get_tlp_with_timeout(sw.dsp[0].tx_fifo, cfg_wr_forwarded,
                              "Type-1 Configuration Write forwarding");
@@ -750,6 +1013,48 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
             routed_cfg_wr.length !== cfg_wr_req.length ||
             routed_cfg_wr.completer_id !== cfg_wr_req.completer_id)
             $fatal(1, "Cloned Configuration Write fields were not preserved");
+
+        if (route_collector.events.size() <= cfg_wr_event_index)
+            $fatal(1, "Configuration Write route event was not observed");
+        cfg_wr_route_event = route_collector.events[cfg_wr_event_index];
+        if ((cfg_wr_route_event.action != PCIE_TL_ROUTE_FORWARD) ||
+            (cfg_wr_route_event.ingress_port != 0) ||
+            (cfg_wr_route_event.egress_port != 1) ||
+            (cfg_wr_route_event.route_code != 1) ||
+            !$cast(event_ingress_cfg, cfg_wr_route_event.ingress_tlp) ||
+            !$cast(event_egress_cfg, cfg_wr_route_event.egress_tlp) ||
+            (event_ingress_cfg.kind != TLP_CFG_WR1) ||
+            (event_egress_cfg.kind != TLP_CFG_WR0) ||
+            (event_ingress_cfg.at != 2'b01) ||
+            (event_egress_cfg.at != 2'b01) ||
+            (event_ingress_cfg.reg_num != 10'h033) ||
+            (event_egress_cfg.reg_num != 10'h033) ||
+            (event_ingress_cfg.first_be != 4'hd) ||
+            (event_egress_cfg.first_be != 4'hd) ||
+            (event_ingress_cfg.payload.size() != 4) ||
+            (event_egress_cfg.payload.size() != 4) ||
+            (event_ingress_cfg.prefixes.size() != 1) ||
+            (event_egress_cfg.prefixes.size() != 1) ||
+            (event_ingress_cfg.prefixes[0] == cfg_wr_req.prefixes[0]) ||
+            (event_egress_cfg.prefixes[0] == cfg_wr_req.prefixes[0]))
+            $fatal(1, "Configuration Write route event snapshot failed");
+
+        cfg_wr_req.at = 2'b00;
+        cfg_wr_req.reg_num = 10'h000;
+        cfg_wr_req.first_be = 4'h0;
+        cfg_wr_req.payload[0] = 8'hff;
+        cfg_wr_req.prefixes[0].raw_dw = 32'h8000_0000;
+        if ((event_ingress_cfg.at != 2'b01) ||
+            (event_ingress_cfg.reg_num != 10'h033) ||
+            (event_ingress_cfg.first_be != 4'hd) ||
+            (event_ingress_cfg.payload[0] != 8'h11) ||
+            (event_ingress_cfg.prefixes[0].raw_dw != 32'h8000_5a00) ||
+            (event_egress_cfg.at != 2'b01) ||
+            (event_egress_cfg.reg_num != 10'h033) ||
+            (event_egress_cfg.first_be != 4'hd) ||
+            (event_egress_cfg.payload[0] != 8'h11) ||
+            (event_egress_cfg.prefixes[0].raw_dw != 32'h8000_5a00))
+            $fatal(1, "route event snapshots changed with original request");
 
         wr_cpl = pcie_tl_cpl_tlp::type_id::create("wr_cpl");
         wr_cpl.kind         = TLP_CPL;
@@ -815,6 +1120,21 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
                              "final split Completion return");
         check_route(sw.outstanding_count(), 0,
                     "final split Completion drains route");
+
+        if (route_collector.events.size() == 0)
+            $fatal(1, "no switch route events were observed");
+        foreach (route_collector.events[i]) begin
+            if (route_collector.events[i].event_id != i)
+                $fatal(1, "route event ID expected=%0d actual=%0d", i,
+                       route_collector.events[i].event_id);
+            if (route_collector.events[i].ingress_tlp == null)
+                $fatal(1, "route event %0d has null ingress snapshot", i);
+            if ((route_collector.events[i].action == PCIE_TL_ROUTE_DROP) !=
+                (route_collector.events[i].egress_tlp == null))
+                $fatal(1, "route event %0d egress snapshot contract failed", i);
+        end
+
+        $display("SWITCH_ROUTE_OBSERVER_PASS forward=1 rewrite=1 local_read=1 local_write=1 completion=1 clone=1");
 
         $display("SWITCH_ROUTE_PASS");
     endtask

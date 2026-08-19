@@ -13,6 +13,7 @@ package pcie_tl_switch_pkg;
     `include "types/pcie_tl_types.sv"
     `include "types/pcie_tl_prefix.sv"
     `include "types/pcie_tl_tlp.sv"
+    `include "switch/pcie_tl_switch_route_event.sv"
 
     `include "shared/pcie_tl_fc_manager.sv"
     `include "shared/pcie_tl_link_delay_model.sv"
