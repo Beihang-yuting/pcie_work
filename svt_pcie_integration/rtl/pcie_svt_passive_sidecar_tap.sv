@@ -20,4 +20,22 @@
   `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 2) \
   `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 3)
 
+`define PCIE_SVT_TAP_PASSIVE_SERDES_X16(mon_if, proxy_port) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 0) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 1) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 2) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 3) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 4) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 5) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 6) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 7) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 8) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 9) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 10) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 11) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 12) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 13) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 14) \
+  `PCIE_SVT_TAP_PASSIVE_SERDES_LANE(mon_if, proxy_port, 15)
+
 `endif

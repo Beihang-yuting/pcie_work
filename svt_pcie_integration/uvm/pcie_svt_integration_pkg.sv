@@ -15,6 +15,7 @@ package pcie_svt_integration_pkg;
   `include "pcie_svt_switch_scoreboard.sv"
   `include "pcie_svt_switch_port_adapter.sv"
   `include "pcie_svt_switch_sidecar_subscriber.sv"
+  `include "pcie_svt_switch_sidecar_env.sv"
   `include "pcie_svt_switch_target_callback.sv"
 
   function automatic pcie_svt_topology_e compiled_topology();
