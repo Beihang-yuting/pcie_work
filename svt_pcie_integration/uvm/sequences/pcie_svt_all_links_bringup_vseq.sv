@@ -1,6 +1,7 @@
 class pcie_svt_all_links_bringup_vseq extends
     uvm_sequence #(uvm_sequence_item);
   localparam time PCIE_SVT_LINK_TIMEOUT = 3ms;
+  localparam time PCIE_SVT_LINK_ENABLE_WATCHDOG_TIME = 10us;
 
   `uvm_object_utils(pcie_svt_all_links_bringup_vseq)
   `uvm_declare_p_sequencer(pcie_svt_virtual_sequencer)
@@ -30,6 +31,11 @@ class pcie_svt_all_links_bringup_vseq extends
 
   task automatic enable_port(int unsigned index);
     pcie_svt_link_bringup_seq child;
+    bit child_done;
+    realtime start_time;
+    realtime deadline;
+    realtime completion_time;
+
     child = pcie_svt_link_bringup_seq::type_id::create(
       $sformatf("enable_port_%0d", index));
     if (child == null)
@@ -37,7 +43,37 @@ class pcie_svt_all_links_bringup_vseq extends
         "link-enable child creation failed for index=%0d", index))
     child.port_id = p_sequencer.port_profile[index].port_id;
     child.port_seqr = p_sequencer.port_seqr[index];
-    child.start(null);
+    child_done = 1'b0;
+    start_time = $realtime;
+    deadline = start_time + PCIE_SVT_LINK_ENABLE_WATCHDOG_TIME;
+    completion_time = 0;
+    fork
+      begin
+        child.start(null);
+        completion_time = $realtime;
+        child_done = 1'b1;
+      end
+      begin
+        if ($realtime < deadline)
+          #(deadline - $realtime);
+        // Let completion scheduled exactly at the deadline settle first.
+        if (!child_done)
+          #1step;
+      end
+    join_any
+    disable fork;
+    if (!child_done)
+      `uvm_fatal("LINK_ENABLE_TIMEOUT", $sformatf(
+        {"port=%s index=%0d exceeded watchdog=%0t start=%0.6f ",
+         "deadline=%0.6f current=%0.6f"}, child.port_id, index,
+        PCIE_SVT_LINK_ENABLE_WATCHDOG_TIME, start_time, deadline,
+        $realtime))
+    else if (completion_time > deadline)
+      `uvm_fatal("LINK_ENABLE_TIMEOUT", $sformatf(
+        {"port=%s index=%0d exceeded watchdog=%0t start=%0.6f ",
+         "deadline=%0.6f completion=%0.6f"}, child.port_id, index,
+        PCIE_SVT_LINK_ENABLE_WATCHDOG_TIME, start_time, deadline,
+        completion_time))
   endtask
 
   task automatic wait_for_pair(int unsigned primary_index,
@@ -48,6 +84,9 @@ class pcie_svt_all_links_bringup_vseq extends
     svt_pcie_device_status peer_status;
     svt_pcie_pl_status::link_speed_enum expected_speed;
     bit reached_l0;
+    realtime start_time;
+    realtime deadline;
+    realtime completion_time;
 
     primary_profile = p_sequencer.port_profile[primary_index];
     peer_profile = p_sequencer.port_profile[peer_index];
@@ -56,6 +95,9 @@ class pcie_svt_all_links_bringup_vseq extends
     expected_speed = (primary_profile.max_gen == 5) ?
       svt_pcie_pl_status::SPEED_32_0G : svt_pcie_pl_status::SPEED_16_0G;
     reached_l0 = 1'b0;
+    start_time = $realtime;
+    deadline = start_time + PCIE_SVT_LINK_TIMEOUT;
+    completion_time = 0;
 
     fork
       begin
@@ -73,10 +115,15 @@ class pcie_svt_all_links_bringup_vseq extends
                 primary_profile.link_width &&
               peer_status.pcie_status.pl_status.negotiated_link_width ==
                 primary_profile.link_width);
+        completion_time = $realtime;
         reached_l0 = 1'b1;
       end
       begin
-        #(PCIE_SVT_LINK_TIMEOUT);
+        if ($realtime < deadline)
+          #(deadline - $realtime);
+        // Let completion scheduled exactly at the deadline settle first.
+        if (!reached_l0)
+          #1step;
       end
     join_any
     disable fork;
@@ -86,7 +133,8 @@ class pcie_svt_all_links_bringup_vseq extends
         {"primary=%s peer=%s primary_up=%0b peer_up=%0b ",
          "primary_state=%s peer_state=%s primary_speed=%s peer_speed=%s ",
          "primary_width=%0d peer_width=%0d expected_speed=%s ",
-         "expected_width=%0d timeout=%0t"},
+         "expected_width=%0d timeout=%0t start=%0.6f deadline=%0.6f ",
+         "current=%0.6f"},
         primary_profile.port_id, peer_profile.port_id,
         primary_status.pcie_status.pl_status.link_up,
         peer_status.pcie_status.pl_status.link_up,
@@ -97,7 +145,13 @@ class pcie_svt_all_links_bringup_vseq extends
         primary_status.pcie_status.pl_status.negotiated_link_width,
         peer_status.pcie_status.pl_status.negotiated_link_width,
         expected_speed.name(), primary_profile.link_width,
-        PCIE_SVT_LINK_TIMEOUT))
+        PCIE_SVT_LINK_TIMEOUT, start_time, deadline, $realtime))
+    else if (completion_time > deadline)
+      `uvm_fatal("LINK_TIMEOUT", $sformatf(
+        {"primary=%s peer=%s exceeded timeout=%0t start=%0.6f ",
+         "deadline=%0.6f completion=%0.6f"},
+        primary_profile.port_id, peer_profile.port_id,
+        PCIE_SVT_LINK_TIMEOUT, start_time, deadline, completion_time))
 
     if ((primary_profile.max_gen != peer_profile.max_gen) ||
         (primary_profile.link_width != peer_profile.link_width) ||

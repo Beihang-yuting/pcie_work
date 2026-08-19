@@ -32,6 +32,9 @@ class pcie_svt_switch_proxy_test extends pcie_svt_base_test;
       "+PCIE_LINK_ONLY", "PCIE_LINK_ONLY");
     disable_switch_sidecars = parse_bare_optional_plusarg(
       "+PCIE_DISABLE_SWITCH_SIDECARS", "PCIE_DISABLE_SWITCH_SIDECARS");
+    if (compile_only || cfg_init_only)
+      `uvm_fatal("PCIE_RUN_MODE",
+        "Task 8 switch proxy test accepts only +PCIE_LINK_ONLY")
     if (disable_switch_sidecars && !link_only)
       `uvm_fatal("PCIE_SWITCH_SIDECARS",
         "+PCIE_DISABLE_SWITCH_SIDECARS requires +PCIE_LINK_ONLY")

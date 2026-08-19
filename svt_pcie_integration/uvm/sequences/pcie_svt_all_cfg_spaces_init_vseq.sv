@@ -316,24 +316,43 @@ class pcie_svt_switch_sidecars_ready_vseq extends
   task wait_for_service(svt_pcie_tl_service tl_service,
                         string operation);
     bit completed;
+    realtime start_time;
+    realtime deadline;
+    realtime completion_time;
+
     if ((tl_service == null) || (tl_service.end_event == null))
       `uvm_fatal("SIDECAR_SERVICE", {operation,
         ": TL service completion event is missing"})
     completed = 1'b0;
+    start_time = $realtime;
+    deadline = start_time + PCIE_SVT_SIDECAR_SERVICE_TIMEOUT;
+    completion_time = 0;
     fork
       begin
         tl_service.end_event.wait_on();
+        completion_time = $realtime;
         completed = 1'b1;
       end
       begin
-        #(PCIE_SVT_SIDECAR_SERVICE_TIMEOUT);
+        if ($realtime < deadline)
+          #(deadline - $realtime);
+        // Let completion scheduled exactly at the deadline settle first.
+        if (!completed)
+          #1step;
       end
     join_any
     disable fork;
     if (!completed)
       `uvm_fatal("SIDECAR_SERVICE_TIMEOUT", $sformatf(
-        "%s exceeded timeout=%0t", operation,
-        PCIE_SVT_SIDECAR_SERVICE_TIMEOUT))
+        {"%s exceeded timeout=%0t start=%0.6f deadline=%0.6f ",
+         "current=%0.6f"}, operation, PCIE_SVT_SIDECAR_SERVICE_TIMEOUT,
+        start_time, deadline, $realtime))
+    else if (completion_time > deadline)
+      `uvm_fatal("SIDECAR_SERVICE_TIMEOUT", $sformatf(
+        {"%s exceeded timeout=%0t start=%0.6f deadline=%0.6f ",
+         "completion=%0.6f"}, operation,
+        PCIE_SVT_SIDECAR_SERVICE_TIMEOUT, start_time, deadline,
+        completion_time))
   endtask
 
   task send_service(int unsigned port_index,
