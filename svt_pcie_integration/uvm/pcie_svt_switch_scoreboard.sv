@@ -8,6 +8,11 @@ typedef enum int unsigned {
   PCIE_SVT_FORWARD_COMPLETION
 } pcie_svt_forward_direction_e;
 
+typedef enum int unsigned {
+  PCIE_SVT_SCOREBOARD_STRICT,
+  PCIE_SVT_SCOREBOARD_DEFERRED_ENUM
+} pcie_svt_scoreboard_mode_e;
+
 class pcie_svt_switch_value_signature;
   pcie_svt_forward_direction_e direction;
   int unsigned fmt;
@@ -54,6 +59,11 @@ class pcie_svt_switch_value_signature;
   bit [31:0] payload_digest;
 endclass
 
+class pcie_svt_switch_pending_rx;
+  int port;
+  pcie_svt_switch_value_signature signature;
+endclass
+
 class pcie_svt_switch_expectation;
   pcie_svt_forward_direction_e direction;
   int ingress;
@@ -68,13 +78,21 @@ class pcie_svt_switch_scoreboard extends uvm_component;
   `uvm_component_utils(pcie_svt_switch_scoreboard)
 
   int unsigned num_ports = 5;
+  uvm_analysis_imp #(pcie_tl_switch_route_event,
+                     pcie_svt_switch_scoreboard) route_event_export;
+  pcie_svt_scoreboard_mode_e mode = PCIE_SVT_SCOREBOARD_STRICT;
 
   protected pcie_svt_switch_expectation expected[$];
   protected pcie_svt_switch_expectation completed[$];
+  protected pcie_svt_switch_pending_rx pending_rx[$];
+  protected bit seen_event_id[longint unsigned];
+  protected int unsigned dynamic_event_count;
+  protected int unsigned dynamic_complete_count;
 
   function new(string name = "pcie_svt_switch_scoreboard",
                uvm_component parent = null);
     super.new(name, parent);
+    route_event_export = new("route_event_export", this);
   endfunction
 
   protected function automatic bit [31:0] payload_fnv1a(
@@ -174,6 +192,18 @@ class pcie_svt_switch_scoreboard extends uvm_component;
     return signature;
   endfunction
 
+  protected function pcie_svt_switch_value_signature
+      make_signature_from_normalized(pcie_tl_tlp normalized);
+    svt_pcie_tlp converted;
+    string reason;
+    if (!pcie_svt_tlp_converter::to_svt(normalized, converted, reason)) begin
+      `uvm_fatal("SCOREBOARD_ROUTE_CONVERSION",
+                 {"route snapshot conversion failed: ", reason})
+      return null;
+    end
+    return make_signature(converted);
+  endfunction
+
   protected function bit same_prefixes(
       pcie_svt_switch_value_signature lhs,
       pcie_svt_switch_value_signature rhs);
@@ -258,6 +288,397 @@ class pcie_svt_switch_scoreboard extends uvm_component;
     return same_header(lhs, rhs) &&
            (lhs.payload_digest == rhs.payload_digest) &&
            same_payload(lhs, rhs);
+  endfunction
+
+  function void begin_deferred_enumeration();
+    if ((mode != PCIE_SVT_SCOREBOARD_STRICT) ||
+        (expected.size() != 0) || (pending_rx.size() != 0)) begin
+      `uvm_fatal("SCOREBOARD_MODE",
+        $sformatf("cannot begin deferred mode: mode=%0d expected=%0d pending=%0d",
+                  mode, expected.size(), pending_rx.size()))
+      return;
+    end
+    completed.delete();
+    seen_event_id.delete();
+    dynamic_event_count = 0;
+    dynamic_complete_count = 0;
+    mode = PCIE_SVT_SCOREBOARD_DEFERRED_ENUM;
+  endfunction
+
+  function void write(pcie_tl_switch_route_event route_event);
+    pcie_svt_switch_expectation expectation;
+    pcie_svt_switch_value_signature ingress_signature;
+    pcie_svt_switch_value_signature egress_signature;
+    int selected;
+    int match_count;
+
+    if (mode == PCIE_SVT_SCOREBOARD_STRICT)
+      return;
+    if (route_event == null) begin
+      `uvm_fatal("SCOREBOARD_ROUTE_EVENT", "null route event")
+      return;
+    end
+    if (!valid_port(route_event.ingress_port, "route ingress"))
+      return;
+
+    case (route_event.action)
+      PCIE_TL_ROUTE_FORWARD: begin
+        if (!valid_port(route_event.egress_port, "route egress"))
+          return;
+        if (route_event.ingress_port == route_event.egress_port) begin
+          `uvm_fatal("SCOREBOARD_FORWARDING_LOOP",
+                     "ordinary route event uses the ingress port")
+          return;
+        end
+        if (route_event.route_code != route_event.egress_port) begin
+          `uvm_fatal("SCOREBOARD_ROUTE_EVENT",
+                     "forward route code does not match physical egress")
+          return;
+        end
+        if ((route_event.ingress_tlp == null) ||
+            (route_event.egress_tlp == null)) begin
+          `uvm_fatal("SCOREBOARD_ROUTE_EVENT",
+                     "forward route event has a null snapshot")
+          return;
+        end
+      end
+      PCIE_TL_ROUTE_LOCAL_RESPONSE: begin
+        if (!valid_port(route_event.egress_port, "local route egress"))
+          return;
+        if ((route_event.ingress_port != route_event.egress_port) ||
+            (route_event.route_code != SWITCH_ROUTE_LOCAL)) begin
+          `uvm_fatal("SCOREBOARD_ROUTE_EVENT",
+                     "local response route/physical ports are inconsistent")
+          return;
+        end
+        if ((route_event.ingress_tlp == null) ||
+            (route_event.egress_tlp == null)) begin
+          `uvm_fatal("SCOREBOARD_ROUTE_EVENT",
+                     "local response event has a null snapshot")
+          return;
+        end
+      end
+      PCIE_TL_ROUTE_DROP: begin
+        if ((route_event.egress_port != SWITCH_ROUTE_DROP) ||
+            (route_event.ingress_tlp == null) ||
+            (route_event.egress_tlp != null)) begin
+          `uvm_fatal("SCOREBOARD_ROUTE_EVENT",
+                     "drop route event violates the snapshot contract")
+          return;
+        end
+      end
+      PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST: begin
+        if ((route_event.ingress_tlp == null) ||
+            (route_event.egress_tlp == null)) begin
+          `uvm_fatal("SCOREBOARD_ROUTE_EVENT",
+                     "broadcast route event has a null snapshot")
+          return;
+        end
+      end
+      default: begin
+        `uvm_fatal("SCOREBOARD_ROUTE_EVENT", "invalid route action")
+        return;
+      end
+    endcase
+
+    if (seen_event_id.exists(route_event.event_id)) begin
+      `uvm_fatal("SCOREBOARD_ROUTE_DUPLICATE",
+        $sformatf("route event_id=%0d was reused", route_event.event_id))
+      return;
+    end
+    seen_event_id[route_event.event_id] = 1'b1;
+
+    if (route_event.action inside {PCIE_TL_ROUTE_DROP,
+                                   PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST}) begin
+      `uvm_fatal("SCOREBOARD_ROUTE_DROP",
+        $sformatf("event=%0d action=%0d route=%0d ingress=%0d egress=%0d",
+                  route_event.event_id, route_event.action,
+                  route_event.route_code, route_event.ingress_port,
+                  route_event.egress_port))
+      return;
+    end
+
+    ingress_signature =
+      make_signature_from_normalized(route_event.ingress_tlp);
+    egress_signature =
+      make_signature_from_normalized(route_event.egress_tlp);
+    if ((route_event.action == PCIE_TL_ROUTE_FORWARD) &&
+        (ingress_signature.direction != egress_signature.direction)) begin
+      `uvm_fatal("SCOREBOARD_DIRECTION",
+                 "forward route snapshots change TLP direction")
+      return;
+    end
+    if ((route_event.action == PCIE_TL_ROUTE_LOCAL_RESPONSE) &&
+        ((ingress_signature.direction != PCIE_SVT_FORWARD_REQUEST) ||
+         (egress_signature.direction != PCIE_SVT_FORWARD_COMPLETION))) begin
+      `uvm_fatal("SCOREBOARD_DIRECTION",
+                 "local route must map a Request RX to a Completion TX")
+      return;
+    end
+
+    selected = -1;
+    match_count = 0;
+    foreach (pending_rx[index]) begin
+      if ((pending_rx[index].port == route_event.ingress_port) &&
+          same_tlp(pending_rx[index].signature, ingress_signature)) begin
+        selected = index;
+        match_count++;
+      end
+    end
+    if (match_count > 1) begin
+      `uvm_fatal("SCOREBOARD_AMBIGUOUS",
+                 "route event matches multiple pending RX observations")
+      return;
+    end
+    if (match_count == 0) begin
+      foreach (pending_rx[index]) begin
+        if ((pending_rx[index].port != route_event.ingress_port) &&
+            same_tlp(pending_rx[index].signature, ingress_signature)) begin
+          `uvm_fatal("SCOREBOARD_WRONG_INGRESS",
+                     "route event matched an RX on another ingress")
+          return;
+        end
+      end
+      foreach (pending_rx[index]) begin
+        if ((pending_rx[index].port == route_event.ingress_port) &&
+            same_header(pending_rx[index].signature, ingress_signature) &&
+            !same_payload(pending_rx[index].signature, ingress_signature)) begin
+          `uvm_fatal("SCOREBOARD_PAYLOAD_MISMATCH",
+                     "route-event ingress payload differs from pending RX")
+          return;
+        end
+      end
+    end
+
+    expectation = new();
+    expectation.direction = egress_signature.direction;
+    expectation.ingress = route_event.ingress_port;
+    expectation.egress = route_event.egress_port;
+    expectation.local_response =
+      (route_event.action == PCIE_TL_ROUTE_LOCAL_RESPONSE);
+    expectation.rx_signature = ingress_signature;
+    expectation.tx_signature = egress_signature;
+    expectation.rx_seen = (match_count == 1);
+    if (selected >= 0)
+      pending_rx.delete(selected);
+    expected.push_back(expectation);
+    dynamic_event_count++;
+  endfunction
+
+  protected function void observe_rx_deferred(
+      int port,
+      pcie_svt_switch_value_signature observed);
+    pcie_svt_switch_pending_rx pending;
+    int selected;
+    int match_count;
+
+    selected = -1;
+    match_count = 0;
+    foreach (expected[index]) begin
+      if ((expected[index].ingress == port) &&
+          !expected[index].rx_seen &&
+          same_tlp(expected[index].rx_signature, observed)) begin
+        selected = index;
+        match_count++;
+      end
+    end
+    if (match_count > 1) begin
+      `uvm_fatal("SCOREBOARD_AMBIGUOUS",
+                 "RX matches multiple live route expectations")
+      return;
+    end
+    if (match_count == 1) begin
+      expected[selected].rx_seen = 1'b1;
+      return;
+    end
+
+    foreach (expected[index]) begin
+      if ((expected[index].ingress != port) &&
+          same_tlp(expected[index].rx_signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_WRONG_INGRESS",
+                   "TLP arrived on the wrong deferred ingress port")
+        return;
+      end
+    end
+    foreach (expected[index]) begin
+      if ((expected[index].ingress == port) && expected[index].rx_seen &&
+          same_tlp(expected[index].rx_signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_DUPLICATE",
+                   "duplicate deferred RX observation")
+        return;
+      end
+    end
+    foreach (pending_rx[index]) begin
+      if ((pending_rx[index].port == port) &&
+          same_tlp(pending_rx[index].signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_DUPLICATE",
+                   "duplicate pending deferred RX observation")
+        return;
+      end
+    end
+    foreach (pending_rx[index]) begin
+      if ((pending_rx[index].port != port) &&
+          same_tlp(pending_rx[index].signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_WRONG_INGRESS",
+                   "pending TLP was repeated on another ingress")
+        return;
+      end
+    end
+    foreach (expected[index]) begin
+      if ((expected[index].ingress == port) &&
+          !expected[index].rx_seen &&
+          same_header(expected[index].rx_signature, observed) &&
+          !same_payload(expected[index].rx_signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_PAYLOAD_MISMATCH",
+                   "deferred RX payload differs from route expectation")
+        return;
+      end
+    end
+    foreach (pending_rx[index]) begin
+      if ((pending_rx[index].port == port) &&
+          same_header(pending_rx[index].signature, observed) &&
+          !same_payload(pending_rx[index].signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_PAYLOAD_MISMATCH",
+                   "deferred RX payload conflicts with pending RX")
+        return;
+      end
+    end
+
+    pending = new();
+    pending.port = port;
+    pending.signature = observed;
+    pending_rx.push_back(pending);
+  endfunction
+
+  protected function void observe_tx_deferred(
+      int port,
+      pcie_svt_switch_value_signature observed);
+    int selected;
+    int match_count;
+
+    selected = -1;
+    match_count = 0;
+    foreach (expected[index]) begin
+      if ((expected[index].egress == port) && expected[index].rx_seen &&
+          same_tlp(expected[index].tx_signature, observed)) begin
+        selected = index;
+        match_count++;
+      end
+    end
+    if (match_count > 1) begin
+      `uvm_fatal("SCOREBOARD_AMBIGUOUS",
+                 "TX matches multiple live route expectations")
+      return;
+    end
+    if (match_count == 1) begin
+      completed.push_back(expected[selected]);
+      expected.delete(selected);
+      dynamic_complete_count++;
+      return;
+    end
+
+    foreach (completed[index]) begin
+      if ((completed[index].egress == port) &&
+          same_tlp(completed[index].tx_signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_DUPLICATE",
+                   "duplicate deferred TX forwarding observation")
+        return;
+      end
+    end
+    foreach (expected[index]) begin
+      if ((expected[index].ingress == port) &&
+          (same_tlp(expected[index].rx_signature, observed) ||
+           (!expected[index].local_response &&
+            same_tlp(expected[index].tx_signature, observed)))) begin
+        `uvm_fatal("SCOREBOARD_FORWARDING_LOOP",
+                   "deferred TLP returned to its ingress port")
+        return;
+      end
+    end
+    foreach (expected[index]) begin
+      if ((expected[index].egress == port) &&
+          same_header(expected[index].tx_signature, observed) &&
+          !same_payload(expected[index].tx_signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_PAYLOAD_MISMATCH",
+          $sformatf("deferred TX payload differs: expected=%08x observed=%08x",
+                    expected[index].tx_signature.payload_digest,
+                    observed.payload_digest))
+        return;
+      end
+    end
+    foreach (expected[index]) begin
+      if (same_tlp(expected[index].tx_signature, observed) &&
+          (expected[index].egress != port)) begin
+        `uvm_fatal("SCOREBOARD_WRONG_EGRESS",
+                   "deferred TLP appeared on the wrong egress port")
+        return;
+      end
+    end
+    foreach (expected[index]) begin
+      if ((expected[index].egress == port) &&
+          same_tlp(expected[index].tx_signature, observed) &&
+          !expected[index].rx_seen) begin
+        `uvm_fatal("SCOREBOARD_MISSING_INGRESS",
+                   "deferred TX observation preceded its RX observation")
+        return;
+      end
+    end
+    foreach (expected[index]) begin
+      if ((expected[index].egress == port) && expected[index].rx_seen &&
+          (expected[index].tx_signature.direction == observed.direction)) begin
+        `uvm_fatal("SCOREBOARD_HEADER_MISMATCH",
+                   "deferred TX header does not match route expectation")
+        return;
+      end
+    end
+    if (observed.direction == PCIE_SVT_FORWARD_COMPLETION) begin
+      `uvm_fatal("SCOREBOARD_UNMATCHED_COMPLETION",
+                 "Completion TX has no matching deferred route event")
+      return;
+    end
+    `uvm_fatal("SCOREBOARD_DUPLICATE",
+               "unexpected or duplicate deferred TX Request")
+  endfunction
+
+  function bit deferred_idle();
+    return (mode == PCIE_SVT_SCOREBOARD_DEFERRED_ENUM) &&
+           (pending_rx.size() == 0) && (expected.size() == 0) &&
+           (dynamic_event_count == dynamic_complete_count);
+  endfunction
+
+  function void end_deferred_enumeration();
+    if (mode != PCIE_SVT_SCOREBOARD_DEFERRED_ENUM) begin
+      `uvm_fatal("SCOREBOARD_MODE",
+                 "cannot end deferred mode while scoreboard is strict")
+      return;
+    end
+    if (pending_rx.size() != 0) begin
+      `uvm_fatal("SCOREBOARD_MISSING_ROUTE",
+        $sformatf("%0d RX observation(s) have no route event",
+                  pending_rx.size()))
+      return;
+    end
+    foreach (expected[index]) begin
+      if (!expected[index].rx_seen) begin
+        `uvm_fatal("SCOREBOARD_MISSING_INGRESS",
+                   "route event has no matching RX observation")
+        return;
+      end
+    end
+    if (expected.size() != 0) begin
+      `uvm_fatal("SCOREBOARD_MISSING",
+        $sformatf("%0d deferred TX expectation(s) remain", expected.size()))
+      return;
+    end
+    if (dynamic_event_count != dynamic_complete_count) begin
+      `uvm_fatal("SCOREBOARD_COUNT",
+        $sformatf("route events=%0d completed=%0d",
+                  dynamic_event_count, dynamic_complete_count))
+      return;
+    end
+    $display("SWITCH_DEFERRED_SCOREBOARD_EMPTY events=%0d completed=%0d pending=0 expected=0",
+             dynamic_event_count, dynamic_complete_count);
+    mode = PCIE_SVT_SCOREBOARD_STRICT;
   endfunction
 
   function void expect_forward(
@@ -472,8 +893,16 @@ class pcie_svt_switch_scoreboard extends uvm_component;
       return;
     observed = make_signature(transaction);
     case (wire_direction)
-      PCIE_SVT_WIRE_RX: observe_rx(port, observed);
-      PCIE_SVT_WIRE_TX: observe_tx(port, observed);
+      PCIE_SVT_WIRE_RX:
+        if (mode == PCIE_SVT_SCOREBOARD_DEFERRED_ENUM)
+          observe_rx_deferred(port, observed);
+        else
+          observe_rx(port, observed);
+      PCIE_SVT_WIRE_TX:
+        if (mode == PCIE_SVT_SCOREBOARD_DEFERRED_ENUM)
+          observe_tx_deferred(port, observed);
+        else
+          observe_tx(port, observed);
       default:
         `uvm_fatal("SCOREBOARD_DIRECTION",
                    "invalid wire observation direction")
@@ -481,6 +910,11 @@ class pcie_svt_switch_scoreboard extends uvm_component;
   endfunction
 
   function void check_empty();
+    if (mode == PCIE_SVT_SCOREBOARD_DEFERRED_ENUM) begin
+      `uvm_fatal("SCOREBOARD_MODE",
+                 "check_empty called during deferred enumeration")
+      return;
+    end
     if (expected.size() != 0) begin
       `uvm_fatal("SCOREBOARD_MISSING",
         $sformatf("%0d forwarding expectation(s) remain", expected.size()))

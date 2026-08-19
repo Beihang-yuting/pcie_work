@@ -213,6 +213,39 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       return tlp;
     endfunction
 
+    function automatic pcie_tl_switch_route_event make_route_event(
+        longint unsigned event_id,
+        pcie_tl_switch_route_action_e action,
+        int ingress,
+        int egress,
+        svt_pcie_tlp ingress_tlp,
+        svt_pcie_tlp egress_tlp);
+      pcie_tl_switch_route_event route_event;
+      pcie_tl_tlp ingress_normalized;
+      pcie_tl_tlp egress_normalized;
+      string reason;
+
+      require(pcie_svt_tlp_converter::from_svt(
+                ingress_tlp, ingress_normalized, reason),
+              {"route-event ingress conversion failed: ", reason});
+      if (egress_tlp != null)
+        require(pcie_svt_tlp_converter::from_svt(
+                  egress_tlp, egress_normalized, reason),
+                {"route-event egress conversion failed: ", reason});
+      else
+        egress_normalized = null;
+      route_event = new($sformatf("route_event_%0d", event_id));
+      route_event.event_id = event_id;
+      route_event.action = action;
+      route_event.ingress_port = ingress;
+      route_event.egress_port = egress;
+      route_event.route_code =
+        (action == PCIE_TL_ROUTE_LOCAL_RESPONSE) ?
+        SWITCH_ROUTE_LOCAL : egress;
+      route_event.set_snapshots(ingress_normalized, egress_normalized);
+      return route_event;
+    endfunction
+
     function automatic bit [31:0] reference_payload_fnv1a(
         svt_pcie_tlp transaction);
       bit [31:0] digest;
@@ -444,6 +477,103 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       require(wire_equal(collecting_driver.collected[0], expected_egress),
               "setup regression raw egress fields changed");
       $display("SWITCH_SETUP_CFG_PASS");
+    endtask
+
+    task automatic run_deferred_rx_first();
+      svt_pcie_tlp request;
+      request = make_request("deferred_rx_first_request");
+      scoreboard.begin_deferred_enumeration();
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+      scoreboard.write(make_route_event(
+        100, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
+      require(scoreboard.deferred_idle(),
+              "RX-first deferred scoreboard did not become idle");
+      scoreboard.end_deferred_enumeration();
+      $display("SWITCH_DEFERRED_RX_FIRST_PASS");
+    endtask
+
+    task automatic run_deferred_event_first();
+      svt_pcie_tlp request;
+      request = make_request("deferred_event_first_request");
+      scoreboard.begin_deferred_enumeration();
+      scoreboard.write(make_route_event(
+        101, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
+      require(scoreboard.deferred_idle(),
+              "event-first deferred scoreboard did not become idle");
+      scoreboard.end_deferred_enumeration();
+      $display("SWITCH_DEFERRED_EVENT_FIRST_PASS");
+    endtask
+
+    task automatic run_deferred_cfg_rewrite();
+      svt_pcie_tlp ingress_cfg1;
+      svt_pcie_tlp egress_cfg0;
+      ingress_cfg1 = make_cfg_request(
+        "deferred_cfg1_ingress", svt_pcie_tlp::TYPE_1_CFG_REQ, 1'b0);
+      require($cast(egress_cfg0, ingress_cfg1.clone()),
+              "deferred Cfg1-to-Cfg0 egress clone failed");
+      egress_cfg0.tlp_type = svt_pcie_tlp::TYPE_0_CFG_REQ;
+      scoreboard.begin_deferred_enumeration();
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, ingress_cfg1);
+      scoreboard.write(make_route_event(
+        102, PCIE_TL_ROUTE_FORWARD, 1, 2, ingress_cfg1, egress_cfg0));
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, egress_cfg0);
+      require(scoreboard.deferred_idle(),
+              "Cfg rewrite deferred scoreboard did not become idle");
+      scoreboard.end_deferred_enumeration();
+      $display("SWITCH_DEFERRED_CFG_REWRITE_PASS");
+    endtask
+
+    task automatic run_deferred_local_cfg_read();
+      svt_pcie_tlp request;
+      svt_pcie_tlp response;
+      request = make_cfg_request(
+        "deferred_local_cfg_read", svt_pcie_tlp::TYPE_0_CFG_REQ, 1'b0);
+      response = make_local_completion(
+        "deferred_local_cfg_read_completion", request, 1'b1);
+      scoreboard.begin_deferred_enumeration();
+      scoreboard.write(make_route_event(
+        103, PCIE_TL_ROUTE_LOCAL_RESPONSE, 2, 2, request, response));
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 2, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, response);
+      require(scoreboard.deferred_idle(),
+              "local Cfg Read deferred scoreboard did not become idle");
+      scoreboard.end_deferred_enumeration();
+      $display("SWITCH_DEFERRED_LOCAL_CFG_READ_PASS");
+    endtask
+
+    task automatic run_deferred_local_cfg_write();
+      svt_pcie_tlp request;
+      svt_pcie_tlp response;
+      request = make_cfg_request(
+        "deferred_local_cfg_write", svt_pcie_tlp::TYPE_0_CFG_REQ, 1'b1);
+      response = make_local_completion(
+        "deferred_local_cfg_write_completion", request, 1'b0);
+      scoreboard.begin_deferred_enumeration();
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 2, request);
+      scoreboard.write(make_route_event(
+        104, PCIE_TL_ROUTE_LOCAL_RESPONSE, 2, 2, request, response));
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, response);
+      require(scoreboard.deferred_idle(),
+              "local Cfg Write deferred scoreboard did not become idle");
+      scoreboard.end_deferred_enumeration();
+      $display("SWITCH_DEFERRED_LOCAL_CFG_WRITE_PASS");
+    endtask
+
+    task automatic run_deferred_completion();
+      svt_pcie_tlp completion;
+      completion = make_completion("deferred_completion");
+      scoreboard.begin_deferred_enumeration();
+      scoreboard.write(make_route_event(
+        105, PCIE_TL_ROUTE_FORWARD, 3, 2, completion, completion));
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 3, completion);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, completion);
+      require(scoreboard.deferred_idle(),
+              "Completion deferred scoreboard did not become idle");
+      scoreboard.end_deferred_enumeration();
+      $display("SWITCH_DEFERRED_COMPLETION_PASS");
     endtask
 
     task automatic run_positive();
@@ -770,6 +900,77 @@ package pcie_svt_switch_adapter_unit_test_pkg;
         "scoreboard_port_observe": begin
           scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 5, request);
         end
+        "deferred_duplicate_event": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            200, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          scoreboard.write(make_route_event(
+            200, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+        end
+        "deferred_duplicate_rx": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+        end
+        "deferred_wrong_ingress": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            201, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 3, request);
+        end
+        "deferred_wrong_egress": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            202, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 3, request);
+        end
+        "deferred_drop": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            203, PCIE_TL_ROUTE_DROP, 1, SWITCH_ROUTE_DROP,
+            request, null));
+        end
+        "deferred_payload_mismatch": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            204, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          require($cast(observed, request.clone()),
+                  "deferred payload-mismatch clone failed");
+          observed.payload[0] = 32'hdead_beef;
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, observed);
+        end
+        "deferred_missing_route": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.end_deferred_enumeration();
+        end
+        "deferred_missing_rx": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            205, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          scoreboard.end_deferred_enumeration();
+        end
+        "deferred_missing_tx": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            206, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.end_deferred_enumeration();
+        end
+        "deferred_tx_before_rx": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            207, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
+        end
+        "deferred_nested_begin": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.begin_deferred_enumeration();
+        end
+        "deferred_end_strict": begin
+          scoreboard.end_deferred_enumeration();
+        end
         default:
           `uvm_fatal("SWITCH_ADAPTER_BAD_MODE",
                      {"unknown negative mode: ", mode})
@@ -799,6 +1000,12 @@ package pcie_svt_switch_adapter_unit_test_pkg;
             run_scoreboard_cpl_nonwire_regression();
           "scoreboard_request_nonwire":
             run_scoreboard_request_nonwire_regression();
+          "deferred_rx_first": run_deferred_rx_first();
+          "deferred_event_first": run_deferred_event_first();
+          "deferred_cfg_rewrite": run_deferred_cfg_rewrite();
+          "deferred_local_cfg_read": run_deferred_local_cfg_read();
+          "deferred_local_cfg_write": run_deferred_local_cfg_write();
+          "deferred_completion": run_deferred_completion();
           default:
             `uvm_fatal("SWITCH_ADAPTER_BAD_MODE",
                        {"unknown positive mode: ", positive_mode})
