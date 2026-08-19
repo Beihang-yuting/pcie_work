@@ -15,8 +15,12 @@ class pcie_svt_all_links_bringup_vseq extends
 
   function void validate_port(int unsigned index);
     if ((index >= PCIE_SVT_MAX_PORTS) || !p_sequencer.active_port[index] ||
+        (p_sequencer.port_agent[index] == null) ||
+        (p_sequencer.port_cfg[index] == null) ||
         (p_sequencer.port_profile[index] == null) ||
         (p_sequencer.port_seqr[index] == null) ||
+        (p_sequencer.port_agent[index].pcie_agent == null) ||
+        (p_sequencer.port_agent[index].pcie_agent.tlp_seqr == null) ||
         (p_sequencer.port_status[index] == null) ||
         (p_sequencer.port_status[index].pcie_status == null) ||
         (p_sequencer.port_status[index].pcie_status.pl_status == null))
@@ -136,9 +140,26 @@ class pcie_svt_all_links_bringup_vseq extends
       enable_port(PCIE_SVT_PEER_PORT0);
     join
     wait_for_pair(PCIE_SVT_PRIMARY_RC0, PCIE_SVT_PEER_PORT0);
+`elsif PCIE_TOPO_SWITCH_1X16_4X4
+    for (int unsigned i = 0; i < PCIE_SVT_MAX_PORTS; i++)
+      validate_port(i);
+    for (int unsigned i = 0; i < PCIE_SVT_MAX_PORTS; i++) begin
+      fork
+        automatic int unsigned index = i;
+        enable_port(index);
+      join_none
+    end
+    wait fork;
+    fork
+      wait_for_pair(PCIE_SVT_PRIMARY_RC0, PCIE_SVT_PEER_PORT0);
+      wait_for_pair(PCIE_SVT_PRIMARY_EP0, PCIE_SVT_PEER_PORT1);
+      wait_for_pair(PCIE_SVT_PRIMARY_EP1, PCIE_SVT_PEER_PORT2);
+      wait_for_pair(PCIE_SVT_PRIMARY_EP2, PCIE_SVT_PEER_PORT3);
+      wait_for_pair(PCIE_SVT_PRIMARY_EP3, PCIE_SVT_PEER_PORT4);
+    join
 `else
     `uvm_fatal("LINK_TOPOLOGY",
-      "Task 8 link bring-up currently supports only PCIE_TOPO_EP_X16")
+      "link bring-up supports only EP_X16 or SWITCH_1X16_4X4")
 `endif
   endtask
 endclass

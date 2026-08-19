@@ -5,6 +5,7 @@ class pcie_svt_port_env extends uvm_env;
   svt_pcie_device_status status;
   svt_pcie_device_agent agent;
   bit fast_link_training;
+  bit is_switch_proxy;
 
   `uvm_component_utils(pcie_svt_port_env)
 
@@ -152,9 +153,17 @@ class pcie_svt_port_env extends uvm_env;
           this, "", "fast_link_training", fast_link_training))
       `uvm_fatal("PORT_CFG",
         {get_full_name(), ": missing fast-link-training configuration"})
+    if (!uvm_config_db#(bit)::get(
+          this, "", "is_switch_proxy", is_switch_proxy))
+      `uvm_fatal("PORT_CFG",
+        {get_full_name(), ": missing switch-proxy ownership configuration"})
 
     cfg = svt_pcie_device_configuration::type_id::create("cfg", this);
     cfg.set_initial_values_via_unified_vif(1, vif);
+    if (is_switch_proxy &&
+        (cfg.dut_model == svt_pcie_device_configuration::RTL))
+      `uvm_fatal("SWITCH_PROXY_CFG",
+        {profile.port_id, ": Serial Proxy must remain a full Device Agent"})
     if (cfg.device_is_root != (profile.role == PCIE_SVT_RC))
       `uvm_fatal("PROFILE", $sformatf(
         "%s: profile role disagrees with Unified HDL device_is_root=%0d",

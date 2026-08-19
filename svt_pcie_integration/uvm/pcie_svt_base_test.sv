@@ -47,6 +47,11 @@ class pcie_svt_base_test extends uvm_test;
     if (env.active_peer_count() != `PCIE_SVT_ACTIVE_PORTS)
       `uvm_fatal("TOPOLOGY", $sformatf("created %0d peer ports, expected %0d",
         env.active_peer_count(), `PCIE_SVT_ACTIVE_PORTS))
+`elsif PCIE_USE_SVT_SWITCH_PROXY
+    if (env.active_peer_count() != `PCIE_SVT_ACTIVE_PORTS)
+      `uvm_fatal("TOPOLOGY", $sformatf(
+        "created %0d Proxy ports, expected %0d",
+        env.active_peer_count(), `PCIE_SVT_ACTIVE_PORTS))
 `else
     if (env.active_peer_count() != 0)
       `uvm_fatal("TOPOLOGY", $sformatf(

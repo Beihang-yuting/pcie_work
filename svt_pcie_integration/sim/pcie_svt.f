@@ -17,4 +17,5 @@
 ../rtl/pcie_dut_placeholder.sv
 ../../pcie_tl_vip/src/pcie_tl_switch_pkg.sv
 ../uvm/pcie_svt_integration_pkg.sv
+../uvm/pcie_svt_switch_proxy_test.sv
 ../rtl/pcie_svt_topology_top.sv

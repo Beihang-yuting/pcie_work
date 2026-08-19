@@ -5,6 +5,10 @@ class pcie_svt_virtual_sequencer extends uvm_sequencer #(uvm_sequence_item);
   svt_pcie_device_status port_status[PCIE_SVT_MAX_PORTS];
   pcie_svt_port_profile port_profile[PCIE_SVT_MAX_PORTS];
   bit active_port[PCIE_SVT_MAX_PORTS];
+  bit switch_proxy_port[PCIE_SVT_MAX_PORTS];
+  pcie_svt_switch_sidecar_env switch_sidecar[5];
+  uvm_analysis_port #(svt_pcie_tl_service) switch_sidecar_service_port[5];
+  bit switch_sidecar_enabled[5];
   virtual pcie_svt_reset_if reset_vif;
 
   `uvm_component_utils(pcie_svt_virtual_sequencer)
