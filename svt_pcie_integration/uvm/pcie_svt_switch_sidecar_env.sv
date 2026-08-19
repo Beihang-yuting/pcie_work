@@ -4,6 +4,7 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
   svt_pcie_configuration::svt_pcie_serdes_x16_vif serdes_x16_vif;
   svt_pcie_configuration::svt_pcie_serdes_x4_vif serdes_x4_vif;
   int unsigned lanes;
+  int unsigned pcie_gen;
   int port_index = -1;
 
   svt_pcie_device_configuration cfg;
@@ -23,12 +24,21 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
   endfunction
 
   virtual function void build_phase(uvm_phase phase);
+    bit [31:0] selected_speed;
+    bit [31:0] supported_speeds;
+    bit [31:0] supported_widths;
     bit got_x16;
     bit got_x4;
 
     super.build_phase(phase);
     if (!uvm_config_db#(int unsigned)::get(this, "", "lanes", lanes))
       `uvm_fatal("SIDECAR_CFG", {get_full_name(), ": missing lanes"})
+    if (!uvm_config_db#(int unsigned)::get(
+          this, "", "pcie_gen", pcie_gen) ||
+        !((pcie_gen == 4) || (pcie_gen == 5)))
+      `uvm_fatal("SIDECAR_CFG", $sformatf(
+        "%s: missing or invalid pcie_gen=%0d (expected 4 or 5)",
+        get_full_name(), pcie_gen))
     if (!uvm_config_db#(int)::get(this, "", "port_index", port_index) ||
         (port_index < 0))
       `uvm_fatal("SIDECAR_CFG",
@@ -66,6 +76,40 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
     if ((cfg == null) || (status == null))
       `uvm_fatal("SIDECAR_CREATE",
                  {get_full_name(), ": configuration/status creation failed"})
+
+    cfg.pcie_spec_ver =
+      svt_pcie_device_configuration::PCIE_SPEC_VER_5_0;
+    supported_widths = (lanes == 16) ? 32'h0000_003f : 32'h0000_0007;
+    cfg.pcie_cfg.pl_cfg.set_link_width_values(
+      lanes, supported_widths, lanes);
+    if ((cfg.pcie_cfg.pl_cfg.get_link_width_value() != lanes) ||
+        (cfg.pcie_cfg.pl_cfg.get_supported_link_width_vector_value() !=
+         supported_widths) ||
+        (cfg.pcie_cfg.pl_cfg.get_expected_link_width_value() != lanes))
+      `uvm_fatal("SIDECAR_LINK_WIDTH", $sformatf(
+        "%s: failed to configure x%0d supported=0x%0h",
+        get_full_name(), lanes, supported_widths))
+
+    supported_speeds = `SVT_PCIE_SPEED_2_5G |
+                       `SVT_PCIE_SPEED_5_0G |
+                       `SVT_PCIE_SPEED_8_0G |
+                       `SVT_PCIE_SPEED_16_0G;
+    selected_speed = `SVT_PCIE_SPEED_16_0G;
+    if (pcie_gen == 5) begin
+      supported_speeds |= `SVT_PCIE_SPEED_32_0G;
+      selected_speed = `SVT_PCIE_SPEED_32_0G;
+    end
+    cfg.pcie_cfg.pl_cfg.set_link_speed_values(
+      supported_speeds, selected_speed, selected_speed);
+    if ((cfg.pcie_cfg.pl_cfg.get_supported_link_speeds_value() !=
+         supported_speeds) ||
+        (cfg.pcie_cfg.pl_cfg.get_target_link_speed_value() !=
+         selected_speed) ||
+        (cfg.pcie_cfg.pl_cfg.get_expected_link_speed_value() !=
+         selected_speed))
+      `uvm_fatal("SIDECAR_LINK_SPEED", $sformatf(
+        "%s: failed to configure Gen%0d speed vector=0x%0h",
+        get_full_name(), pcie_gen, supported_speeds))
 
     cfg.is_active = 1'b0;
     cfg.device_is_root = (lanes == 4);
