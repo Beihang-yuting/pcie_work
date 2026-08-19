@@ -577,6 +577,15 @@ class pcie_svt_switch_scoreboard extends uvm_component;
       return;
     end
 
+    foreach (expected[index]) begin
+      if ((expected[index].egress == port) &&
+          same_tlp(expected[index].tx_signature, observed) &&
+          !expected[index].rx_seen) begin
+        `uvm_fatal("SCOREBOARD_MISSING_INGRESS",
+                   "deferred TX observation preceded its RX observation")
+        return;
+      end
+    end
     foreach (completed[index]) begin
       if ((completed[index].egress == port) &&
           same_tlp(completed[index].tx_signature, observed)) begin
@@ -611,15 +620,6 @@ class pcie_svt_switch_scoreboard extends uvm_component;
           (expected[index].egress != port)) begin
         `uvm_fatal("SCOREBOARD_WRONG_EGRESS",
                    "deferred TLP appeared on the wrong egress port")
-        return;
-      end
-    end
-    foreach (expected[index]) begin
-      if ((expected[index].egress == port) &&
-          same_tlp(expected[index].tx_signature, observed) &&
-          !expected[index].rx_seen) begin
-        `uvm_fatal("SCOREBOARD_MISSING_INGRESS",
-                   "deferred TX observation preceded its RX observation")
         return;
       end
     end

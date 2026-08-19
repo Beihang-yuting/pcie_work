@@ -964,6 +964,16 @@ package pcie_svt_switch_adapter_unit_test_pkg;
             207, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
           scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
         end
+        "deferred_reused_tx_before_rx": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            208, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
+          scoreboard.write(make_route_event(
+            209, PCIE_TL_ROUTE_FORWARD, 1, 2, request, request));
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
+        end
         "deferred_nested_begin": begin
           scoreboard.begin_deferred_enumeration();
           scoreboard.begin_deferred_enumeration();
