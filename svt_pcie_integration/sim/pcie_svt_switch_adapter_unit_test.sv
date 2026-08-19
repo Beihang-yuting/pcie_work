@@ -160,6 +160,74 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       return tlp;
     endfunction
 
+    function automatic svt_pcie_tlp make_cfg_request(
+        string name,
+        svt_pcie_tlp::tlp_type_enum tlp_type,
+        bit with_data);
+      svt_pcie_tlp tlp;
+      tlp = new(name);
+      tlp.tlp_type = tlp_type;
+      tlp.fmt = with_data ? svt_pcie_tlp::WITH_DATA_3_DWORD :
+                            svt_pcie_tlp::NO_DATA_3_DWORD;
+      tlp.length = 10'd1;
+      tlp.requester_id = 16'h4100;
+      tlp.tag = 10'h2a5;
+      tlp.bus_number = 8'h52;
+      tlp.device_number = 5'h04;
+      tlp.function_number = 3'h1;
+      tlp.register_number = 10'h084;
+      tlp.first_dw_be = 4'hf;
+      tlp.last_dw_be = 4'h0;
+      if (with_data) begin
+        tlp.payload = new[1];
+        tlp.payload[0] = 32'h1234_abcd;
+      end else begin
+        tlp.payload = new[0];
+      end
+      return tlp;
+    endfunction
+
+    function automatic svt_pcie_tlp make_local_completion(
+        string name,
+        svt_pcie_tlp request,
+        bit with_data);
+      svt_pcie_tlp tlp;
+      tlp = new(name);
+      tlp.tlp_type = svt_pcie_tlp::CPL;
+      tlp.fmt = with_data ? svt_pcie_tlp::WITH_DATA_3_DWORD :
+                            svt_pcie_tlp::NO_DATA_3_DWORD;
+      tlp.length = with_data ? 10'd1 : 10'd0;
+      tlp.requester_id = request.requester_id;
+      tlp.completer_id = 16'h5200;
+      tlp.tag = request.tag;
+      tlp.completion_status = svt_pcie_tlp::SUCCESSFUL;
+      tlp.byte_count_modified = 1'b0;
+      tlp.byte_count = with_data ? 12'd4 : 12'd0;
+      tlp.lower_address = 7'h00;
+      if (with_data) begin
+        tlp.payload = new[1];
+        tlp.payload[0] = 32'hfeed_cafe;
+      end else begin
+        tlp.payload = new[0];
+      end
+      return tlp;
+    endfunction
+
+    function automatic bit [31:0] reference_payload_fnv1a(
+        svt_pcie_tlp transaction);
+      bit [31:0] digest;
+      bit [7:0] payload_byte;
+      digest = 32'h811c_9dc5;
+      foreach (transaction.payload[dword_index]) begin
+        for (int unsigned byte_index = 0; byte_index < 4; byte_index++) begin
+          payload_byte = transaction.payload[dword_index]
+                         [8 * byte_index +: 8];
+          digest = (digest ^ payload_byte) * 32'h0100_0193;
+        end
+      end
+      return digest;
+    endfunction
+
     function automatic bit wire_equal(svt_pcie_tlp lhs,
                                       svt_pcie_tlp rhs);
       if ((lhs == null) || (rhs == null))
@@ -267,6 +335,94 @@ package pcie_svt_switch_adapter_unit_test_pkg;
     task automatic run_scoreboard_cross_route_regression();
       check_cross_route_identical_tlps();
       $display("SWITCH_SCOREBOARD_CROSS_ROUTE_PASS");
+    endtask
+
+    task automatic run_scoreboard_cfg_rewrite_regression();
+      svt_pcie_tlp ingress_cfg1;
+      svt_pcie_tlp egress_cfg0;
+      ingress_cfg1 = make_cfg_request(
+        "cfg1_ingress", svt_pcie_tlp::TYPE_1_CFG_REQ, 1'b0);
+      require($cast(egress_cfg0, ingress_cfg1.clone()),
+              "Cfg1-to-Cfg0 egress clone failed");
+      egress_cfg0.tlp_type = svt_pcie_tlp::TYPE_0_CFG_REQ;
+      scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                1, 2, ingress_cfg1, egress_cfg0);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, ingress_cfg1);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, egress_cfg0);
+      scoreboard.check_empty();
+      $display("SWITCH_SCOREBOARD_CFG_REWRITE_PASS");
+    endtask
+
+    task automatic run_scoreboard_local_cfg_read_regression();
+      svt_pcie_tlp request;
+      svt_pcie_tlp response;
+      request = make_cfg_request(
+        "local_cfg_read", svt_pcie_tlp::TYPE_0_CFG_REQ, 1'b0);
+      response = make_local_completion(
+        "local_cfg_read_completion", request, 1'b1);
+      scoreboard.expect_local_response(2, request, response);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 2, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, response);
+      scoreboard.check_empty();
+      $display("SWITCH_SCOREBOARD_LOCAL_CFG_READ_PASS");
+    endtask
+
+    task automatic run_scoreboard_local_cfg_write_regression();
+      svt_pcie_tlp request;
+      svt_pcie_tlp response;
+      request = make_cfg_request(
+        "local_cfg_write", svt_pcie_tlp::TYPE_0_CFG_REQ, 1'b1);
+      response = make_local_completion(
+        "local_cfg_write_completion", request, 1'b0);
+      scoreboard.expect_local_response(2, request, response);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 2, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, response);
+      scoreboard.check_empty();
+      $display("SWITCH_SCOREBOARD_LOCAL_CFG_WRITE_PASS");
+    endtask
+
+    task automatic run_scoreboard_cpl_nonwire_regression();
+      svt_pcie_tlp ingress;
+      svt_pcie_tlp egress;
+      ingress = make_completion("completion_nonwire_ingress");
+      require($cast(egress, ingress.clone()),
+              "Completion non-wire sentinel clone failed");
+      ingress.address = 64'h1111_2222_3333_4444;
+      ingress.first_dw_be = 4'h1;
+      ingress.last_dw_be = 4'h2;
+      egress.address = 64'haaaa_bbbb_cccc_dddd;
+      egress.first_dw_be = 4'h4;
+      egress.last_dw_be = 4'h8;
+      scoreboard.expect_forward(PCIE_SVT_FORWARD_COMPLETION,
+                                3, 2, ingress);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 3, ingress);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, egress);
+      scoreboard.check_empty();
+      $display("SWITCH_SCOREBOARD_CPL_NONWIRE_PASS");
+    endtask
+
+    task automatic run_scoreboard_request_nonwire_regression();
+      svt_pcie_tlp ingress;
+      svt_pcie_tlp egress;
+      ingress = make_request("request_nonwire_ingress");
+      require($cast(egress, ingress.clone()),
+              "Request non-wire sentinel clone failed");
+      ingress.completer_id = 16'h1111;
+      ingress.completion_status = svt_pcie_tlp::COMPLETER_ABORT;
+      ingress.byte_count_modified = 1'b1;
+      ingress.byte_count = 12'h111;
+      ingress.lower_address = 7'h11;
+      egress.completer_id = 16'heeee;
+      egress.completion_status = svt_pcie_tlp::UNSUPPORTED_REQ;
+      egress.byte_count_modified = 1'b0;
+      egress.byte_count = 12'heee;
+      egress.lower_address = 7'h6e;
+      scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                1, 2, ingress);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, ingress);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, egress);
+      scoreboard.check_empty();
+      $display("SWITCH_SCOREBOARD_REQUEST_NONWIRE_PASS");
     endtask
 
     task automatic run_setup_cfg_regression();
@@ -392,13 +548,13 @@ package pcie_svt_switch_adapter_unit_test_pkg;
 
       // Identical legal TLPs are distinct expectations, not duplicates.
       scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
-                                4, 5, request);
+                                3, 4, request);
       scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
-                                4, 5, request);
-      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 4, request);
-      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 4, request);
-      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 5, request);
-      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 5, request);
+                                3, 4, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 3, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 3, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 4, request);
+      scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 4, request);
       scoreboard.check_empty();
 
       check_cross_route_identical_tlps();
@@ -411,6 +567,10 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       svt_pcie_tlp completion;
       svt_pcie_tlp unsupported;
       svt_pcie_tlp illegal_tuple;
+      svt_pcie_tlp illegal_completion;
+      svt_pcie_tlp observed;
+      svt_pcie_tlp cfg_ingress;
+      svt_pcie_tlp cfg_egress;
       pcie_svt_null_clone_tlp bad_clone;
       pcie_svt_raw_tlp_sequence raw_sequence;
       bit drop;
@@ -423,6 +583,8 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       illegal_tuple = new("illegal_tuple");
       illegal_tuple.tlp_type = svt_pcie_tlp::DMEM_REQ;
       illegal_tuple.fmt = svt_pcie_tlp::NO_DATA_3_DWORD;
+      illegal_completion = make_completion("illegal_completion");
+      illegal_completion.fmt = svt_pcie_tlp::NO_DATA_4_DWORD;
       bad_clone = new("bad_clone");
       bad_clone.tlp_type = svt_pcie_tlp::MEM_REQ;
       bad_clone.fmt = svt_pcie_tlp::NO_DATA_3_DWORD;
@@ -464,6 +626,9 @@ package pcie_svt_switch_adapter_unit_test_pkg;
         end
         "subscriber_null": rx_subscriber.write(null);
         "subscriber_clone": rx_subscriber.write(bad_clone);
+        "sidecar_rx_message": rx_subscriber.write(unsupported);
+        "sidecar_tx_illegal_tuple":
+          tx_subscriber.write(illegal_completion);
         "capture_null": adapter.capture_request(null);
         "capture_clone": adapter.capture_request(bad_clone);
         "raw_null": begin
@@ -494,6 +659,77 @@ package pcie_svt_switch_adapter_unit_test_pkg;
           request.payload[0] = 32'hdead_beef;
           scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
         end
+        "scoreboard_fnv_collision": begin
+          request.payload[0] = 32'h3e9e_72dd;
+          request.payload[1] = 32'h3c90_d748;
+          require($cast(observed, request.clone()),
+                  "FNV collision observed clone failed");
+          observed.payload[0] = 32'h884c_33c5;
+          observed.payload[1] = 32'hd536_7d80;
+          require(reference_payload_fnv1a(request) == 32'hf1c5_0def,
+                  "FNV collision expected digest is not literal f1c50def");
+          require(reference_payload_fnv1a(observed) == 32'hf1c5_0def,
+                  "FNV collision observed digest is not literal f1c50def");
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    1, 2, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, observed);
+          $display("FNV_COLLISION_UNDETECTED");
+        end
+        "scoreboard_tc_mismatch": begin
+          require($cast(observed, request.clone()),
+                  "TC mismatch observed clone failed");
+          observed.traffic_class = request.traffic_class ^ 3'b001;
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    1, 2, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, observed);
+        end
+        "scoreboard_attr_mismatch": begin
+          require($cast(observed, request.clone()),
+                  "Attr mismatch observed clone failed");
+          observed.attr_no_snoop = !request.attr_no_snoop;
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    1, 2, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, observed);
+        end
+        "scoreboard_prefix_mismatch": begin
+          request.tlp_prefixes.delete();
+          request.tlp_prefixes.push_back(32'h0100_1234);
+          request.num_local_tlp_prefixes = 1;
+          request.num_end_to_end_tlp_prefixes = 0;
+          require($cast(observed, request.clone()),
+                  "prefix mismatch observed clone failed");
+          observed.tlp_prefixes[0] = 32'h0100_5678;
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    1, 2, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, observed);
+        end
+        "scoreboard_at_mismatch": begin
+          request.at = svt_pcie_tlp::UNTRANSLATED;
+          require($cast(observed, request.clone()),
+                  "AT mismatch observed clone failed");
+          observed.at = svt_pcie_tlp::TRANSLATED;
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    1, 2, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, observed);
+        end
+        "scoreboard_tph_mismatch": begin
+          request.th = 1'b1;
+          request.ln = 1'b1;
+          request.ph = svt_pcie_tlp::REQUESTER;
+          request.st = 16'h1234;
+          require($cast(observed, request.clone()),
+                  "TPH mismatch observed clone failed");
+          observed.st = 16'h5678;
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    1, 2, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, observed);
+        end
         "scoreboard_loop": begin
           scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
                                     1, 2, request);
@@ -504,6 +740,35 @@ package pcie_svt_switch_adapter_unit_test_pkg;
           scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
                                     1, 2, request);
           scoreboard.check_empty();
+        end
+        "scoreboard_self_route_expect": begin
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    1, 1, request);
+        end
+        "scoreboard_direction_mismatch": begin
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_COMPLETION,
+                                    1, 2, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, request);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 2, request);
+          scoreboard.check_empty();
+        end
+        "scoreboard_cfg_rewrite_loop": begin
+          cfg_ingress = make_cfg_request(
+            "cfg_loop_ingress", svt_pcie_tlp::TYPE_1_CFG_REQ, 1'b0);
+          require($cast(cfg_egress, cfg_ingress.clone()),
+                  "Cfg rewrite loop egress clone failed");
+          cfg_egress.tlp_type = svt_pcie_tlp::TYPE_0_CFG_REQ;
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    1, 2, cfg_ingress, cfg_egress);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 1, cfg_ingress);
+          scoreboard.observe_wire(PCIE_SVT_WIRE_TX, 1, cfg_egress);
+        end
+        "scoreboard_port_expect": begin
+          scoreboard.expect_forward(PCIE_SVT_FORWARD_REQUEST,
+                                    5, 2, request);
+        end
+        "scoreboard_port_observe": begin
+          scoreboard.observe_wire(PCIE_SVT_WIRE_RX, 5, request);
         end
         default:
           `uvm_fatal("SWITCH_ADAPTER_BAD_MODE",
@@ -524,6 +789,16 @@ package pcie_svt_switch_adapter_unit_test_pkg;
           "scoreboard_cross_route":
             run_scoreboard_cross_route_regression();
           "setup_cfg": run_setup_cfg_regression();
+          "scoreboard_cfg_rewrite":
+            run_scoreboard_cfg_rewrite_regression();
+          "scoreboard_local_cfg_read":
+            run_scoreboard_local_cfg_read_regression();
+          "scoreboard_local_cfg_write":
+            run_scoreboard_local_cfg_write_regression();
+          "scoreboard_cpl_nonwire":
+            run_scoreboard_cpl_nonwire_regression();
+          "scoreboard_request_nonwire":
+            run_scoreboard_request_nonwire_regression();
           default:
             `uvm_fatal("SWITCH_ADAPTER_BAD_MODE",
                        {"unknown positive mode: ", positive_mode})

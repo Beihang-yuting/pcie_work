@@ -8,33 +8,69 @@ typedef enum int unsigned {
   PCIE_SVT_FORWARD_COMPLETION
 } pcie_svt_forward_direction_e;
 
-class pcie_svt_switch_signature;
+class pcie_svt_switch_value_signature;
   pcie_svt_forward_direction_e direction;
-  int ingress;
-  int egress;
   int unsigned fmt;
   int unsigned tlp_type;
-  bit [15:0] requester_id;
-  bit [15:0] completer_id;
-  bit [9:0] tag;
-  bit [63:0] address;
+
+  bit [2:0] traffic_class;
+  bit th;
+  bit td;
+  bit ep;
+  bit attr_relaxed_ordering;
+  bit attr_id_order;
+  bit attr_no_snoop;
+  bit ln;
   bit [9:0] length;
+  bit [15:0] requester_id;
+  bit [9:0] tag;
+  bit [31:0] tlp_prefixes[$];
+  int num_local_tlp_prefixes;
+  int num_end_to_end_tlp_prefixes;
+
+  bit has_mem_fields;
+  bit [63:0] address;
   bit [3:0] first_be;
   bit [3:0] last_be;
+  int unsigned at;
+  bit has_tph_fields;
+  int unsigned ph;
+  bit [15:0] st;
+
+  bit has_cfg_fields;
+  bit [7:0] bus_number;
+  bit [4:0] device_number;
+  bit [2:0] function_number;
+  bit [9:0] register_number;
+
+  bit has_completion_fields;
+  bit [15:0] completer_id;
   int unsigned completion_status;
   bit bcm;
   bit [11:0] byte_count;
   bit [6:0] lower_address;
+
+  bit [31:0] payload[];
   bit [31:0] payload_digest;
+endclass
+
+class pcie_svt_switch_expectation;
+  pcie_svt_forward_direction_e direction;
+  int ingress;
+  int egress;
+  bit local_response;
+  pcie_svt_switch_value_signature rx_signature;
+  pcie_svt_switch_value_signature tx_signature;
   bit rx_seen;
-  bit tx_seen;
 endclass
 
 class pcie_svt_switch_scoreboard extends uvm_component;
   `uvm_component_utils(pcie_svt_switch_scoreboard)
 
-  protected pcie_svt_switch_signature expected[$];
-  protected pcie_svt_switch_signature completed[$];
+  int unsigned num_ports = 5;
+
+  protected pcie_svt_switch_expectation expected[$];
+  protected pcie_svt_switch_expectation completed[$];
 
   function new(string name = "pcie_svt_switch_scoreboard",
                uvm_component parent = null);
@@ -49,7 +85,7 @@ class pcie_svt_switch_scoreboard extends uvm_component;
     foreach (transaction.payload[dword_index]) begin
       for (int unsigned byte_index = 0; byte_index < 4; byte_index++) begin
         payload_byte = transaction.payload[dword_index]
-                         [8 * byte_index +: 8];
+                       [8 * byte_index +: 8];
         digest = (digest ^ payload_byte) * 32'h0100_0193;
       end
     end
@@ -62,100 +98,239 @@ class pcie_svt_switch_scoreboard extends uvm_component;
            PCIE_SVT_FORWARD_COMPLETION : PCIE_SVT_FORWARD_REQUEST;
   endfunction
 
-  protected function pcie_svt_switch_signature make_signature(
-      pcie_svt_forward_direction_e direction,
-      int ingress,
-      int egress,
+  protected function bit valid_port(int port, string operation);
+    if ((port < 0) || (port >= int'(num_ports))) begin
+      `uvm_fatal("SCOREBOARD_PORT",
+        $sformatf("%s port %0d is outside [0:%0d]",
+                  operation, port, int'(num_ports) - 1))
+      return 1'b0;
+    end
+    return 1'b1;
+  endfunction
+
+  protected function pcie_svt_switch_value_signature make_signature(
       svt_pcie_tlp transaction);
-    pcie_svt_switch_signature signature;
+    pcie_svt_switch_value_signature signature;
     signature = new();
-    signature.direction = direction;
-    signature.ingress = ingress;
-    signature.egress = egress;
+    signature.direction = infer_direction(transaction);
     signature.fmt = transaction.fmt;
     signature.tlp_type = transaction.tlp_type;
+    signature.traffic_class = transaction.traffic_class;
+    signature.th = transaction.th;
+    signature.td = transaction.td;
+    signature.ep = transaction.ep;
+    signature.attr_relaxed_ordering = transaction.attr_relaxed_ordering;
+    signature.attr_id_order = transaction.attr_id_order;
+    signature.attr_no_snoop = transaction.attr_no_snoop;
+    signature.ln = transaction.ln;
+    signature.length = transaction.length;
     signature.requester_id = transaction.requester_id;
-    signature.completer_id = transaction.completer_id;
     signature.tag = transaction.tag;
+    signature.num_local_tlp_prefixes = transaction.num_local_tlp_prefixes;
+    signature.num_end_to_end_tlp_prefixes =
+      transaction.num_end_to_end_tlp_prefixes;
+    foreach (transaction.tlp_prefixes[prefix_index])
+      signature.tlp_prefixes.push_back(
+        transaction.tlp_prefixes[prefix_index]);
+
     case (transaction.tlp_type)
       svt_pcie_tlp::MEM_REQ,
-      svt_pcie_tlp::DMEM_REQ:
+      svt_pcie_tlp::DMEM_REQ: begin
+        signature.has_mem_fields = 1'b1;
         signature.address = transaction.address;
+        signature.first_be = transaction.first_dw_be;
+        signature.last_be = transaction.last_dw_be;
+        signature.at = transaction.at;
+        signature.has_tph_fields = transaction.th;
+        if (signature.has_tph_fields) begin
+          signature.ph = transaction.ph;
+          signature.st = transaction.st;
+        end
+      end
       svt_pcie_tlp::TYPE_0_CFG_REQ,
       svt_pcie_tlp::TYPE_1_CFG_REQ: begin
-        signature.completer_id = {transaction.bus_number,
-                                  transaction.device_number,
-                                  transaction.function_number};
-        signature.address = {36'b0,
-                             transaction.bus_number,
-                             transaction.device_number,
-                             transaction.function_number,
-                             transaction.register_number,
-                             2'b00};
+        signature.has_cfg_fields = 1'b1;
+        signature.bus_number = transaction.bus_number;
+        signature.device_number = transaction.device_number;
+        signature.function_number = transaction.function_number;
+        signature.register_number = transaction.register_number;
+        signature.first_be = transaction.first_dw_be;
+        signature.last_be = transaction.last_dw_be;
       end
-      default:
-        signature.address = transaction.address;
+      svt_pcie_tlp::CPL: begin
+        signature.has_completion_fields = 1'b1;
+        signature.completer_id = transaction.completer_id;
+        signature.completion_status = transaction.completion_status;
+        signature.bcm = transaction.byte_count_modified;
+        signature.byte_count = transaction.byte_count;
+        signature.lower_address = transaction.lower_address;
+      end
     endcase
-    signature.length = transaction.length;
-    signature.first_be = transaction.first_dw_be;
-    signature.last_be = transaction.last_dw_be;
-    signature.completion_status = transaction.completion_status;
-    signature.bcm = transaction.byte_count_modified;
-    signature.byte_count = transaction.byte_count;
-    signature.lower_address = transaction.lower_address;
+
+    signature.payload = new[transaction.payload.size()];
+    foreach (transaction.payload[dword_index])
+      signature.payload[dword_index] = transaction.payload[dword_index];
     signature.payload_digest = payload_fnv1a(transaction);
     return signature;
   endfunction
 
-  protected function bit same_header(pcie_svt_switch_signature lhs,
-                                     pcie_svt_switch_signature rhs);
-    return (lhs.direction == rhs.direction) &&
-           (lhs.fmt == rhs.fmt) &&
-           (lhs.tlp_type == rhs.tlp_type) &&
-           (lhs.requester_id == rhs.requester_id) &&
-           (lhs.completer_id == rhs.completer_id) &&
-           (lhs.tag == rhs.tag) &&
-           (lhs.address == rhs.address) &&
-           (lhs.length == rhs.length) &&
-           (lhs.first_be == rhs.first_be) &&
-           (lhs.last_be == rhs.last_be) &&
-           (lhs.completion_status == rhs.completion_status) &&
-           (lhs.bcm == rhs.bcm) &&
-           (lhs.byte_count == rhs.byte_count) &&
-           (lhs.lower_address == rhs.lower_address);
+  protected function bit same_prefixes(
+      pcie_svt_switch_value_signature lhs,
+      pcie_svt_switch_value_signature rhs);
+    if ((lhs.num_local_tlp_prefixes != rhs.num_local_tlp_prefixes) ||
+        (lhs.num_end_to_end_tlp_prefixes !=
+         rhs.num_end_to_end_tlp_prefixes) ||
+        (lhs.tlp_prefixes.size() != rhs.tlp_prefixes.size()))
+      return 1'b0;
+    foreach (lhs.tlp_prefixes[index])
+      if (lhs.tlp_prefixes[index] !== rhs.tlp_prefixes[index])
+        return 1'b0;
+    return 1'b1;
   endfunction
 
-  protected function bit same_tlp(pcie_svt_switch_signature lhs,
-                                  pcie_svt_switch_signature rhs);
+  protected function bit same_header(
+      pcie_svt_switch_value_signature lhs,
+      pcie_svt_switch_value_signature rhs);
+    if ((lhs.direction != rhs.direction) ||
+        (lhs.fmt != rhs.fmt) ||
+        (lhs.tlp_type != rhs.tlp_type) ||
+        (lhs.traffic_class != rhs.traffic_class) ||
+        (lhs.th != rhs.th) ||
+        (lhs.td != rhs.td) ||
+        (lhs.ep != rhs.ep) ||
+        (lhs.attr_relaxed_ordering != rhs.attr_relaxed_ordering) ||
+        (lhs.attr_id_order != rhs.attr_id_order) ||
+        (lhs.attr_no_snoop != rhs.attr_no_snoop) ||
+        (lhs.ln != rhs.ln) ||
+        (lhs.length != rhs.length) ||
+        (lhs.requester_id != rhs.requester_id) ||
+        (lhs.tag != rhs.tag) ||
+        !same_prefixes(lhs, rhs) ||
+        (lhs.has_mem_fields != rhs.has_mem_fields) ||
+        (lhs.has_cfg_fields != rhs.has_cfg_fields) ||
+        (lhs.has_completion_fields != rhs.has_completion_fields))
+      return 1'b0;
+
+    if (lhs.has_mem_fields &&
+        ((lhs.address != rhs.address) ||
+         (lhs.first_be != rhs.first_be) ||
+         (lhs.last_be != rhs.last_be) ||
+         (lhs.at != rhs.at) ||
+         (lhs.has_tph_fields != rhs.has_tph_fields)))
+      return 1'b0;
+    if (lhs.has_mem_fields && lhs.has_tph_fields &&
+        ((lhs.ph != rhs.ph) || (lhs.st != rhs.st)))
+      return 1'b0;
+
+    if (lhs.has_cfg_fields &&
+        ((lhs.bus_number != rhs.bus_number) ||
+         (lhs.device_number != rhs.device_number) ||
+         (lhs.function_number != rhs.function_number) ||
+         (lhs.register_number != rhs.register_number) ||
+         (lhs.first_be != rhs.first_be) ||
+         (lhs.last_be != rhs.last_be)))
+      return 1'b0;
+
+    if (lhs.has_completion_fields &&
+        ((lhs.completer_id != rhs.completer_id) ||
+         (lhs.completion_status != rhs.completion_status) ||
+         (lhs.bcm != rhs.bcm) ||
+         (lhs.byte_count != rhs.byte_count) ||
+         (lhs.lower_address != rhs.lower_address)))
+      return 1'b0;
+    return 1'b1;
+  endfunction
+
+  protected function bit same_payload(
+      pcie_svt_switch_value_signature lhs,
+      pcie_svt_switch_value_signature rhs);
+    if (lhs.payload.size() != rhs.payload.size())
+      return 1'b0;
+    foreach (lhs.payload[index])
+      if (lhs.payload[index] !== rhs.payload[index])
+        return 1'b0;
+    return 1'b1;
+  endfunction
+
+  protected function bit same_tlp(
+      pcie_svt_switch_value_signature lhs,
+      pcie_svt_switch_value_signature rhs);
     return same_header(lhs, rhs) &&
-           (lhs.payload_digest == rhs.payload_digest);
+           (lhs.payload_digest == rhs.payload_digest) &&
+           same_payload(lhs, rhs);
   endfunction
 
   function void expect_forward(
       pcie_svt_forward_direction_e direction,
       int ingress,
       int egress,
-      svt_pcie_tlp transaction);
-    pcie_svt_switch_signature signature;
-    if (transaction == null) begin
+      svt_pcie_tlp ingress_tlp,
+      svt_pcie_tlp egress_tlp = null);
+    pcie_svt_switch_expectation expectation;
+    if (ingress_tlp == null) begin
       `uvm_fatal("SCOREBOARD_NULL", "null forwarding expectation")
       return;
     end
-    if ((ingress < 0) || (egress < 0)) begin
-      `uvm_fatal("SCOREBOARD_PORT", "negative expectation port")
+    if (!valid_port(ingress, "expect ingress") ||
+        !valid_port(egress, "expect egress"))
+      return;
+    if (ingress == egress) begin
+      `uvm_fatal("SCOREBOARD_FORWARDING_LOOP",
+                 "ordinary forwarding expectation uses the ingress port")
       return;
     end
-    signature = make_signature(direction, ingress, egress, transaction);
-    expected.push_back(signature);
+    expectation = new();
+    expectation.direction = direction;
+    expectation.ingress = ingress;
+    expectation.egress = egress;
+    expectation.rx_signature = make_signature(ingress_tlp);
+    expectation.tx_signature = make_signature(
+      (egress_tlp == null) ? ingress_tlp : egress_tlp);
+    if ((expectation.rx_signature.direction != direction) ||
+        (expectation.tx_signature.direction != direction)) begin
+      `uvm_fatal("SCOREBOARD_DIRECTION",
+                 "forwarding TLP direction does not match expectation")
+      return;
+    end
+    expected.push_back(expectation);
   endfunction
 
-  protected function void observe_rx(int port,
-                                     pcie_svt_switch_signature observed);
+  function void expect_local_response(
+      int port,
+      svt_pcie_tlp request_tlp,
+      svt_pcie_tlp response_tlp);
+    pcie_svt_switch_expectation expectation;
+    if ((request_tlp == null) || (response_tlp == null)) begin
+      `uvm_fatal("SCOREBOARD_NULL", "null local-response expectation")
+      return;
+    end
+    if (!valid_port(port, "local response"))
+      return;
+    if ((infer_direction(request_tlp) != PCIE_SVT_FORWARD_REQUEST) ||
+        (infer_direction(response_tlp) != PCIE_SVT_FORWARD_COMPLETION)) begin
+      `uvm_fatal("SCOREBOARD_DIRECTION",
+                 "local response must map a Request RX to a Completion TX")
+      return;
+    end
+    expectation = new();
+    expectation.direction = PCIE_SVT_FORWARD_COMPLETION;
+    expectation.ingress = port;
+    expectation.egress = port;
+    expectation.local_response = 1'b1;
+    expectation.rx_signature = make_signature(request_tlp);
+    expectation.tx_signature = make_signature(response_tlp);
+    expected.push_back(expectation);
+  endfunction
+
+  protected function void observe_rx(
+      int port,
+      pcie_svt_switch_value_signature observed);
     int selected;
     selected = -1;
     foreach (expected[index]) begin
       if ((expected[index].ingress == port) &&
-          !expected[index].rx_seen && same_tlp(expected[index], observed)) begin
+          !expected[index].rx_seen &&
+          same_tlp(expected[index].rx_signature, observed)) begin
         selected = index;
         break;
       end
@@ -167,18 +342,30 @@ class pcie_svt_switch_scoreboard extends uvm_component;
 
     foreach (expected[index]) begin
       if ((expected[index].ingress == port) &&
-          same_header(expected[index], observed) &&
-          (expected[index].payload_digest != observed.payload_digest)) begin
+          !expected[index].rx_seen &&
+          same_header(expected[index].rx_signature, observed) &&
+          !same_payload(expected[index].rx_signature, observed)) begin
         `uvm_fatal("SCOREBOARD_PAYLOAD_MISMATCH",
-                   "RX payload digest does not match expectation")
+          $sformatf("RX payload differs: expected digest=%08x observed=%08x",
+                    expected[index].rx_signature.payload_digest,
+                    observed.payload_digest))
         return;
       end
     end
     foreach (expected[index]) begin
-      if (same_tlp(expected[index], observed) &&
+      if (same_tlp(expected[index].rx_signature, observed) &&
           (expected[index].ingress != port)) begin
         `uvm_fatal("SCOREBOARD_WRONG_INGRESS",
                    "TLP arrived on the wrong ingress port")
+        return;
+      end
+    end
+    foreach (expected[index]) begin
+      if ((expected[index].ingress == port) &&
+          !expected[index].rx_seen &&
+          (expected[index].rx_signature.direction == observed.direction)) begin
+        `uvm_fatal("SCOREBOARD_HEADER_MISMATCH",
+                   "RX header does not match expectation")
         return;
       end
     end
@@ -191,44 +378,56 @@ class pcie_svt_switch_scoreboard extends uvm_component;
                "unexpected or duplicate RX Request")
   endfunction
 
-  protected function void observe_tx(int port,
-                                     pcie_svt_switch_signature observed);
+  protected function void observe_tx(
+      int port,
+      pcie_svt_switch_value_signature observed);
     int selected;
     selected = -1;
 
     foreach (expected[index]) begin
       if ((expected[index].egress == port) && expected[index].rx_seen &&
-          !expected[index].tx_seen && same_tlp(expected[index], observed)) begin
+          same_tlp(expected[index].tx_signature, observed)) begin
         selected = index;
         break;
       end
     end
     if (selected >= 0) begin
-      expected[selected].tx_seen = 1'b1;
       completed.push_back(expected[selected]);
       expected.delete(selected);
       return;
     end
 
+    foreach (completed[index]) begin
+      if ((completed[index].egress == port) &&
+          same_tlp(completed[index].tx_signature, observed)) begin
+        `uvm_fatal("SCOREBOARD_DUPLICATE",
+                   "duplicate TX forwarding observation")
+        return;
+      end
+    end
     foreach (expected[index]) begin
       if ((expected[index].ingress == port) &&
-          same_tlp(expected[index], observed)) begin
+          (same_tlp(expected[index].rx_signature, observed) ||
+           (!expected[index].local_response &&
+            same_tlp(expected[index].tx_signature, observed)))) begin
         `uvm_fatal("SCOREBOARD_FORWARDING_LOOP",
                    "TLP returned to its ingress port")
         return;
       end
     end
     foreach (expected[index]) begin
-      if ((expected[index].egress == port) &&
-          same_header(expected[index], observed) &&
-          (expected[index].payload_digest != observed.payload_digest)) begin
+      if ((expected[index].egress == port) && expected[index].rx_seen &&
+          same_header(expected[index].tx_signature, observed) &&
+          !same_payload(expected[index].tx_signature, observed)) begin
         `uvm_fatal("SCOREBOARD_PAYLOAD_MISMATCH",
-                   "TX payload digest does not match expectation")
+          $sformatf("TX payload differs: expected digest=%08x observed=%08x",
+                    expected[index].tx_signature.payload_digest,
+                    observed.payload_digest))
         return;
       end
     end
     foreach (expected[index]) begin
-      if (same_tlp(expected[index], observed) &&
+      if (same_tlp(expected[index].tx_signature, observed) &&
           (expected[index].egress != port)) begin
         `uvm_fatal("SCOREBOARD_WRONG_EGRESS",
                    "TLP appeared on the wrong egress port")
@@ -237,18 +436,18 @@ class pcie_svt_switch_scoreboard extends uvm_component;
     end
     foreach (expected[index]) begin
       if ((expected[index].egress == port) &&
-          same_tlp(expected[index], observed) &&
+          same_tlp(expected[index].tx_signature, observed) &&
           !expected[index].rx_seen) begin
         `uvm_fatal("SCOREBOARD_MISSING_INGRESS",
                    "TX observation preceded its RX observation")
         return;
       end
     end
-    foreach (completed[index]) begin
-      if ((completed[index].egress == port) &&
-          same_tlp(completed[index], observed)) begin
-        `uvm_fatal("SCOREBOARD_DUPLICATE",
-                   "duplicate TX forwarding observation")
+    foreach (expected[index]) begin
+      if ((expected[index].egress == port) && expected[index].rx_seen &&
+          (expected[index].tx_signature.direction == observed.direction)) begin
+        `uvm_fatal("SCOREBOARD_HEADER_MISMATCH",
+                   "TX header does not match expectation")
         return;
       end
     end
@@ -264,15 +463,14 @@ class pcie_svt_switch_scoreboard extends uvm_component;
   function void observe_wire(pcie_svt_wire_direction_e wire_direction,
                              int port,
                              svt_pcie_tlp transaction);
-    pcie_svt_switch_signature observed;
+    pcie_svt_switch_value_signature observed;
     if (transaction == null) begin
       `uvm_fatal("SCOREBOARD_NULL", "null wire observation")
       return;
     end
-    observed = make_signature(infer_direction(transaction),
-                              (wire_direction == PCIE_SVT_WIRE_RX) ? port : -1,
-                              (wire_direction == PCIE_SVT_WIRE_TX) ? port : -1,
-                              transaction);
+    if (!valid_port(port, "wire observation"))
+      return;
+    observed = make_signature(transaction);
     case (wire_direction)
       PCIE_SVT_WIRE_RX: observe_rx(port, observed);
       PCIE_SVT_WIRE_TX: observe_tx(port, observed);

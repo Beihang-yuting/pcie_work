@@ -52,8 +52,12 @@ class pcie_svt_switch_sidecar_subscriber extends
       `uvm_fatal("SIDECAR_CLONE", "sidecar subscriber clone failed")
       return;
     end
-    if (!is_supported_wire_tlp(published))
+    if (!is_supported_wire_tlp(published)) begin
+      `uvm_fatal("SIDECAR_UNSUPPORTED",
+        $sformatf("unsupported wire TLP port=%0d role=%0d fmt=%0d type=%0d",
+                  port_index, role, published.fmt, published.tlp_type))
       return;
+    end
     if (scoreboard == null) begin
       `uvm_fatal("SIDECAR_SCOREBOARD_NULL",
                  "sidecar subscriber scoreboard is null")
