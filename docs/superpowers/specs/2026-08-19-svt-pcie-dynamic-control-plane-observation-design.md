@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-19
 
-**Status:** Written-spec review
+**Status:** Approved
 
 **Validation host:** `ubuntu@10.11.10.53`
 
