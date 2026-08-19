@@ -703,6 +703,7 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       svt_pcie_tlp cfg_egress;
       pcie_svt_null_clone_tlp bad_clone;
       pcie_svt_raw_tlp_sequence raw_sequence;
+      pcie_tl_switch_route_event route_event;
       bit drop;
 
       request = make_request();
@@ -930,6 +931,28 @@ package pcie_svt_switch_adapter_unit_test_pkg;
           scoreboard.write(make_route_event(
             203, PCIE_TL_ROUTE_DROP, 1, SWITCH_ROUTE_DROP,
             request, null));
+        end
+        "deferred_malformed_broadcast_egress": begin
+          scoreboard.begin_deferred_enumeration();
+          route_event = make_route_event(
+            210, PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST, 1,
+            SWITCH_ROUTE_BCAST, request, request);
+          route_event.egress_port = 2;
+          scoreboard.write(route_event);
+        end
+        "deferred_malformed_broadcast_route": begin
+          scoreboard.begin_deferred_enumeration();
+          route_event = make_route_event(
+            211, PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST, 1,
+            SWITCH_ROUTE_BCAST, request, request);
+          route_event.route_code = 2;
+          scoreboard.write(route_event);
+        end
+        "deferred_broadcast": begin
+          scoreboard.begin_deferred_enumeration();
+          scoreboard.write(make_route_event(
+            212, PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST, 1,
+            SWITCH_ROUTE_BCAST, request, request));
         end
         "deferred_payload_mismatch": begin
           scoreboard.begin_deferred_enumeration();

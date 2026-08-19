@@ -368,10 +368,12 @@ class pcie_svt_switch_scoreboard extends uvm_component;
         end
       end
       PCIE_TL_ROUTE_UNSUPPORTED_BROADCAST: begin
-        if ((route_event.ingress_tlp == null) ||
+        if ((route_event.egress_port != SWITCH_ROUTE_BCAST) ||
+            (route_event.route_code != SWITCH_ROUTE_BCAST) ||
+            (route_event.ingress_tlp == null) ||
             (route_event.egress_tlp == null)) begin
           `uvm_fatal("SCOREBOARD_ROUTE_EVENT",
-                     "broadcast route event has a null snapshot")
+                     "broadcast route event violates the route contract")
           return;
         end
       end
