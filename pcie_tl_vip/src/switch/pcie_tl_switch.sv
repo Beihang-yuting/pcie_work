@@ -26,6 +26,7 @@ class pcie_tl_switch extends uvm_component;
     //--- Dynamic routing state ---
     int local_bdf_to_port[bit [15:0]];
     int outstanding_ingress[switch_np_key_t];
+    bit enum_cfg_write_completed[];
 
     //--- Route observation ---
     uvm_analysis_port #(pcie_tl_switch_route_event) route_observed_port;
@@ -132,6 +133,7 @@ class pcie_tl_switch extends uvm_component;
         all_ports = new[nu + nd];
         for (int r = 0; r < nu; r++) all_ports[r]      = usps[r];
         for (int i = 0; i < nd; i++) all_ports[nu + i] = dsp[i];
+        enum_cfg_write_completed = new[nu + nd];
 
         fabric = pcie_tl_switch_fabric::type_id::create("fabric");
         fabric.ports      = all_ports;
@@ -376,7 +378,10 @@ class pcie_tl_switch extends uvm_component;
                 cpl.length       = 1;
                 cpl.requester_id = tlp.requester_id;
                 cpl.tag          = tlp.tag;
-                cpl.completer_id = all_ports[target_port].bdf;
+                cpl.completer_id =
+                    (sw_cfg.enum_mode &&
+                     !enum_cfg_write_completed[target_port]) ?
+                    16'h0000 : all_ports[target_port].bdf;
                 cpl.cpl_status   = CPL_STATUS_SC;
                 cpl.byte_count   = 4;
                 cpl.lower_addr   = {cfg_tlp.reg_num[0], 2'b00};
@@ -403,10 +408,15 @@ class pcie_tl_switch extends uvm_component;
                 cpl.length       = 0;
                 cpl.requester_id = tlp.requester_id;
                 cpl.tag          = tlp.tag;
-                cpl.completer_id = all_ports[target_port].bdf;
+                cpl.completer_id =
+                    (sw_cfg.enum_mode &&
+                     !enum_cfg_write_completed[target_port]) ?
+                    16'h0000 : all_ports[target_port].bdf;
                 cpl.cpl_status   = CPL_STATUS_SC;
-                cpl.byte_count   = 0;
+                cpl.byte_count   = sw_cfg.enum_mode ? 4 : 0;
                 cpl.lower_addr   = 0;
+                if (sw_cfg.enum_mode)
+                    enum_cfg_write_completed[target_port] = 1'b1;
                 publish_route_event(PCIE_TL_ROUTE_LOCAL_RESPONSE,
                                     ingress_port_id, ingress_port_id,
                                     SWITCH_ROUTE_LOCAL, tlp, cpl);

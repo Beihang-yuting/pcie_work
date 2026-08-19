@@ -49,9 +49,12 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
     pcie_tl_switch        mr_sw;
     pcie_tl_switch_config custom_bdf_cfg;
     pcie_tl_switch        custom_bdf_sw;
+    pcie_tl_switch_config enum_cfg;
+    pcie_tl_switch        enum_sw;
     pcie_tl_switch_port   unit_usp;
     pcie_tl_switch_port   unit_dsp;
     pcie_tl_route_event_collector route_collector;
+    pcie_tl_route_event_collector enum_route_collector;
 
     function new(string name = "pcie_tl_switch_proxy_unit_test",
                  uvm_component parent = null);
@@ -83,17 +86,30 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         custom_bdf_sw = pcie_tl_switch::type_id::create("custom_bdf_sw", this);
         custom_bdf_sw.sw_cfg = custom_bdf_cfg;
 
+        enum_cfg = new("enum_cfg");
+        enum_cfg.num_usp      = 1;
+        enum_cfg.num_ds_ports = 4;
+        enum_cfg.enum_mode    = 1'b1;
+        enum_cfg.init_defaults();
+        enum_sw = pcie_tl_switch::type_id::create("enum_sw", this);
+        enum_sw.sw_cfg = enum_cfg;
+
         unit_usp = new("unit_usp", this);
         unit_dsp = new("unit_dsp", this);
 
         route_collector = pcie_tl_route_event_collector::type_id::create(
             "route_collector", this);
         route_collector.source_switch = sw;
+        enum_route_collector = pcie_tl_route_event_collector::type_id::create(
+            "enum_route_collector", this);
+        enum_route_collector.source_switch = enum_sw;
     endfunction
 
     function void connect_phase(uvm_phase phase);
         super.connect_phase(phase);
         sw.route_observed_port.connect(route_collector.analysis_export);
+        enum_sw.route_observed_port.connect(
+            enum_route_collector.analysis_export);
     endfunction
 
     function void pre_abort();
@@ -196,6 +212,107 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         if (cpl.completer_id != target_bdf)
             $fatal(1, "%s completer expected=%04h actual=%04h",
                    label, target_bdf, cpl.completer_id);
+    endtask
+
+    task automatic check_enum_local_cfg_access(
+        tlp_kind_e request_kind,
+        bit [15:0] target_bdf,
+        bit [9:0] tag,
+        bit [15:0] expected_completer_id,
+        bit [11:0] expected_byte_count,
+        string label
+    );
+        pcie_tl_cfg_tlp request;
+        pcie_tl_tlp response;
+        pcie_tl_cpl_tlp cpl;
+        pcie_tl_switch_route_event route_event;
+        pcie_tl_cpl_tlp snapshot_cpl;
+        tlp_kind_e expected_completion_kind;
+        int unsigned event_index;
+
+        request = pcie_tl_cfg_tlp::type_id::create(
+            $sformatf("enum_cfg_%03h", tag));
+        request.kind         = request_kind;
+        request.fmt          = (request_kind == TLP_CFG_WR0) ?
+                               FMT_3DW_WITH_DATA : FMT_3DW_NO_DATA;
+        request.type_f       = TLP_TYPE_CFG_RD0;
+        request.length       = 1;
+        request.requester_id = 16'h0001;
+        request.tag          = tag;
+        request.completer_id = target_bdf;
+        request.reg_num      = 10'h000;
+        request.first_be     = 4'hf;
+        if (request_kind == TLP_CFG_WR0) begin
+            request.payload = new[4];
+            foreach (request.payload[i])
+                request.payload[i] = 8'hff;
+            expected_completion_kind = TLP_CPL;
+        end else begin
+            if (request_kind !== TLP_CFG_RD0)
+                $fatal(1, "%s unsupported request kind %s",
+                       label, request_kind.name());
+            expected_completion_kind = TLP_CPLD;
+        end
+
+        event_index = enum_route_collector.events.size();
+        enum_sw.usp.rx_fifo.put(request);
+        get_tlp_with_timeout(enum_sw.usp.tx_fifo, response, label);
+        if (!$cast(cpl, response) ||
+            (cpl.kind !== expected_completion_kind) ||
+            (cpl.completer_id !== expected_completer_id) ||
+            (cpl.byte_count !== expected_byte_count))
+            $fatal(1,
+                   "%s expected kind=%s completer=%04h byte_count=%0d actual kind=%s completer=%04h byte_count=%0d",
+                   label, expected_completion_kind.name(),
+                   expected_completer_id, expected_byte_count,
+                   (cpl == null) ? "null" : cpl.kind.name(),
+                   (cpl == null) ? 16'hxxxx : cpl.completer_id,
+                   (cpl == null) ? 12'hxxx : cpl.byte_count);
+
+        if (enum_route_collector.events.size() != (event_index + 1))
+            $fatal(1,
+                   "%s expected one route event actual=%0d",
+                   label,
+                   enum_route_collector.events.size() - event_index);
+        route_event = enum_route_collector.events[event_index];
+        if ((route_event.action !== PCIE_TL_ROUTE_LOCAL_RESPONSE) ||
+            (route_event.ingress_port !== 0) ||
+            (route_event.egress_port !== 0) ||
+            (route_event.route_code !== SWITCH_ROUTE_LOCAL) ||
+            (route_event.ingress_tlp == null) ||
+            (route_event.ingress_tlp.kind !== request_kind) ||
+            (route_event.egress_tlp == null) ||
+            (route_event.egress_tlp.kind !== expected_completion_kind) ||
+            !$cast(snapshot_cpl, route_event.egress_tlp))
+            $fatal(1, "%s route snapshot contract failed", label);
+        if ((snapshot_cpl.completer_id !== expected_completer_id) ||
+            (snapshot_cpl.byte_count !== expected_byte_count))
+            $fatal(1,
+                   "%s snapshot expected completer=%04h byte_count=%0d actual completer=%04h byte_count=%0d",
+                   label, expected_completer_id, expected_byte_count,
+                   snapshot_cpl.completer_id, snapshot_cpl.byte_count);
+    endtask
+
+    task automatic check_enum_local_cfg_write_completion();
+        enum_sw.refresh_local_bdf_map();
+
+        check_enum_local_cfg_access(
+            TLP_CFG_WR0, 16'h0100, 10'h197, 16'h0000, 12'd4,
+            "enum USP0 first Configuration Write response");
+        check_enum_local_cfg_access(
+            TLP_CFG_RD0, 16'h0100, 10'h198, 16'h0100, 12'd4,
+            "enum USP0 post-write Configuration Read response");
+        check_enum_local_cfg_access(
+            TLP_CFG_WR0, 16'h0200, 10'h199, 16'h0000, 12'd4,
+            "enum DSP0 first Configuration Write response");
+        check_enum_local_cfg_access(
+            TLP_CFG_RD0, 16'h0200, 10'h19a, 16'h0200, 12'd4,
+            "enum DSP0 post-write Configuration Read response");
+        check_enum_local_cfg_access(
+            TLP_CFG_RD0, 16'h0100, 10'h19b, 16'h0100, 12'd4,
+            "enum USP0 final Configuration Read response");
+
+        $display("SWITCH_ENUM_LOCAL_CFG_CPL_PASS usp_first=0000/4 usp_post=0100 dsp0_first=0000/4 dsp0_post=0200 usp_recheck=0100 snapshots=5");
     endtask
 
     task automatic check_length_zero_mrd_route();
@@ -702,6 +819,7 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         check_route_snapshot_subtypes();
         check_length_zero_mrd_route();
         check_unaligned_split_completion();
+        check_enum_local_cfg_write_completion();
 
         sw.refresh_local_bdf_map();
         check_route(sw.local_port_for_bdf(16'h0100), 0, "USP BDF");
@@ -877,6 +995,11 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         if (!$cast(local_cpl, local_response) ||
             local_cpl.kind != TLP_CPL)
             $fatal(1, "Exact DSP1 BDF local write did not return Completion");
+        if ((local_cpl.completer_id !== 16'h0208) ||
+            (local_cpl.byte_count !== 12'd0))
+            $fatal(1,
+                   "STATIC_CFG_WRITE_CPL expected completer=0208 byte_count=0 actual completer=%04h byte_count=%0d",
+                   local_cpl.completer_id, local_cpl.byte_count);
         if (route_collector.events.size() <= local_write_event_index)
             $fatal(1, "local Configuration Write route event was not observed");
         route_event = route_collector.events[local_write_event_index];
