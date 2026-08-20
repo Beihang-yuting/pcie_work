@@ -21,7 +21,7 @@ package pcie_svt_tlp_converter_unit_test_pkg;
 
     function automatic bit [7:0] svt_payload_byte(svt_pcie_tlp tlp,
                                                    int unsigned index);
-      return tlp.payload[index / 4][8 * (index % 4) +: 8];
+      return tlp.payload[index / 4][31 - 8 * (index % 4) -: 8];
     endfunction
 
     function automatic tlp_fmt_e expected_fmt(svt_pcie_tlp::fmt_enum fmt);
@@ -225,22 +225,22 @@ package pcie_svt_tlp_converter_unit_test_pkg;
                     svt_pcie_tlp::WITH_DATA_4_DWORD}),
                   {label_name, ": address width mismatch"});
           if (index == 1) begin
-            require(mem_tlp.payload[0] == 8'h11,
-                    {label_name, ": address byte 0 is not 0x11"});
-            require(mem_tlp.payload[1] == 8'h22,
-                    {label_name, ": address byte 1 is not 0x22"});
-            require(mem_tlp.payload[2] == 8'h33,
-                    {label_name, ": address byte 2 is not 0x33"});
-            require(mem_tlp.payload[3] == 8'h44,
-                    {label_name, ": address byte 3 is not 0x44"});
-            require(mem_tlp.payload[4] == 8'h55,
-                    {label_name, ": address byte 4 is not 0x55"});
-            require(mem_tlp.payload[5] == 8'h66,
-                    {label_name, ": address byte 5 is not 0x66"});
-            require(mem_tlp.payload[6] == 8'h77,
-                    {label_name, ": address byte 6 is not 0x77"});
-            require(mem_tlp.payload[7] == 8'h88,
-                    {label_name, ": address byte 7 is not 0x88"});
+            require(mem_tlp.payload[0] == 8'h44,
+                    {label_name, ": payload address-order byte 0 is not 0x44"});
+            require(mem_tlp.payload[1] == 8'h33,
+                    {label_name, ": payload address-order byte 1 is not 0x33"});
+            require(mem_tlp.payload[2] == 8'h22,
+                    {label_name, ": payload address-order byte 2 is not 0x22"});
+            require(mem_tlp.payload[3] == 8'h11,
+                    {label_name, ": payload address-order byte 3 is not 0x11"});
+            require(mem_tlp.payload[4] == 8'h88,
+                    {label_name, ": payload address-order byte 4 is not 0x88"});
+            require(mem_tlp.payload[5] == 8'h77,
+                    {label_name, ": payload address-order byte 5 is not 0x77"});
+            require(mem_tlp.payload[6] == 8'h66,
+                    {label_name, ": payload address-order byte 6 is not 0x66"});
+            require(mem_tlp.payload[7] == 8'h55,
+                    {label_name, ": payload address-order byte 7 is not 0x55"});
           end
         end
         2, 3, 4, 5: begin
@@ -592,6 +592,9 @@ package pcie_svt_tlp_converter_unit_test_pkg;
                 {"base normalized Cfg conversion failed: ", reason});
         require(round_trip.last_dw_be == 4'h0,
                 "base normalized Cfg did not default last_dw_be to zero");
+        require((round_trip.payload.size() == 1) &&
+                (round_trip.payload[0] == 32'h1122_3344),
+                "base normalized Cfg payload is not in PCIe address order");
       end
 
       source = new("unsupported_message");

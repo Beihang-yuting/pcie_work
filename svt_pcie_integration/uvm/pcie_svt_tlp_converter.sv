@@ -271,7 +271,7 @@ class pcie_svt_tlp_converter;
     foreach (source.payload[dword_index])
       for (int unsigned byte_index = 0; byte_index < 4; byte_index++)
         normalized.payload[dword_index * 4 + byte_index] =
-          source.payload[dword_index][8 * byte_index +: 8];
+          source.payload[dword_index][31 - 8 * byte_index -: 8];
     metadata.ln = source.ln;
     metadata.ph = source.ph;
     metadata.st = source.st;
@@ -328,7 +328,7 @@ class pcie_svt_tlp_converter;
     foreach (round_trip.payload[dword_index]) begin
       round_trip.payload[dword_index] = '0;
       for (int unsigned byte_index = 0; byte_index < 4; byte_index++)
-        round_trip.payload[dword_index][8 * byte_index +: 8] =
+        round_trip.payload[dword_index][31 - 8 * byte_index -: 8] =
           normalized.payload[dword_index * 4 + byte_index];
     end
   endfunction
