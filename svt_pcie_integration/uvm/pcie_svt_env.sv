@@ -8,12 +8,14 @@ class pcie_svt_env extends uvm_env;
   pcie_svt_switch_port_adapter switch_adapter[5];
   pcie_svt_switch_target_callback switch_target_callback[5];
   pcie_svt_switch_scoreboard switch_scoreboard;
+  pcie_svt_switch_enum_registry switch_enum_registry;
   pcie_svt_switch_sidecar_env switch_sidecar[5];
   uvm_analysis_port #(svt_pcie_tl_service) switch_sidecar_service_port[5];
   pcie_svt_topology_e topology;
   int unsigned pcie_gen;
   bit fast_link_training;
   bit disable_switch_sidecars;
+  bit enumeration_mode;
 
   `uvm_component_utils(pcie_svt_env)
 
@@ -141,6 +143,16 @@ class pcie_svt_env extends uvm_env;
         profiles.port[i] = peer_profiles.port[i];
 `endif
     vseqr = pcie_svt_virtual_sequencer::type_id::create("vseqr", this);
+    if (topology == PCIE_SVT_TOPO_SWITCH) begin
+      switch_enum_registry =
+        pcie_svt_switch_enum_registry::type_id::create(
+          "switch_enum_registry");
+`ifndef PCIE_USE_SVT_SWITCH_PROXY
+      if (switch_enum_registry == null)
+        `uvm_fatal("SWITCH_ENUM_REGISTRY_CREATE",
+          "switch enumeration registry creation failed")
+`endif
+    end
 
     for (int unsigned i = 0; i < PCIE_SVT_MAX_PORTS; i++) begin
       if (profiles.port[i] == null)
@@ -174,6 +186,9 @@ class pcie_svt_env extends uvm_env;
     if (!uvm_config_db#(bit)::get(
           this, "", "disable_switch_sidecars", disable_switch_sidecars))
       disable_switch_sidecars = 1'b0;
+    if (!uvm_config_db#(bit)::get(
+          this, "", "enumeration_mode", enumeration_mode))
+      enumeration_mode = 1'b0;
 
     switch_cfg = pcie_tl_switch_config::type_id::create("switch_cfg");
     if (switch_cfg == null)
@@ -190,9 +205,9 @@ class pcie_svt_env extends uvm_env;
     switch_core.sw_cfg = switch_cfg;
     switch_scoreboard = pcie_svt_switch_scoreboard::type_id::create(
       "switch_scoreboard", this);
-    if (switch_scoreboard == null)
+    if ((switch_scoreboard == null) || (switch_enum_registry == null))
       `uvm_fatal("SWITCH_PROXY_CREATE",
-        "switch scoreboard creation failed")
+        "switch scoreboard/enum-registry creation failed")
 
     for (int unsigned i = 0; i < 5; i++) begin
       switch_adapter[i] = pcie_svt_switch_port_adapter::type_id::create(
@@ -224,6 +239,9 @@ class pcie_svt_env extends uvm_env;
           this, $sformatf("switch_sidecar[%0d]", i), "pcie_gen", pcie_gen);
         uvm_config_db#(int)::set(
           this, $sformatf("switch_sidecar[%0d]", i), "port_index", i);
+        uvm_config_db#(bit)::set(
+          this, $sformatf("switch_sidecar[%0d]", i),
+          "apply_star_9000762979", enumeration_mode);
         uvm_config_db#(pcie_svt_switch_port_adapter)::set(
           this, $sformatf("switch_sidecar[%0d]", i), "adapter",
           switch_adapter[i]);
@@ -290,10 +308,22 @@ class pcie_svt_env extends uvm_env;
         port[i].agent.get_full_name()), UVM_LOW)
     end
 
+    if (topology == PCIE_SVT_TOPO_SWITCH)
+      vseqr.switch_enum_registry = switch_enum_registry;
+
 `ifdef PCIE_USE_SVT_SWITCH_PROXY
     if ((switch_core == null) || (switch_core.all_ports.size() != 5))
       `uvm_fatal("SWITCH_PROXY_CONNECT",
         "switch core does not expose exactly five ports")
+    vseqr.switch_core = switch_core;
+    vseqr.switch_scoreboard = switch_scoreboard;
+    if ((switch_core.route_observed_port == null) ||
+        (switch_scoreboard == null) ||
+        (switch_scoreboard.route_event_export == null))
+      `uvm_fatal("SWITCH_ROUTE_OBSERVER_CONNECT",
+        "switch route observation port/export handle is missing")
+    switch_core.route_observed_port.connect(
+      switch_scoreboard.route_event_export);
     for (int unsigned i = 0; i < 5; i++) begin
       int unsigned proxy_index;
       proxy_index = PCIE_SVT_PEER_PORT0 + i;
@@ -308,6 +338,7 @@ class pcie_svt_env extends uvm_env;
       switch_adapter[i].switch_port = switch_core.all_ports[i];
       switch_adapter[i].proxy_tlp_seqr =
         port[proxy_index].agent.pcie_agent.tlp_seqr;
+      vseqr.switch_adapter[i] = switch_adapter[i];
       uvm_callbacks#(svt_pcie_target_app,
         svt_pcie_target_app_callback)::add(
           port[proxy_index].agent.target[0], switch_target_callback[i]);
@@ -320,8 +351,7 @@ class pcie_svt_env extends uvm_env;
         if ((switch_sidecar[i] == null) ||
             (switch_sidecar[i].cfg == null) ||
             (switch_sidecar[i].agent == null) ||
-            (switch_sidecar[i].agent.pcie_agent == null) ||
-            (switch_sidecar[i].agent.pcie_agent.tl_mon == null) ||
+            (switch_sidecar[i].agent.tl_mon == null) ||
             (switch_sidecar[i].rx_subscriber == null) ||
             (switch_sidecar[i].tx_subscriber == null) ||
             (switch_sidecar[i].rx_subscriber.adapter != switch_adapter[i]) ||
@@ -332,11 +362,11 @@ class pcie_svt_env extends uvm_env;
             (switch_sidecar[i].tx_subscriber.role != PCIE_SVT_SIDECAR_TX))
           `uvm_fatal("SIDECAR_CONNECT", $sformatf(
             "port=%0d passive monitor/subscriber ownership is incomplete", i))
-        if (switch_sidecar[i].cfg.is_active !== 1'b0)
-          `uvm_fatal("SWITCH_PASSIVE_DRIVE", $sformatf(
-            "port=%0d sidecar configuration became active", i))
+        if (!switch_sidecar[i].cfg.enable_monitor)
+          `uvm_fatal("SWITCH_PASSIVE_MONITOR", $sformatf(
+            "port=%0d standalone sidecar monitor is disabled", i))
         switch_sidecar_service_port[i].connect(
-          switch_sidecar[i].agent.pcie_agent.tl_mon.tl_service_in_port);
+          switch_sidecar[i].agent.tl_mon.tl_service_in_port);
       end
     end
 `endif
@@ -345,15 +375,26 @@ class pcie_svt_env extends uvm_env;
   virtual function void end_of_elaboration_phase(uvm_phase phase);
     super.end_of_elaboration_phase(phase);
 `ifdef PCIE_USE_SVT_SWITCH_PROXY
+    if ((switch_core == null) ||
+        (switch_core.route_observed_port == null) ||
+        (switch_core.route_observed_port.size() != 1))
+      `uvm_fatal("SWITCH_ROUTE_OBSERVER_CONNECT", $sformatf(
+        "switch route observer connection count=%0d expected=1",
+        ((switch_core == null) ||
+         (switch_core.route_observed_port == null)) ? 0 :
+          switch_core.route_observed_port.size()))
     if (!disable_switch_sidecars) begin
       for (int unsigned i = 0; i < 5; i++) begin
         if ((switch_sidecar[i] == null) ||
+            (switch_sidecar[i].cfg == null) ||
             (switch_sidecar[i].agent == null) ||
-            (switch_sidecar[i].agent.pcie_agent == null) ||
-            (switch_sidecar[i].agent.pcie_agent.tl_mon == null) ||
-            (switch_sidecar[i].agent.pcie_agent.tl_mon.
+            (switch_sidecar[i].agent.tl_mon == null) ||
+            (switch_sidecar[i].agent.tl_mon.rx_tlp_observed_port == null) ||
+            (switch_sidecar[i].agent.tl_mon.tx_tlp_observed_port == null) ||
+            (switch_sidecar[i].agent.tl_mon.tl_service_in_port == null) ||
+            (switch_sidecar[i].agent.tl_mon.
                rx_tlp_observed_port.size() != 1) ||
-            (switch_sidecar[i].agent.pcie_agent.tl_mon.
+            (switch_sidecar[i].agent.tl_mon.
                tx_tlp_observed_port.size() != 1) ||
             (switch_sidecar_service_port[i] == null) ||
             (switch_sidecar_service_port[i].size() != 1))

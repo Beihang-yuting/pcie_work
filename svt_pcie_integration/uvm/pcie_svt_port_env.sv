@@ -4,6 +4,7 @@ class pcie_svt_port_env extends uvm_env;
   svt_pcie_device_configuration cfg;
   svt_pcie_device_status status;
   svt_pcie_device_agent agent;
+  pcie_svt_ep_bar_sizing_callback bar_sizing_callback;
   bit fast_link_training;
   bit is_switch_proxy;
 
@@ -119,6 +120,7 @@ class pcie_svt_port_env extends uvm_env;
       port_profile.port_id, port_profile.max_gen, enable_fast_link_training,
       link_eq_mode.name(), enable_direct_speed_up_from_2_5g_to_16g), UVM_LOW)
 
+`ifndef PCIE_USE_SVT_SWITCH_PROXY
     if (port_profile.role == PCIE_SVT_EP) begin
       device_cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b1;
       if (!device_cfg.target_cfg.exists(0))
@@ -130,7 +132,13 @@ class pcie_svt_port_env extends uvm_env;
       // R-2020.12 Multi-Endpoint Target App default. Per-BAR service
       // sequences override this value where the aperture requires a wider map.
       device_cfg.target_cfg[0].default_bar_ro_map = 32'h0000_ffff;
+    end else begin
+      device_cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b0;
     end
+`else
+    // Proxy configuration space remains owned by the switch model.
+    device_cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b0;
+`endif
 
     enable_ats = 1'b0;
     foreach (port_profile.functions[i])
@@ -169,11 +177,37 @@ class pcie_svt_port_env extends uvm_env;
         "%s: profile role disagrees with Unified HDL device_is_root=%0d",
         profile.port_id, cfg.device_is_root))
     apply_profile_to_cfg(profile, cfg, fast_link_training);
+    if ((profile.role == PCIE_SVT_EP) && !is_switch_proxy) begin
+      if ((profile.functions.size() != 1) ||
+          (profile.functions[0] == null))
+        `uvm_fatal("EP_BAR_SIZING_CFG", $sformatf(
+          "%s: expected exactly one non-null PF0 profile", profile.port_id))
+      bar_sizing_callback =
+        pcie_svt_ep_bar_sizing_callback::type_id::create(
+          "bar_sizing_callback");
+      if (bar_sizing_callback == null)
+        `uvm_fatal("EP_BAR_SIZING_CFG", $sformatf(
+          "%s: callback creation failed", profile.port_id))
+      bar_sizing_callback.configure(profile.functions[0], profile.port_id);
+    end
     status = svt_pcie_device_status::type_id::create("status", this);
     uvm_config_db#(svt_pcie_device_configuration)::set(
       this, "agent", "cfg", cfg);
     uvm_config_db#(svt_pcie_device_status)::set(
       this, "agent", "shared_status", status);
     agent = svt_pcie_device_agent::type_id::create("agent", this);
+  endfunction
+
+  virtual function void connect_phase(uvm_phase phase);
+    super.connect_phase(phase);
+    if (bar_sizing_callback == null)
+      return;
+    if ((agent == null) || !agent.target.exists(0) ||
+        (agent.target[0] == null))
+      `uvm_fatal("EP_BAR_SIZING_CFG", $sformatf(
+        "%s: Endpoint Target App handle is missing", profile.port_id))
+    uvm_callbacks#(svt_pcie_target_app,
+      svt_pcie_target_app_callback)::add(
+        agent.target[0], bar_sizing_callback);
   endfunction
 endclass

@@ -6,10 +6,11 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
   int unsigned lanes;
   int unsigned pcie_gen;
   int port_index = -1;
+  bit apply_star_9000762979;
+  bit star_9000762979_applied;
 
-  svt_pcie_device_configuration cfg;
-  svt_pcie_device_status status;
-  svt_pcie_device_agent agent;
+  svt_pcie_configuration cfg;
+  svt_pcie_agent agent;
   pcie_svt_switch_sidecar_subscriber rx_subscriber;
   pcie_svt_switch_sidecar_subscriber tx_subscriber;
 
@@ -23,6 +24,30 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
     super.new(name, parent);
   endfunction
 
+  static function void configure_monitor_role(
+      svt_pcie_configuration role_cfg,
+      int role_port_index);
+    uvm_root report_root;
+
+    report_root = uvm_root::get();
+    if (role_cfg == null) begin
+      `uvm_fatal_context("SIDECAR_ROLE_POLICY", "direct role cfg is null",
+                         report_root)
+      return;
+    end
+    if ((role_port_index < 0) || (role_port_index >= 5)) begin
+      `uvm_fatal_context("SIDECAR_ROLE_POLICY", $sformatf(
+        "invalid switch sidecar port=%0d (expected 0 through 4)",
+        role_port_index), report_root)
+      return;
+    end
+    role_cfg.tl_cfg.is_switch = 1'b1;
+    role_cfg.tl_cfg.is_tx_downstream = (role_port_index != 0);
+    role_cfg.pl_cfg.is_tx_downstream = (role_port_index != 0);
+    role_cfg.tl_cfg.cfg_space_mode =
+      svt_pcie_tl_configuration::CFG_SPACE_ENUMERATION_UPDATE;
+  endfunction
+
   virtual function void build_phase(uvm_phase phase);
     bit [31:0] selected_speed;
     bit [31:0] supported_speeds;
@@ -31,6 +56,10 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
     bit got_x4;
 
     super.build_phase(phase);
+    apply_star_9000762979 = 1'b0;
+    star_9000762979_applied = 1'b0;
+    void'(uvm_config_db#(bit)::get(
+      this, "", "apply_star_9000762979", apply_star_9000762979));
     if (!uvm_config_db#(int unsigned)::get(this, "", "lanes", lanes))
       `uvm_fatal("SIDECAR_CFG", {get_full_name(), ": missing lanes"})
     if (!uvm_config_db#(int unsigned)::get(
@@ -71,21 +100,17 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
       `uvm_fatal("SIDECAR_SCOREBOARD",
                  {get_full_name(), ": missing scoreboard injection"})
 
-    cfg = svt_pcie_device_configuration::type_id::create("cfg", this);
-    status = svt_pcie_device_status::type_id::create("status", this);
-    if ((cfg == null) || (status == null))
+    cfg = svt_pcie_configuration::type_id::create("cfg");
+    if (cfg == null)
       `uvm_fatal("SIDECAR_CREATE",
-                 {get_full_name(), ": configuration/status creation failed"})
+                 {get_full_name(), ": direct configuration creation failed"})
 
-    cfg.pcie_spec_ver =
-      svt_pcie_device_configuration::PCIE_SPEC_VER_5_0;
     supported_widths = (lanes == 16) ? 32'h0000_003f : 32'h0000_0007;
-    cfg.pcie_cfg.pl_cfg.set_link_width_values(
-      lanes, supported_widths, lanes);
-    if ((cfg.pcie_cfg.pl_cfg.get_link_width_value() != lanes) ||
-        (cfg.pcie_cfg.pl_cfg.get_supported_link_width_vector_value() !=
+    cfg.pl_cfg.set_link_width_values(lanes, supported_widths, lanes);
+    if ((cfg.pl_cfg.get_link_width_value() != lanes) ||
+        (cfg.pl_cfg.get_supported_link_width_vector_value() !=
          supported_widths) ||
-        (cfg.pcie_cfg.pl_cfg.get_expected_link_width_value() != lanes))
+        (cfg.pl_cfg.get_expected_link_width_value() != lanes))
       `uvm_fatal("SIDECAR_LINK_WIDTH", $sformatf(
         "%s: failed to configure x%0d supported=0x%0h",
         get_full_name(), lanes, supported_widths))
@@ -99,33 +124,30 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
       supported_speeds |= `SVT_PCIE_SPEED_32_0G;
       selected_speed = `SVT_PCIE_SPEED_32_0G;
     end
-    cfg.pcie_cfg.pl_cfg.set_link_speed_values(
+    cfg.pl_cfg.set_link_speed_values(
       supported_speeds, selected_speed, selected_speed);
-    if ((cfg.pcie_cfg.pl_cfg.get_supported_link_speeds_value() !=
+    if ((cfg.pl_cfg.get_supported_link_speeds_value() !=
          supported_speeds) ||
-        (cfg.pcie_cfg.pl_cfg.get_target_link_speed_value() !=
+        (cfg.pl_cfg.get_target_link_speed_value() !=
          selected_speed) ||
-        (cfg.pcie_cfg.pl_cfg.get_expected_link_speed_value() !=
+        (cfg.pl_cfg.get_expected_link_speed_value() !=
          selected_speed))
       `uvm_fatal("SIDECAR_LINK_SPEED", $sformatf(
         "%s: failed to configure Gen%0d speed vector=0x%0h",
         get_full_name(), pcie_gen, supported_speeds))
 
-    cfg.is_active = 1'b0;
-    cfg.device_is_root = (lanes == 4);
-    cfg.pcie_cfg.enable_monitor = 1'b1;
-    cfg.pcie_cfg.tl_cfg.cfg_space_mode =
-      svt_pcie_tl_configuration::CFG_SPACE_BACKDOOR_UPDATE;
+    cfg.enable_monitor = 1'b1;
+    configure_monitor_role(cfg, port_index);
     if (lanes == 16)
-      cfg.pcie_cfg.serdes_x16_if = serdes_x16_vif;
+      cfg.serdes_x16_if = serdes_x16_vif;
     else
-      cfg.pcie_cfg.serdes_x4_if = serdes_x4_vif;
+      cfg.serdes_x4_if = serdes_x4_vif;
 
-    uvm_config_db#(svt_pcie_device_configuration)::set(
+    uvm_config_db#(svt_pcie_configuration)::set(
       this, "agent", "cfg", cfg);
-    uvm_config_db#(svt_pcie_device_status)::set(
-      this, "agent", "shared_status", status);
-    agent = svt_pcie_device_agent::type_id::create("agent", this);
+    uvm_config_db#(uvm_active_passive_enum)::set(
+      this, "agent", "is_active", UVM_PASSIVE);
+    agent = svt_pcie_agent::type_id::create("agent", this);
     rx_subscriber = pcie_svt_switch_sidecar_subscriber::type_id::create(
       "rx_subscriber", this);
     tx_subscriber = pcie_svt_switch_sidecar_subscriber::type_id::create(
@@ -146,21 +168,43 @@ class pcie_svt_switch_sidecar_env extends uvm_env;
   endfunction
 
   virtual function void connect_phase(uvm_phase phase);
+    int disabled_count;
+
     super.connect_phase(phase);
-    if ((cfg == null) || (agent == null) || (agent.pcie_agent == null) ||
-        (agent.pcie_agent.tl_mon == null))
+    if ((cfg == null) || (agent == null) || (agent.tl_mon == null))
       `uvm_fatal("SIDECAR_CONNECT",
                  {get_full_name(), ": cfg/agent/tl_mon handle is missing"})
-    if ((agent.pcie_agent.tl_mon.rx_tlp_observed_port == null) ||
-        (agent.pcie_agent.tl_mon.tx_tlp_observed_port == null) ||
+    if (agent.get_is_active() != UVM_PASSIVE) begin
+      `uvm_fatal("SIDECAR_ACTIVE_MODE", $sformatf(
+        "port=%0d direct sidecar agent is not passive", port_index))
+      return;
+    end
+    if (apply_star_9000762979) begin
+      if (agent.err_check == null) begin
+        `uvm_fatal("SWITCH_STAR_9000762979", $sformatf(
+          "port=%0d sidecar err_check handle is missing", port_index))
+        return;
+      end
+      disabled_count = agent.err_check.disable_checks(
+        "PASSIVE_DL_TX", "FLOW_CTRL_INIT", "txn_06_01_16");
+      if (disabled_count <= 0) begin
+        `uvm_fatal("SWITCH_STAR_9000762979", $sformatf(
+          "port=%0d STAR rule matched no enabled check", port_index))
+        return;
+      end
+      star_9000762979_applied = 1'b1;
+      `uvm_info("SWITCH_STAR_9000762979_APPLIED", $sformatf(
+        "port=%0d rule=PASSIVE_DL_TX/FLOW_CTRL_INIT/txn_06_01_16",
+        port_index), UVM_NONE)
+    end
+    if ((agent.tl_mon.rx_tlp_observed_port == null) ||
+        (agent.tl_mon.tx_tlp_observed_port == null) ||
         (rx_subscriber == null) || (rx_subscriber.analysis_export == null) ||
         (tx_subscriber == null) || (tx_subscriber.analysis_export == null))
       `uvm_fatal("SIDECAR_CONNECT",
                  {get_full_name(), ": passive monitor port is missing"})
 
-    agent.pcie_agent.tl_mon.rx_tlp_observed_port.connect(
-      rx_subscriber.analysis_export);
-    agent.pcie_agent.tl_mon.tx_tlp_observed_port.connect(
-      tx_subscriber.analysis_export);
+    agent.tl_mon.rx_tlp_observed_port.connect(rx_subscriber.analysis_export);
+    agent.tl_mon.tx_tlp_observed_port.connect(tx_subscriber.analysis_export);
   endfunction
 endclass

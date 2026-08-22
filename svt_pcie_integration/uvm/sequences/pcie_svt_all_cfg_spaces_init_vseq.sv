@@ -1,3 +1,4 @@
+`ifndef PCIE_USE_SVT_SWITCH_PROXY
 class pcie_svt_r202012_multi_ep_warning_catcher extends uvm_report_catcher;
   int unsigned matched_count;
 
@@ -23,6 +24,7 @@ class pcie_svt_r202012_multi_ep_warning_catcher extends uvm_report_catcher;
     return THROW;
   endfunction
 endclass
+`endif
 
 class pcie_svt_all_cfg_spaces_init_vseq extends
     uvm_sequence #(uvm_sequence_item);
@@ -76,17 +78,20 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
     end
   endfunction
 
+`ifndef PCIE_USE_SVT_SWITCH_PROXY
   task refresh_multi_endpoint_cfg(int unsigned index);
     svt_pcie_device_agent_service_sequence refresh_seq;
 
-`ifndef PCIE_USE_SVT_SWITCH_PROXY
     if (p_sequencer.port_profile[index].role == PCIE_SVT_RC) begin
       `uvm_info("MULTI_EP_REFRESH_SKIP", $sformatf(
         "port=%s role=RC REFRESH_CFG skipped",
         p_sequencer.port_profile[index].port_id), UVM_NONE)
       return;
     end
-`endif
+    if (p_sequencer.port_profile[index].role != PCIE_SVT_EP)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s has non-Endpoint role before refresh",
+        p_sequencer.port_profile[index].port_id))
     if (p_sequencer.port_seqr[index].device_agent_service_seqr == null)
       `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
         "port=%s has null device_agent_service_seqr",
@@ -96,23 +101,26 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
       `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
         "port=%s has null agent or configuration registry handle",
         p_sequencer.port_profile[index].port_id))
-    if (p_sequencer.port_profile[index].role == PCIE_SVT_EP) begin
-      if (p_sequencer.port_cfg[index].device_is_root != 1'b0)
-        `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
-          "port=%s EP configuration has device_is_root=%0b before refresh",
-          p_sequencer.port_profile[index].port_id,
-          p_sequencer.port_cfg[index].device_is_root))
-      if (p_sequencer.port_cfg[index].pcie_cfg.enable_multi_endpoint_mode !=
-          1'b1)
-        `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
-          "port=%s EP configuration has Multi-Endpoint Mode disabled",
-          p_sequencer.port_profile[index].port_id))
-    end else if (p_sequencer.port_cfg[index].device_is_root != 1'b1) begin
+    if (p_sequencer.port_cfg[index].device_is_root != 1'b0)
       `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
-        "port=%s RC configuration has device_is_root=%0b before refresh",
+        "port=%s EP configuration has device_is_root=%0b before refresh",
         p_sequencer.port_profile[index].port_id,
         p_sequencer.port_cfg[index].device_is_root))
-    end
+    if (p_sequencer.port_cfg[index].pcie_cfg.enable_multi_endpoint_mode !=
+        1'b1)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s EP configuration has Multi-Endpoint Mode disabled",
+        p_sequencer.port_profile[index].port_id))
+    if (p_sequencer.reset_vif.asserted !== '1)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s reset is not asserted before refresh: 0x%0h",
+        p_sequencer.port_profile[index].port_id,
+        p_sequencer.reset_vif.asserted))
+    if (p_sequencer.port_status[index].pcie_status.pl_status.link_up !== 1'b0)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "port=%s link is not down before refresh: %b",
+        p_sequencer.port_profile[index].port_id,
+        p_sequencer.port_status[index].pcie_status.pl_status.link_up))
 
     // R-2020.12 refresh_cfg() re-reads cfg from the target agent's exact
     // config_db scope. Re-publish the original per-port object immediately
@@ -132,16 +140,19 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
         "port=%s REFRESH_CFG sequence creation/randomization failed",
         p_sequencer.port_profile[index].port_id))
     `uvm_info("MULTI_EP_REFRESH", $sformatf(
-      "stage=before port=%s device_is_root=%0b multi_endpoint=%0b reset_asserted=0 link_up=0",
+      "stage=before port=%s device_is_root=%0b multi_endpoint=%0b reset_asserted=0x%0h link_up=0",
       p_sequencer.port_profile[index].port_id,
       p_sequencer.port_cfg[index].device_is_root,
-      p_sequencer.port_cfg[index].pcie_cfg.enable_multi_endpoint_mode), UVM_NONE)
+      p_sequencer.port_cfg[index].pcie_cfg.enable_multi_endpoint_mode,
+      p_sequencer.reset_vif.asserted), UVM_NONE)
     refresh_seq.start(
       p_sequencer.port_seqr[index].device_agent_service_seqr);
     `uvm_info("MULTI_EP_REFRESH", $sformatf(
-      "stage=after port=%s reset_asserted=0 link_up=0",
-      p_sequencer.port_profile[index].port_id), UVM_NONE)
+      "stage=after port=%s reset_asserted=0x%0h link_up=0",
+      p_sequencer.port_profile[index].port_id,
+      p_sequencer.reset_vif.asserted), UVM_NONE)
   endtask
+`endif
 
   task run_one_port(int unsigned index);
     pcie_svt_cfg_space_init_seq child;
@@ -202,8 +213,10 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
   endtask
 
   virtual task body();
+`ifndef PCIE_USE_SVT_SWITCH_PROXY
     pcie_svt_r202012_multi_ep_warning_catcher warning_catcher;
     int unsigned expected_vendor_warnings;
+`endif
 
     if (p_sequencer == null)
       `uvm_fatal("CFG_INIT", "null PCIe SVT virtual sequencer")
@@ -217,18 +230,8 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
       p_sequencer.reset_vif.asserted, PCIE_SVT_VIP_INIT_HOLD_TIME), UVM_NONE)
 
     #(PCIE_SVT_VIP_INIT_HOLD_TIME);
-    check_active_links_down("before_release");
-    p_sequencer.reset_vif.release_all();
-    #0;
-    if (p_sequencer.reset_vif.asserted !== '0)
-      `uvm_fatal("CFG_RESET", $sformatf(
-        "stage=cfg_init expected all resets released, got 0x%0h",
-        p_sequencer.reset_vif.asserted))
-    `uvm_info("CFG_RESET_RELEASED", $sformatf(
-      "stage=cfg_init asserted=0x%0h",
-      p_sequencer.reset_vif.asserted), UVM_NONE)
-    check_active_links_down("before_cfg");
-
+`ifndef PCIE_USE_SVT_SWITCH_PROXY
+    check_active_links_down("before_refresh");
     warning_catcher =
       pcie_svt_r202012_multi_ep_warning_catcher::type_id::create(
         "r202012_multi_ep_warning_catcher");
@@ -252,6 +255,24 @@ class pcie_svt_all_cfg_spaces_init_vseq extends
       `uvm_info("MULTI_EP_REFRESH_VENDOR_WORKAROUND", $sformatf(
         "caught %0d known R-2020.12 REFRESH_CFG role-validation warnings",
         warning_catcher.matched_count), UVM_NONE)
+    if (p_sequencer.reset_vif.asserted !== '1)
+      `uvm_fatal("MULTI_EP_REFRESH", $sformatf(
+        "reset changed during REFRESH_CFG window: 0x%0h",
+        p_sequencer.reset_vif.asserted))
+    check_active_links_down("after_refresh");
+`endif
+
+    check_active_links_down("before_release");
+    p_sequencer.reset_vif.release_all();
+    #0;
+    if (p_sequencer.reset_vif.asserted !== '0)
+      `uvm_fatal("CFG_RESET", $sformatf(
+        "stage=cfg_init expected all resets released, got 0x%0h",
+        p_sequencer.reset_vif.asserted))
+    `uvm_info("CFG_RESET_RELEASED", $sformatf(
+      "stage=cfg_init asserted=0x%0h",
+      p_sequencer.reset_vif.asserted), UVM_NONE)
+    check_active_links_down("before_cfg");
 
     for (int unsigned i = 0; i < PCIE_SVT_MAX_PORTS; i++) begin
       if (!p_sequencer.active_port[i])
@@ -296,20 +317,36 @@ class pcie_svt_switch_sidecars_ready_vseq extends
     super.new(name);
   endfunction
 
+  function bit [31:0] header_type_dword();
+    return 32'h0001_0000;
+  endfunction
+
+  function bit [31:0] pcie_capability_dword(int unsigned port_index);
+    if (port_index >= 5) begin
+      `uvm_fatal("SIDECAR_PRIME_POLICY", $sformatf(
+        "invalid switch sidecar port=%0d", port_index))
+      return '0;
+    end
+    // PCI Express Capability version 2 with the switch port role encoded in
+    // Device/Port Type: 5 is an Upstream Port and 6 is a Downstream Port.
+    return (port_index == 0) ? 32'h0052_0010 : 32'h0062_0010;
+  endfunction
+
+  function bit initial_10bit_requester_enable();
+    // Support is advertised below, but enumeration owns Requester Enable.
+    return 1'b0;
+  endfunction
+
   function void check_passive_contract(int unsigned port_index);
     pcie_svt_switch_sidecar_env sidecar;
     sidecar = p_sequencer.switch_sidecar[port_index];
     if ((sidecar == null) || (sidecar.cfg == null) ||
-        (sidecar.agent == null) || (sidecar.agent.pcie_agent == null) ||
-        (sidecar.agent.pcie_agent.tl_mon == null) ||
+        (sidecar.agent == null) || (sidecar.agent.tl_mon == null) ||
         (p_sequencer.switch_sidecar_service_port[port_index] == null))
       `uvm_fatal("SIDECAR_READY", $sformatf(
         "port=%0d passive checker handle is incomplete", port_index))
-    if (sidecar.cfg.is_active !== 1'b0)
-      `uvm_fatal("SWITCH_PASSIVE_DRIVE", $sformatf(
-        "port=%0d passive checker became active", port_index))
-    if (!sidecar.cfg.pcie_cfg.enable_monitor)
-      `uvm_fatal("SIDECAR_READY", $sformatf(
+    if (!sidecar.cfg.enable_monitor)
+      `uvm_fatal("SWITCH_PASSIVE_MONITOR", $sformatf(
         "port=%0d passive monitor is disabled", port_index))
   endfunction
 
@@ -424,9 +461,12 @@ class pcie_svt_switch_sidecars_ready_vseq extends
     if (prime_headers_only) begin
       write_cfg_address(port_index, 28'h000_0004, 32'h0010_0000,
         "Status/Command");
+      write_cfg_address(port_index, 28'h000_000c, header_type_dword(),
+        "Header Type");
       write_cfg_address(port_index, 28'h000_0034, 32'h0000_0040,
         "Capability Pointer");
-      write_cfg_address(port_index, 28'h000_0040, 32'h0002_0010,
+      write_cfg_address(port_index, 28'h000_0040,
+        pcie_capability_dword(port_index),
         "PCI Express Capability");
       // R-2020.12 builds the passive monitor's private capability map on the
       // first field service; do that before link-time monitor field queries.
@@ -442,7 +482,8 @@ class pcie_svt_switch_sidecars_ready_vseq extends
       `SVT_PCIE_PCIE_DEV_2_REG_10_BIT_TAG_REQUESTER_SUPP_FLD, 1,
       "10-Bit Tag Requester Supported");
     set_cfg_field(port_index,
-      `SVT_PCIE_PCIE_DEV_CTST_2_REG_10_BIT_TAG_REQUESTER_EN_FLD, 1,
+      `SVT_PCIE_PCIE_DEV_CTST_2_REG_10_BIT_TAG_REQUESTER_EN_FLD,
+      initial_10bit_requester_enable(),
       "10-Bit Tag Requester Enable");
     set_cfg_field(port_index,
       `SVT_PCIE_PCIE_DEV_2_REG_10_BIT_TAG_COMPLETER_SUPP_FLD, 1,
@@ -462,7 +503,8 @@ class pcie_svt_switch_sidecars_ready_vseq extends
       completer_supported, "10-Bit Tag Completer Supported");
 
     if ((extended_tag_enabled != 1) || (requester_supported != 1) ||
-        (requester_enabled != 1) || (completer_supported != 1))
+        (requester_enabled != initial_10bit_requester_enable()) ||
+        (completer_supported != 1))
       `uvm_fatal("SIDECAR_READBACK", $sformatf(
         {"port=%0d ExtendedTag=%0h RequesterSupported=%0h ",
          "RequesterEnabled=%0h CompleterSupported=%0h"},

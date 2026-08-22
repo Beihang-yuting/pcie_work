@@ -138,6 +138,7 @@ class pcie_svt_cfg_space_init_seq extends uvm_sequence #(uvm_sequence_item);
       cfg_read_check(function_num, 'h300/4, image['h300/4]);
   endtask
 
+`ifndef PCIE_USE_SVT_SWITCH_PROXY
   task target_bar_write_read_check(int unsigned bar_num,
                                    bit [15:0] bdf_num,
                                    bit [31:0] expected_map,
@@ -227,11 +228,12 @@ class pcie_svt_cfg_space_init_seq extends uvm_sequence #(uvm_sequence_item);
 
     if (profile.role == PCIE_SVT_RC) begin
       `uvm_info("MULTI_EP_BAR_SKIP", $sformatf(
-        "port=%s role=RC Target App Multi-Endpoint BAR initialization skipped",
+        "port=%s role=RC Target App BAR initialization skipped",
         profile.port_id), UVM_NONE)
       return;
     end
-    if (port_seqr.target_seqr[0] == null)
+    if (!port_seqr.target_seqr.exists(0) ||
+        (port_seqr.target_seqr[0] == null))
       `uvm_fatal("BAR_INIT", {progress_context(),
         " EP has null target_seqr[0]"})
     if (profile.functions.size() != 1)
@@ -257,6 +259,7 @@ class pcie_svt_cfg_space_init_seq extends uvm_sequence #(uvm_sequence_item);
       end
     end
   endtask
+`endif
 
   virtual task body();
     pcie_svt_cfg_space_builder builder;
@@ -304,7 +307,10 @@ class pcie_svt_cfg_space_init_seq extends uvm_sequence #(uvm_sequence_item);
                              image);
     end
 
+`ifndef PCIE_USE_SVT_SWITCH_PROXY
     init_target_bars(builder);
+`endif
+
     stage = "complete";
     current_function = -1;
     current_dword = -1;

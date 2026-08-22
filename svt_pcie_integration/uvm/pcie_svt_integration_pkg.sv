@@ -17,6 +17,7 @@ package pcie_svt_integration_pkg;
   `include "pcie_svt_switch_sidecar_subscriber.sv"
   `include "pcie_svt_switch_sidecar_env.sv"
   `include "pcie_svt_switch_target_callback.sv"
+  `include "pcie_svt_ep_bar_sizing_callback.sv"
 
   function automatic pcie_svt_topology_e compiled_topology();
 `ifdef PCIE_TOPO_EP_X16
@@ -31,14 +32,23 @@ package pcie_svt_integration_pkg;
   endfunction
 
   // Future Task 4-10 files, kept in planned dependency order.
+  `include "pcie_svt_switch_enum_registry.sv"
+  `include "pcie_svt_real_switch_link_gate.sv"
+  `include "pcie_svt_real_switch_traffic_plan.sv"
   `include "pcie_svt_virtual_sequencer.sv"
+  `include "sequences/pcie_svt_mem_write_read_seq.sv"
+  `include "sequences/pcie_svt_real_switch_traffic_vseq.sv"
+  `include "sequences/pcie_svt_rc_host_memory_init_vseq.sv"
   `include "pcie_svt_port_env.sv"
   `include "pcie_svt_env.sv"
   `include "sequences/pcie_svt_cfg_space_init_seq.sv"
   `include "sequences/pcie_svt_all_cfg_spaces_init_vseq.sv"
   `include "sequences/pcie_svt_link_bringup_seq.sv"
+  `include "sequences/pcie_svt_real_switch_links_vseq.sv"
   `include "sequences/pcie_svt_all_links_bringup_vseq.sv"
-  // `include "sequences/pcie_svt_topology_enumeration_vseq.sv"
+  `include "sequences/pcie_svt_switch_enumeration_base_vseq.sv"
+  `include "sequences/pcie_svt_switch_enumeration_vseq.sv"
+  `include "sequences/pcie_svt_real_switch_enumeration_vseq.sv"
   // `include "sequences/pcie_svt_post_enum_enable_vseq.sv"
   `include "sequences/pcie_svt_peer_smoke_vseq.sv"
   `include "pcie_svt_base_test.sv"

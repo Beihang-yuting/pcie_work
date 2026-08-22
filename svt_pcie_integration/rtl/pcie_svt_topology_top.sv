@@ -336,8 +336,8 @@ module pcie_svt_topology_top;
   assign proxy_dsp2_spd.vip_port_if.ser_if.reset = reset_vif.asserted[3];
   assign proxy_dsp3_spd.vip_port_if.ser_if.reset = reset_vif.asserted[4];
 `else
-  pcie_dut_placeholder dut (
-    .reset(|reset_vif.asserted),
+  pcie_switch_dut_wrapper dut (
+    .reset_asserted(reset_vif.asserted),
     .usp_rx_p(primary_rc0_serial.rx_p),
     .usp_rx_n(primary_rc0_serial.rx_n),
     .usp_tx_p(primary_rc0_serial.tx_p),

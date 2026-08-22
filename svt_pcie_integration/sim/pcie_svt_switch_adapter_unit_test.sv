@@ -56,6 +56,9 @@ package pcie_svt_switch_adapter_unit_test_pkg;
     pcie_svt_switch_sidecar_subscriber  tx_subscriber;
     pcie_svt_switch_sidecar_subscriber  peer_rx_subscriber;
     pcie_svt_switch_sidecar_subscriber  peer_tx_subscriber;
+    pcie_tl_switch_config               dynamic_bus_cfg;
+    pcie_tl_switch                      dynamic_bus_switch;
+    bit                                 dynamic_bus_window_mode;
 
     function new(string name = "pcie_svt_switch_adapter_unit_test",
                  uvm_component parent = null);
@@ -69,8 +72,20 @@ package pcie_svt_switch_adapter_unit_test_pkg;
 
     virtual function void build_phase(uvm_phase phase);
       super.build_phase(phase);
-      switch_port = pcie_tl_switch_port::type_id::create(
-        "switch_port", this);
+      dynamic_bus_window_mode = $test$plusargs(
+        "SVT_ADAPTER_TEST_DYNAMIC_BUS_WINDOW");
+      if (dynamic_bus_window_mode) begin
+        dynamic_bus_cfg = new("dynamic_bus_cfg");
+        dynamic_bus_cfg.num_ds_ports = 1;
+        dynamic_bus_cfg.enum_mode = 1'b1;
+        dynamic_bus_cfg.init_defaults();
+        dynamic_bus_switch = pcie_tl_switch::type_id::create(
+          "dynamic_bus_switch", this);
+        dynamic_bus_switch.sw_cfg = dynamic_bus_cfg;
+      end else begin
+        switch_port = pcie_tl_switch_port::type_id::create(
+          "switch_port", this);
+      end
       sequencer_cfg = new("sequencer_cfg");
       uvm_config_db#(svt_pcie_tl_configuration)::set(
         this, "proxy_tlp_seqr", "cfg", sequencer_cfg);
@@ -94,8 +109,10 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       target_callback = pcie_svt_switch_target_callback::type_id::create(
         "target_callback");
 
-      adapter.port_index = 2;
-      adapter.switch_port = switch_port;
+      if (!dynamic_bus_window_mode) begin
+        adapter.port_index = 2;
+        adapter.switch_port = switch_port;
+      end
       adapter.proxy_tlp_seqr = proxy_tlp_seqr;
       target_callback.adapter = adapter;
 
@@ -120,6 +137,53 @@ package pcie_svt_switch_adapter_unit_test_pkg;
     virtual function void connect_phase(uvm_phase phase);
       super.connect_phase(phase);
       collecting_driver.seq_item_port.connect(proxy_tlp_seqr.seq_item_export);
+      if (dynamic_bus_window_mode) begin
+        require(dynamic_bus_switch != null,
+                "dynamic mode switch handle is null in connect phase");
+        if (dynamic_bus_switch == null)
+          return;
+        switch_port = dynamic_bus_switch.usp;
+        require(switch_port != null,
+                "dynamic mode USP handle is null in connect phase");
+        if (switch_port == null)
+          return;
+        adapter.port_index = 0;
+        adapter.switch_port = switch_port;
+      end
+      check_mode_topology();
+    endfunction
+
+    function automatic void check_mode_topology();
+      uvm_component standalone_child;
+      uvm_component dynamic_child;
+
+      standalone_child = has_child("switch_port") ?
+                         get_child("switch_port") : null;
+      dynamic_child = has_child("dynamic_bus_switch") ?
+                      get_child("dynamic_bus_switch") : null;
+      if (dynamic_bus_window_mode) begin
+        require(standalone_child == null,
+                "dynamic mode created a standalone switch port");
+        require(dynamic_child == dynamic_bus_switch,
+                "dynamic mode did not create the dynamic switch");
+        require((dynamic_bus_cfg != null) &&
+                (dynamic_bus_switch != null) &&
+                (switch_port == dynamic_bus_switch.usp) &&
+                (adapter.switch_port == dynamic_bus_switch.usp),
+                "dynamic mode did not bind the adapter to the dynamic USP");
+        $display("SVT_ADAPTER_TEST_TOPOLOGY_PASS mode=dynamic");
+      end else begin
+        require(standalone_child == switch_port,
+                "default mode did not create the standalone switch port");
+        require((dynamic_bus_cfg == null) &&
+                (dynamic_bus_switch == null) &&
+                (dynamic_child == null),
+                "default mode created a dynamic switch");
+        require((switch_port != null) &&
+                (adapter.switch_port == switch_port),
+                "default mode did not bind the standalone switch port");
+        $display("SVT_ADAPTER_TEST_TOPOLOGY_PASS mode=default");
+      end
     endfunction
 
     function automatic svt_pcie_tlp make_request(
@@ -332,6 +396,115 @@ package pcie_svt_switch_adapter_unit_test_pkg;
         end
       join_any
       disable fork;
+    endtask
+
+    task automatic get_dynamic_dsp_tlp(output pcie_tl_tlp tlp);
+      fork
+        begin
+          dynamic_bus_switch.dsp[0].tx_fifo.get(tlp);
+        end
+        begin
+          #2us;
+          `uvm_fatal("SWITCH_ADAPTER_DYNAMIC_BUS_ROUTE",
+                     "CfgWr1 to 03:00.0 did not route to DSP0")
+        end
+      join_any
+      disable fork;
+    endtask
+
+    function automatic svt_pcie_tlp make_dynamic_cfg_write(
+        string name, bit [7:0] bus_number, bit [9:0] register_number,
+        bit [31:0] raw_payload, bit [9:0] tag);
+      svt_pcie_tlp tlp;
+      tlp = new(name);
+      tlp.tlp_type = svt_pcie_tlp::TYPE_1_CFG_REQ;
+      tlp.fmt = svt_pcie_tlp::WITH_DATA_3_DWORD;
+      tlp.length = 10'd1;
+      tlp.requester_id = 16'h0000;
+      tlp.tag = tag;
+      tlp.bus_number = bus_number;
+      tlp.device_number = 5'h00;
+      tlp.function_number = 3'h0;
+      tlp.register_number = register_number;
+      tlp.first_dw_be = 4'hf;
+      tlp.last_dw_be = 4'h0;
+      tlp.payload = new[1];
+      tlp.payload[0] = raw_payload;
+      return tlp;
+    endfunction
+
+    task automatic run_dynamic_bus_window_regression();
+      svt_pcie_tlp bus_number_write;
+      svt_pcie_tlp downstream_write;
+      pcie_tl_tlp routed_tlp;
+      pcie_tl_cfg_tlp routed_cfg;
+      pcie_tl_cpl_tlp downstream_cpl;
+      svt_pcie_tlp observed_cpl;
+      bit drop;
+
+      // The R-2020.12 enumeration sequence programs app payload 00ff0302.
+      // This unit supplies the equivalent raw SVT DWORD whose MSB-first
+      // conversion yields primary/secondary/subordinate/latency 02/03/ff/00.
+      bus_number_write = make_dynamic_cfg_write(
+        "dsp0_bus_number_write", 8'h02, 10'h006,
+        32'h0203_ff00, 10'h101);
+      drop = 1'b0;
+      target_callback.post_rx_tlp_get(null, bus_number_write, drop);
+      require(drop, "DSP0 bus-number CfgWr1 was not suppressed");
+      wait_for_driver_count(1);
+
+      downstream_write = make_dynamic_cfg_write(
+        "downstream_cfg_write", 8'h03, 10'h000,
+        32'hffff_ffff, 10'h102);
+      drop = 1'b0;
+      target_callback.post_rx_tlp_get(null, downstream_write, drop);
+      require(drop, "03:00.0 CfgWr1 was not suppressed");
+      get_dynamic_dsp_tlp(routed_tlp);
+      require($cast(routed_cfg, routed_tlp),
+              "03:00.0 route did not produce a Configuration TLP");
+      require((routed_cfg.kind == TLP_CFG_WR0) &&
+              (routed_cfg.type_f == TLP_TYPE_CFG_WR0),
+              "03:00.0 CfgWr1 was not converted to CfgWr0 at DSP0");
+      require(routed_cfg.completer_id == 16'h0300,
+              "03:00.0 route changed the Configuration target BDF");
+      require((dynamic_bus_switch.dsp[0].route_entry.primary_bus == 8'h02) &&
+              (dynamic_bus_switch.dsp[0].route_entry.secondary_bus == 8'h03) &&
+              (dynamic_bus_switch.dsp[0].route_entry.subordinate_bus == 8'hff),
+              "DSP0 dynamic bus window is not primary=2 secondary=3 subordinate=ff");
+      require(dynamic_bus_switch.outstanding_count() == 1,
+              "dynamic Configuration ownership was not registered");
+
+      downstream_cpl = pcie_tl_cpl_tlp::type_id::create(
+        "downstream_cfg_write_cpl");
+      downstream_cpl.kind         = TLP_CPL;
+      downstream_cpl.fmt          = FMT_3DW_NO_DATA;
+      downstream_cpl.type_f       = TLP_TYPE_CPL;
+      downstream_cpl.length       = 10'd0;
+      downstream_cpl.requester_id = routed_cfg.requester_id;
+      downstream_cpl.tag          = routed_cfg.tag;
+      downstream_cpl.completer_id = routed_cfg.completer_id;
+      downstream_cpl.cpl_status   = CPL_STATUS_SC;
+      downstream_cpl.byte_count   = 12'd4;
+      downstream_cpl.lower_addr   = 7'h00;
+      downstream_cpl.payload      = new[0];
+      dynamic_bus_switch.dsp[0].rx_fifo.put(downstream_cpl);
+      wait_for_driver_count(2);
+
+      observed_cpl = collecting_driver.collected[1];
+      require((observed_cpl.tlp_type == svt_pcie_tlp::CPL) &&
+              (observed_cpl.fmt == svt_pcie_tlp::NO_DATA_3_DWORD) &&
+              (observed_cpl.length == 0) &&
+              (observed_cpl.requester_id == routed_cfg.requester_id) &&
+              (observed_cpl.tag == routed_cfg.tag) &&
+              (observed_cpl.completer_id == routed_cfg.completer_id) &&
+              (observed_cpl.completion_status ==
+               svt_pcie_tlp::SUCCESSFUL) &&
+              (observed_cpl.byte_count == 4) &&
+              (observed_cpl.payload.size() == 0),
+              "dynamic Configuration Completion changed across switch adapter");
+      require(dynamic_bus_switch.outstanding_count() == 0,
+              "dynamic Configuration ownership did not drain");
+      $display("SWITCH_ADAPTER_DYNAMIC_BUS_WINDOW_PASS");
     endtask
 
     function automatic void verify_raw_item(
@@ -1018,6 +1191,8 @@ package pcie_svt_switch_adapter_unit_test_pkg;
       phase.raise_objection(this);
       if ($value$plusargs("ADAPTER_NEGATIVE=%s", negative_mode))
         run_negative(negative_mode);
+      else if (dynamic_bus_window_mode)
+        run_dynamic_bus_window_regression();
       else if ($value$plusargs("ADAPTER_POSITIVE=%s", positive_mode)) begin
         case (positive_mode)
           "scoreboard_cross_route":

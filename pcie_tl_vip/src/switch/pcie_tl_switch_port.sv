@@ -123,9 +123,9 @@ class pcie_tl_switch_port extends uvm_component;
             12'h004: return {status, command};
             12'h008: return {class_code, revision_id};
             12'h00c: return {8'h00, header_type, 16'h0000};
-            12'h018: return {route_entry.subordinate_bus,
+            12'h018: return {8'h00, route_entry.subordinate_bus,
                              route_entry.secondary_bus,
-                             route_entry.primary_bus, 8'h0};
+                             route_entry.primary_bus};
             12'h020: return {route_entry.mem_limit[31:20], 4'h0,
                              route_entry.mem_base[31:20], 4'h0};
             12'h024: return {pref_limit_reg, pref_base_reg};
@@ -148,9 +148,9 @@ class pcie_tl_switch_port extends uvm_component;
             end
             12'h018: begin
                 merged = merge_be(cfg_read(addr), data, be);
-                route_entry.primary_bus     = merged[15:8];
-                route_entry.secondary_bus   = merged[23:16];
-                route_entry.subordinate_bus = merged[31:24];
+                route_entry.primary_bus     = merged[7:0];
+                route_entry.secondary_bus   = merged[15:8];
+                route_entry.subordinate_bus = merged[23:16];
             end
             12'h020: begin
                 merged = merge_be(cfg_read(addr), data, be);

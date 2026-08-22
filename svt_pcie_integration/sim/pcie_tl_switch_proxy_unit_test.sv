@@ -570,18 +570,21 @@ class pcie_tl_switch_proxy_unit_test extends uvm_test;
         check_eq(usp_port.cfg_read(12'h004), 32'h0010_3c5a,
                  "command high byte enable");
 
-        usp_port.cfg_write(12'h018, 32'hb3a2_7100, 4'b1110);
-        check_eq(usp_port.cfg_read(12'h018), 32'hb3a2_7100,
-                 "bus nonzero sentinel");
-        usp_port.cfg_write(12'h018, 32'h0000_5c00, 4'b0010);
-        check_eq(usp_port.cfg_read(12'h018), 32'hb3a2_5c00,
+        usp_port.cfg_write(12'h018, 32'hb3a2_714d, 4'b1111);
+        check_eq(usp_port.cfg_read(12'h018), 32'h00a2_714d,
+                 "bus register layout and secondary latency read-only");
+        usp_port.cfg_write(12'h018, 32'h0000_005c, 4'b0001);
+        check_eq(usp_port.cfg_read(12'h018), 32'h00a2_715c,
                  "primary bus byte enable");
-        usp_port.cfg_write(12'h018, 32'h00d4_0000, 4'b0100);
-        check_eq(usp_port.cfg_read(12'h018), 32'hb3d4_5c00,
+        usp_port.cfg_write(12'h018, 32'h0000_5a00, 4'b0010);
+        check_eq(usp_port.cfg_read(12'h018), 32'h00a2_5a5c,
                  "secondary bus byte enable");
-        usp_port.cfg_write(12'h018, 32'he600_0000, 4'b1000);
-        check_eq(usp_port.cfg_read(12'h018), 32'he6d4_5c00,
+        usp_port.cfg_write(12'h018, 32'h00e6_0000, 4'b0100);
+        check_eq(usp_port.cfg_read(12'h018), 32'h00e6_5a5c,
                  "subordinate bus byte enable");
+        usp_port.cfg_write(12'h018, 32'hd700_0000, 4'b1000);
+        check_eq(usp_port.cfg_read(12'h018), 32'h00e6_5a5c,
+                 "secondary latency read-only");
 
         usp_port.cfg_write(12'h020, 32'hc3d0_a5b0, 4'hf);
         check_eq(usp_port.cfg_read(12'h020), 32'hc3d0_a5b0,

@@ -94,6 +94,156 @@ The switch topology must report 24 `MULTI_EP_BAR_CHECK` operations, one RC
 topologies contain only primary RC VIPs, so their Target App BAR initialization
 is intentionally skipped once and twice, respectively.
 
+## Real-Switch staged environment
+
+Current acceptance: compile/elaboration and cfg-init only; no real DUT exists.
+
+Future real-DUT acceptance: link, enum, and traffic.
+
+### Placeholder build and accepted runs
+
+From this `sim` directory, after the PLI preparation above, build the idle
+placeholder image once. `SVT_PCIE_ENABLE_GEN5` keeps both Gen4 and Gen5
+available in the image; the required run-time `+PCIE_GEN=4` or `+PCIE_GEN=5`
+argument selects one generation.
+
+```sh
+mkdir -p build_real_switch_placeholder
+vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
+  +define+SVT_PCIE_ENABLE_GEN5 +define+SVT_PCIE_ENABLE_SERDES_ARCH \
+  +define+PCIE_TOPO_SWITCH_1X16_4X4 \
+  -f pcie_svt.f -top pcie_svt_topology_top \
+  -Mdir=build_real_switch_placeholder/csrc -P pli.tab msglog.o \
+  -o build_real_switch_placeholder/simv \
+  -l build_real_switch_placeholder/compile.log
+```
+
+Run the accepted compile/elaboration and configuration-initialization stages
+for both generations:
+
+```sh
+for gen in 4 5; do
+  ./build_real_switch_placeholder/simv -no_save \
+    +UVM_TESTNAME=pcie_svt_real_switch_test +PCIE_GEN="$gen" \
+    +PCIE_COMPILE_ONLY +UVM_NO_RELNOTES \
+    -l "build_real_switch_placeholder/run_compile_gen${gen}.log"
+  ./build_real_switch_placeholder/simv -no_save \
+    +UVM_TESTNAME=pcie_svt_real_switch_test +PCIE_GEN="$gen" \
+    +PCIE_CFG_INIT_ONLY +UVM_NO_RELNOTES \
+    -l "build_real_switch_placeholder/run_cfg_gen${gen}.log"
+done
+```
+
+Gate those logs with the stage-specific checker:
+
+```sh
+for gen in 4 5; do
+  ./check_real_switch_log.sh compile \
+    "build_real_switch_placeholder/run_compile_gen${gen}.log"
+  ./check_real_switch_log.sh cfg \
+    "build_real_switch_placeholder/run_cfg_gen${gen}.log"
+done
+```
+
+The `cfg` gate requires exactly 24 `MULTI_EP_BAR_CHECK`, one
+`MULTI_EP_BAR_SKIP`, five `CFG_INIT_DONE`, one
+`RC_HOST_MEMORY_RANGE_READY`, and one `REAL_SWITCH_CFG_INIT_PASS` report ID.
+The checker also requires exactly one final zero summary for each of
+`UVM_WARNING`, `UVM_ERROR`, and `UVM_FATAL`, and rejects markers belonging to
+later stages.
+
+### Fixed real-DUT adapter boundary
+
+A user-supplied adapter must define `pcie_real_switch_dut_adapter` exactly
+once with this fixed module and port contract:
+
+```systemverilog
+module pcie_real_switch_dut_adapter (
+  input  logic [4:0] reset_asserted,
+  input  logic [15:0] usp_rx_p, usp_rx_n,
+  output logic [15:0] usp_tx_p, usp_tx_n,
+  input  logic [3:0] dsp0_rx_p, dsp0_rx_n,
+  output logic [3:0] dsp0_tx_p, dsp0_tx_n,
+  input  logic [3:0] dsp1_rx_p, dsp1_rx_n,
+  output logic [3:0] dsp1_tx_p, dsp1_tx_n,
+  input  logic [3:0] dsp2_rx_p, dsp2_rx_n,
+  output logic [3:0] dsp2_tx_p, dsp2_tx_n,
+  input  logic [3:0] dsp3_rx_p, dsp3_rx_n,
+  output logic [3:0] dsp3_tx_p, dsp3_tx_n
+);
+  // Convert reset polarity, provide native clocks and controls, and
+  // instantiate/map the real Switch RTL here.
+endmodule
+```
+
+Index 0 of `reset_asserted` belongs to the x16 upstream port; indices 1 through
+4 belong to the four x4 downstream ports. Names are from the DUT point of
+view: `*_rx_[pn]` enters the DUT from a VIP, and `*_tx_[pn]` leaves the DUT for
+a VIP.
+
+Place the adapter source on the VCS command line before `-f pcie_svt.f`, and
+compile with the required `+define+PCIE_USE_REAL_SWITCH_DUT` macro. For
+example:
+
+```sh
+real_adapter=/absolute/path/to/pcie_real_switch_dut_adapter.sv
+test -r "$real_adapter"
+mkdir -p build_real_switch
+vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
+  +define+SVT_PCIE_ENABLE_GEN5 +define+SVT_PCIE_ENABLE_SERDES_ARCH \
+  +define+PCIE_TOPO_SWITCH_1X16_4X4 \
+  +define+PCIE_USE_REAL_SWITCH_DUT \
+  "$real_adapter" -f pcie_svt.f -top pcie_svt_topology_top \
+  -Mdir=build_real_switch/csrc -P pli.tab msglog.o \
+  -o build_real_switch/simv -l build_real_switch/compile.log
+```
+
+Do not also compile `pcie_real_switch_dut_adapter_compile_stub.sv` or another
+adapter definition. The repository stub is only an interface/elaboration aid;
+its idle outputs cannot train links.
+
+### Run modes and log gates
+
+`pcie_svt_real_switch_test` requires exactly one of the following bare
+arguments. Missing, duplicated, valued, or conflicting mode arguments are
+fatal.
+
+| Bare argument | Ordered work | Checker mode | Idle placeholder |
+| --- | --- | --- | --- |
+| `+PCIE_COMPILE_ONLY` | Elaboration and five primary-VIP handle checks | `compile` | accepted |
+| `+PCIE_CFG_INIT_ONLY` | Configuration-space initialization, then RC host-memory setup | `cfg` | accepted |
+| `+PCIE_LINK_ONLY` | Configuration and host setup, then five-link bring-up | `link` | rejected |
+| `+PCIE_ENUM_ONLY` | Configuration, host setup, links, then enumeration and BAR validation | `enum` | rejected |
+| `+PCIE_TRAFFIC` | Configuration, host setup, links, enumeration, then eight traffic flows | `traffic` | rejected |
+
+Every run must contain exactly one `+PCIE_GEN=4` or `+PCIE_GEN=5`. After a
+functional real adapter is available, invoke a stage and gate the matching log
+with the same mode, for example:
+
+```sh
+./build_real_switch/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_real_switch_test +PCIE_GEN=5 \
+  +PCIE_LINK_ONLY +UVM_NO_RELNOTES \
+  -l build_real_switch/run_link_gen5.log
+./check_real_switch_log.sh link build_real_switch/run_link_gen5.log
+
+./check_real_switch_log.sh enum build_real_switch/run_enum_gen5.log
+./check_real_switch_log.sh traffic build_real_switch/run_traffic_gen5.log
+```
+
+The last two checker commands illustrate the log gates only; no real-DUT
+link, enumeration, or traffic result is currently claimed. The optional
+`+PCIE_FAST_LINK_TRAIN=1` run argument uses the existing fast-training policy;
+omitting it (or using `+PCIE_FAST_LINK_TRAIN=0`) selects normal training. Use
+the fast path with a real DUT only when that DUT supports the same direct rate
+transition described below.
+
+PIPE is not implemented; it replaces only the HDL transport adapter later.
+The UVM profiles, staged sequences, run modes, and log gates remain unchanged
+at that future boundary.
+
 ## Optional fast link training
 
 Pass `+PCIE_FAST_LINK_TRAIN=1` to enable fast link training. Omitting the
