@@ -53,7 +53,10 @@ class pcie_topology_model_unit_test extends uvm_test;
         topology.links.push_back(rc0_to_ep0);
 
         if (!$cast(topology_clone, topology.clone())) begin
-            `uvm_error("TOPO_COPY", "Topology clone returned a null or wrong-typed object")
+            `uvm_error("TOPO_COPY", "Topology clone returned a wrong-typed object")
+        end
+        else if (topology_clone == null) begin
+            `uvm_error("TOPO_COPY", "Topology clone returned null")
         end
         else begin
             if (topology_clone.nodes.size() != 3)
