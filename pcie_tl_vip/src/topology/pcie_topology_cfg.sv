@@ -134,6 +134,10 @@ class pcie_topology_cfg extends uvm_object;
         int port_link_count;
         int owner_count;
         int switch_index;
+        int graph_rc_bound;
+        int graph_ep_bound;
+        longint unsigned usp_iteration_limit;
+        longint unsigned dsp_iteration_limit;
         bit upstream_valid;
         bit downstream_valid;
         bit supported_form;
@@ -147,8 +151,16 @@ class pcie_topology_cfg extends uvm_object;
         rc_switch_link_count = 0;
         switch_ep_link_count = 0;
         switch_index = -1;
+        graph_rc_bound = 0;
+        graph_ep_bound = 0;
         enabled_degree = new[nodes.size()];
         ep_parent_count = new[nodes.size()];
+
+        foreach (nodes[i]) begin
+            if (nodes[i] == null) continue;
+            if (nodes[i].kind == PCIE_TOPO_NODE_RC) graph_rc_bound++;
+            if (nodes[i].kind == PCIE_TOPO_NODE_EP) graph_ep_bound++;
+        end
 
         if (nodes.size() < 2) begin
             errors.push_back($sformatf(
@@ -208,6 +220,16 @@ class pcie_topology_cfg extends uvm_object;
                             "Switch '%s' must declare a nonzero DSP count",
                             nodes[i].node_id));
                     end
+                    if (nodes[i].num_usp > graph_rc_bound) begin
+                        errors.push_back($sformatf(
+                            "Switch '%s' USP count exceeds graph-derived feasible bound: declared %0d, bound %0d",
+                            nodes[i].node_id, nodes[i].num_usp, graph_rc_bound));
+                    end
+                    if (nodes[i].num_dsp > graph_ep_bound) begin
+                        errors.push_back($sformatf(
+                            "Switch '%s' DSP count exceeds graph-derived feasible bound: declared %0d, bound %0d",
+                            nodes[i].node_id, nodes[i].num_dsp, graph_ep_bound));
+                    end
                     if (nodes[i].dsp_owner_usp.size() != nodes[i].num_dsp) begin
                         errors.push_back($sformatf(
                             "Switch '%s' owner count %0d does not match DSP count %0d",
@@ -223,8 +245,11 @@ class pcie_topology_cfg extends uvm_object;
                                 nodes[i].dsp_owner_usp[dsp], nodes[i].num_usp));
                         end
                     end
+                    usp_iteration_limit = nodes[i].num_usp;
+                    if (usp_iteration_limit > graph_rc_bound)
+                        usp_iteration_limit = graph_rc_bound;
                     for (longint unsigned usp = 0;
-                         usp < nodes[i].num_usp; usp++) begin
+                         usp < usp_iteration_limit; usp++) begin
                         owner_count = 0;
                         foreach (nodes[i].dsp_owner_usp[dsp]) begin
                             if (nodes[i].dsp_owner_usp[dsp] == usp) owner_count++;
@@ -513,8 +538,14 @@ class pcie_topology_cfg extends uvm_object;
             if ((nodes[i] == null) ||
                 (nodes[i].kind != PCIE_TOPO_NODE_SWITCH)) continue;
 
+            usp_iteration_limit = nodes[i].num_usp;
+            if (usp_iteration_limit > graph_rc_bound)
+                usp_iteration_limit = graph_rc_bound;
+            dsp_iteration_limit = nodes[i].num_dsp;
+            if (dsp_iteration_limit > graph_ep_bound)
+                dsp_iteration_limit = graph_ep_bound;
             for (longint unsigned usp = 0;
-                 usp < nodes[i].num_usp; usp++) begin
+                 usp < usp_iteration_limit; usp++) begin
                 port_link_count = 0;
                 foreach (links[j]) begin
                     if ((links[j] == null) || !links[j].enabled) continue;
@@ -538,7 +569,7 @@ class pcie_topology_cfg extends uvm_object;
             end
 
             for (longint unsigned dsp = 0;
-                 dsp < nodes[i].num_dsp; dsp++) begin
+                 dsp < dsp_iteration_limit; dsp++) begin
                 port_link_count = 0;
                 foreach (links[j]) begin
                     if ((links[j] == null) || !links[j].enabled) continue;

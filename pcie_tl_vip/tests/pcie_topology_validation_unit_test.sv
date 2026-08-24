@@ -86,6 +86,24 @@ class pcie_topology_validation_unit_test extends uvm_test;
         return pcie_topology_cfg::type_id::create("empty_topology");
     endfunction
 
+    function void expect_infeasible_switch_count(bit huge_usp);
+        pcie_topology_cfg topology;
+
+        topology = build_valid_switch_2x3();
+        if (huge_usp) begin
+            topology.nodes[2].num_usp = 32'hffff_ffff;
+            expect_invalid(topology,
+                           "USP count exceeds graph-derived feasible bound",
+                           "maximum-width Switch USP count");
+        end
+        else begin
+            topology.nodes[2].num_dsp = 32'hffff_ffff;
+            expect_invalid(topology,
+                           "DSP count exceeds graph-derived feasible bound",
+                           "maximum-width Switch DSP count");
+        end
+    endfunction
+
     task run_phase(uvm_phase phase);
         pcie_topology_cfg topology;
         pcie_topology_node_cfg node;
@@ -95,6 +113,17 @@ class pcie_topology_validation_unit_test extends uvm_test;
         int owners[];
 
         phase.raise_objection(this);
+
+        if ($test$plusargs("TOPO_HUGE_USP_ONLY")) begin
+            expect_infeasible_switch_count(1'b1);
+            phase.drop_objection(this);
+            return;
+        end
+        if ($test$plusargs("TOPO_HUGE_DSP_ONLY")) begin
+            expect_infeasible_switch_count(1'b0);
+            phase.drop_objection(this);
+            return;
+        end
 
         expect_valid(pcie_topology_builder::build_ep_x16(4), "EP_X16 Gen4");
         expect_valid(pcie_topology_builder::build_ep_x16(5), "EP_X16 Gen5");
@@ -427,6 +456,9 @@ class pcie_topology_validation_unit_test extends uvm_test;
                     i, first_errors[i], second_errors[i]));
             end
         end
+
+        expect_infeasible_switch_count(1'b1);
+        expect_infeasible_switch_count(1'b0);
 
         phase.drop_objection(this);
     endtask
