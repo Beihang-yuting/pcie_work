@@ -31,6 +31,8 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_multi_root_stress_test)
 
     localparam int unsigned MAX_ROOT_TAG_PRESSURE = 128;
+    localparam int unsigned EXPECTED_POISONED_PER_ROOT = 84;
+    localparam int unsigned EXPECTED_BITMASK_PER_ROOT  = 83;
     localparam time         ROOT_TAG_WAIT_TIMEOUT = 500us;
 
     // ---- scale knobs ----
@@ -45,6 +47,7 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
     bit [63:0] win_base[4];                   // EP window base (= ds_mem_base[i])
     bit [63:0] marker[4];                     // per-EP unique marker addr (isolation proof)
     bit        final_state_clean;
+    bit        error_materialization_clean;
 
     function new(string name = "pcie_tl_multi_root_stress_test",
                  uvm_component parent = null);
@@ -201,6 +204,8 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
             end
         join
 
+        wait_for_error_materialization();
+
         // Drain both independent requester domains with a finite guard.
         fork
             wait_for_root_tag_drain(0);
@@ -277,7 +282,7 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
             env.scbs[1].matched, env.scbs[1].mismatched, env.scbs[1].unexpected,
             env.scbs[1].timed_out), UVM_LOW)
 
-        if (ok && final_state_clean) begin
+        if (ok && final_state_clean && error_materialization_clean) begin
             `uvm_info("MRSTRESS", "MRSTRESS PASSED (isolation intact, no hang)", UVM_LOW)
             `uvm_info("MRSTRESS_PASS", "*** MULTI-ROOT STRESS CLEAN PASS ***", UVM_LOW)
         end else begin
@@ -349,6 +354,58 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
             `uvm_info("MRSTRESS_DRAIN", $sformatf(
                 "root%0d tag domain drained", root), UVM_LOW)
         end
+    endtask
+
+    // Poisoned and malformed writes are posted, so tag drain cannot prove that
+    // the endpoint monitors observed them.  Wait on explicit receiver-side
+    // materialization counters before allowing the positive stress test to pass.
+    task wait_for_error_materialization();
+        time start_time;
+
+        error_materialization_clean = 1;
+        start_time = $time;
+        while (((env.ep_agents[0].monitor.materialized_poisoned_tlps <
+                 EXPECTED_POISONED_PER_ROOT) ||
+                (env.ep_agents[0].monitor.materialized_bitmask_tlps <
+                 EXPECTED_BITMASK_PER_ROOT) ||
+                (env.ep_agents[2].monitor.materialized_poisoned_tlps <
+                 EXPECTED_POISONED_PER_ROOT) ||
+                (env.ep_agents[2].monitor.materialized_bitmask_tlps <
+                 EXPECTED_BITMASK_PER_ROOT)) &&
+               (($time - start_time) < ROOT_TAG_WAIT_TIMEOUT)) begin
+            #100ns;
+        end
+
+        for (int ep = 0; ep < 4; ep++) begin
+            int expected_poisoned;
+            int expected_bitmask;
+            expected_poisoned = ((ep == 0) || (ep == 2)) ?
+                                EXPECTED_POISONED_PER_ROOT : 0;
+            expected_bitmask = ((ep == 0) || (ep == 2)) ?
+                               EXPECTED_BITMASK_PER_ROOT : 0;
+            if ((env.ep_agents[ep].monitor.materialized_poisoned_tlps !=
+                 expected_poisoned) ||
+                (env.ep_agents[ep].monitor.materialized_bitmask_tlps !=
+                 expected_bitmask)) begin
+                `uvm_error("MRSTRESS_ERROR_INJECT", $sformatf(
+                    {"EP%0d materialized poison=%0d/%0d bitmask=%0d/%0d"},
+                    ep,
+                    env.ep_agents[ep].monitor.materialized_poisoned_tlps,
+                    expected_poisoned,
+                    env.ep_agents[ep].monitor.materialized_bitmask_tlps,
+                    expected_bitmask))
+                error_materialization_clean = 0;
+            end
+        end
+
+        `uvm_info("MRSTRESS", $sformatf(
+            {"TLM error materialization EP0[poison=%0d bitmask=%0d] ",
+             "EP2[poison=%0d bitmask=%0d] clean=%0b"},
+            env.ep_agents[0].monitor.materialized_poisoned_tlps,
+            env.ep_agents[0].monitor.materialized_bitmask_tlps,
+            env.ep_agents[2].monitor.materialized_poisoned_tlps,
+            env.ep_agents[2].monitor.materialized_bitmask_tlps,
+            error_materialization_clean), UVM_LOW)
     endtask
 
     task check_final_clean_state();
@@ -428,16 +485,23 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
     task inject_error_or_read_pair(int root, int n);
         uvm_sequencer #(pcie_tl_tlp) seqr = env.v_seqr.rc_seqr_arr[root];
         case (n % 3)
-            0: begin pcie_tl_err_poisoned_seq      s =
-                 pcie_tl_err_poisoned_seq::type_id::create($sformatf("err_pois_r%0d_%0d", root, n));
-                 s.start(seqr); end
+            0: begin
+                pcie_tl_err_poisoned_seq s =
+                    pcie_tl_err_poisoned_seq::type_id::create(
+                        $sformatf("err_pois_r%0d_%0d", root, n));
+                s.target_addr = win_base[root * 2] +
+                                64'h0090_0000 + (n * 64);
+                s.start(seqr);
+            end
             1: begin
                 pcie_tl_err_malformed_seq s =
                     pcie_tl_err_malformed_seq::type_id::create(
                         $sformatf("err_mal_r%0d_%0d", root, n));
-                // Keep all 83 malformed cycles per root in that root's first
-                // owned window.  The 64B stride makes each 1-DW write page-safe.
-                s.target_addr = win_base[root * 2] + 64'h0080_0000 + (n * 64);
+                // The injected DW0 bit flip changes Length 1 to encoded Length
+                // 0 (4096 DW). Page-align each target so boundary checking does
+                // not add unrelated warning noise to this positive stress run.
+                s.target_addr = win_base[root * 2] +
+                                64'h0080_0000 + (n * 4096);
                 s.start(seqr);
             end
             2: begin

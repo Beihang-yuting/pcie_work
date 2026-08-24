@@ -47,10 +47,53 @@ class pcie_tl_if_adapter extends uvm_component;
     //=========================================================================
     virtual task send(pcie_tl_tlp tlp);
         case (mode)
-            TLM_MODE:   tlm_tx_fifo.put(tlp);
+            TLM_MODE:   tlm_tx_fifo.put(materialize_tlm_error(tlp));
             SV_IF_MODE: drive_to_interface(tlp);
         endcase
     endtask
+
+    // TLM normally preserves the transaction object so requester-side
+    // read-back and 10-bit tag identity remain intact. Poisoned/header-bit
+    // corruption changes decoded header fields, so materialize those transfers
+    // through encode/decode before placing them on the transport FIFO. ECRC is
+    // not materialized here because decode() does not expose digest validity;
+    // inject_ecrc_err remains meaningful on serialized/SV-interface transport.
+    protected function pcie_tl_tlp materialize_tlm_error(pcie_tl_tlp tlp);
+        bit [7:0] bytes[];
+        pcie_tl_tlp wire_tlp;
+
+        if (tlp == null)
+            return null;
+        if (!(tlp.inject_poisoned || (tlp.field_bitmask != 0)))
+            return tlp;
+        if (codec == null) begin
+            `uvm_fatal("ADAPTER_CODEC",
+                       "TLM error injection requires an assigned codec")
+            return tlp;
+        end
+
+        codec.encode(tlp, bytes);
+        wire_tlp = codec.decode(bytes);
+        if (wire_tlp == null) begin
+            `uvm_fatal("ADAPTER_CODEC",
+                       "codec returned null while materializing TLM error")
+            return tlp;
+        end
+
+        // The current byte codec carries the legacy 8-bit Tag field. Preserve
+        // the upper Extended Tag bits and non-wire test contracts explicitly.
+        wire_tlp.tag[9:8]             = tlp.tag[9:8];
+        wire_tlp.inject_ecrc_err      = tlp.inject_ecrc_err;
+        wire_tlp.inject_lcrc_err      = tlp.inject_lcrc_err;
+        wire_tlp.inject_poisoned      = tlp.inject_poisoned;
+        wire_tlp.violate_ordering     = tlp.violate_ordering;
+        wire_tlp.field_bitmask        = tlp.field_bitmask;
+        wire_tlp.constraint_mode_sel  = tlp.constraint_mode_sel;
+        wire_tlp.expected_cpl_status  = tlp.expected_cpl_status;
+        wire_tlp.cq_route             = tlp.cq_route;
+        wire_tlp.wire_error_materialized = 1;
+        return wire_tlp;
+    endfunction
 
     //=========================================================================
     // Receive TLP (dispatch by mode)

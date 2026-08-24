@@ -1,5 +1,6 @@
 class pcie_tl_err_poisoned_seq extends uvm_sequence #(pcie_tl_tlp);
     `uvm_object_utils(pcie_tl_err_poisoned_seq)
+    bit [63:0] target_addr = 64'h0000_0000_0000_1000;
     function new(string name = "pcie_tl_err_poisoned_seq"); super.new(name); endfunction
     task body();
         pcie_tl_mem_tlp tlp;
@@ -23,8 +24,8 @@ class pcie_tl_err_poisoned_seq extends uvm_sequence #(pcie_tl_tlp);
             tlp.td == 0;
             tlp.attr == 0;
             tlp.at == 0;
-            tlp.is_64bit == 0;
-            tlp.addr == 64'h0000_0000_0000_1000;
+            tlp.is_64bit == (local::target_addr[63:32] != 0);
+            tlp.addr == local::target_addr;
             tlp.length == 1;
             tlp.first_be == 4'hF;
             tlp.last_be == 4'h0;

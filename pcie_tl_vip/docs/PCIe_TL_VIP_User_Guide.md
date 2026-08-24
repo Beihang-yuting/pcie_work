@@ -383,6 +383,12 @@ uvm_sequence_item
 | `requester_id` | `bit [15:0]` | 请求者 BDF |
 | `tag` | `bit [9:0]` | 标签 (最多 10-bit) |
 | `payload` | `bit [7:0][]` | 数据负载 (字节数组) |
+| `expected_cpl_status` | `cpl_status_e` | 请求预期的终止 Completion 状态，默认 `CPL_STATUS_SC`；负向测试可显式设为 `UR`/`CRS`/`CA` |
+
+Scoreboard 按 `expected_cpl_status` 判定 Completion。普通请求收到非 SC
+状态会记为 mismatch 并结束该请求的跟踪；当负向测试显式声明相同的错误状态时，
+该 Completion 才会记为 matched。Memory Read 收到无数据 SC 仍属于 mismatch，
+Config/IO Write 的无数据 SC 则是合法完成。
 
 ### 5.3 Memory TLP 扩展字段 (pcie_tl_mem_tlp)
 
@@ -1082,6 +1088,13 @@ env.cov.register_callback(my_cov);
 | `violate_ordering` | `bit` | 跳过排序引擎 |
 | `field_bitmask` | `bit [31:0]` | 对头字段按位翻转 |
 | `constraint_mode_sel` | `tlp_constraint_mode_e` | LEGAL / ILLEGAL / CORNER_CASE |
+
+错误物化取决于传输模式：`SV_IF_MODE` 总是经过字节编解码，ECRC、Poisoned
+和 header bitmask 会进入接口字节流；`TLM_MODE` 默认保留原 sequence item
+对象，只对能反映到解码字段的 Poisoned/header bitmask 执行 encode/decode，
+并设置内部 `wire_error_materialized` 标记。当前 TLM 接收对象不暴露 ECRC
+校验结果，因此 ECRC-only 注入不会被标为已物化；需要验证 ECRC 时应使用
+`SV_IF_MODE`（或后续接入带 ECRC-valid/invalid 结果的传输适配器）。
 
 ### 12.2 组件级错误注入
 

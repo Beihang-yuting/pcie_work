@@ -81,6 +81,12 @@ class pcie_tl_tlp extends uvm_sequence_item;
     rand bit [9:0]              tag;          // 10-bit Extended Tag
     rand bit [7:0]              payload[];
 
+    //--- Expected Completion outcome ---
+    // Requests expect Successful Completion unless a negative test explicitly
+    // declares another terminal status.  The scoreboard uses this contract to
+    // distinguish an expected UR/CA from a real transaction failure.
+    cpl_status_e                expected_cpl_status = CPL_STATUS_SC;
+
     //--- Error injection metadata ---
     rand bit                    inject_ecrc_err;
     rand bit                    inject_lcrc_err;
@@ -88,6 +94,11 @@ class pcie_tl_tlp extends uvm_sequence_item;
     rand bit                    violate_ordering;
     rand bit [31:0]             field_bitmask;
     rand tlp_constraint_mode_e  constraint_mode_sel;
+
+    // Set by the TLM adapter when Poisoned/header-bit error injection has been
+    // applied and the receiver is observing the decoded header image. This
+    // does not claim receiver-side ECRC validation.
+    bit                         wire_error_materialized;
 
     //--- TLP Prefix ---
     rand pcie_tl_prefix  prefixes[$];
@@ -235,6 +246,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
         this.length              = rhs_.length;
         this.requester_id        = rhs_.requester_id;
         this.tag                 = rhs_.tag;
+        this.expected_cpl_status = rhs_.expected_cpl_status;
         // 深拷贝 payload 动态数组
         this.payload             = new[rhs_.payload.size()](rhs_.payload);
         // 拷贝错误注入元数据
@@ -244,6 +256,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
         this.violate_ordering    = rhs_.violate_ordering;
         this.field_bitmask       = rhs_.field_bitmask;
         this.constraint_mode_sel = rhs_.constraint_mode_sel;
+        this.wire_error_materialized = rhs_.wire_error_materialized;
         // 拷贝 TLP Prefix 队列
         this.prefixes            = rhs_.prefixes;
         this.has_prefix          = rhs_.has_prefix;
@@ -264,6 +277,8 @@ class pcie_tl_tlp extends uvm_sequence_item;
                 length        == rhs_.length        &&
                 requester_id  == rhs_.requester_id  &&
                 tag           == rhs_.tag           &&
+                expected_cpl_status == rhs_.expected_cpl_status &&
+                wire_error_materialized == rhs_.wire_error_materialized &&
                 payload.size() == rhs_.payload.size() &&
                 prefixes.size() == rhs_.prefixes.size());
     endfunction
@@ -277,6 +292,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
         printer.print_field("length",        length, 10, UVM_DEC);
         printer.print_field("requester_id",  requester_id, 16, UVM_HEX);
         printer.print_field("tag",           tag, 10, UVM_HEX);
+        printer.print_string("expected_cpl_status", expected_cpl_status.name());
         printer.print_field("attr",          attr, 3, UVM_BIN);
         printer.print_field("payload_size",  payload.size(), 32, UVM_DEC);
         if (cq_route.valid) begin

@@ -11,6 +11,11 @@ class pcie_tl_tag_manager extends uvm_object;
     //--- Outstanding transactions: tag -> TLP ---
     pcie_tl_tlp outstanding_txn[bit [9:0]];
 
+    //--- Allocation epoch: tag -> monotonically increasing generation ---
+    // Retained across free_tag() so a monitor can distinguish legal reuse of
+    // the same tag even when the sequence reuses the same transaction handle.
+    longint unsigned outstanding_generation[bit [9:0]];
+
     //--- Configuration ---
     bit  extended_tag_enable = 1;
     bit  phantom_func_enable = 0;
@@ -64,7 +69,19 @@ class pcie_tl_tag_manager extends uvm_object;
     // Register outstanding transaction (after alloc)
     //=========================================================================
     function void register_outstanding(bit [9:0] tag, pcie_tl_tlp tlp);
+        if (!outstanding_generation.exists(tag))
+            outstanding_generation[tag] = 0;
+        outstanding_generation[tag]++;
         outstanding_txn[tag] = tlp;
+    endfunction
+
+    //=========================================================================
+    // Return the current allocation epoch for an outstanding tag
+    //=========================================================================
+    function longint unsigned get_outstanding_generation(bit [9:0] tag);
+        if (!outstanding_generation.exists(tag))
+            return 0;
+        return outstanding_generation[tag];
     endfunction
 
     //=========================================================================

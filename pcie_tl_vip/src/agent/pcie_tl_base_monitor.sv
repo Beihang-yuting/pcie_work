@@ -29,11 +29,14 @@ class pcie_tl_base_monitor extends uvm_monitor;
     //--- Coverage callbacks ---
     pcie_tl_coverage_callback  cov_callbacks[$];
 
-    // First requester-side observation associated with each outstanding tag.
-    // The switch may legally forward a cloned transaction object, so duplicate
-    // detection follows the tag manager's original request handle rather than
-    // comparing the monitored object handle directly.
-    pcie_tl_tlp seen_origin_by_tag[bit [9:0]];
+    // First requester-side observation associated with each outstanding tag
+    // allocation.  Object identity is not an epoch: a legal sequence may reuse
+    // the same item handle after the prior tag has completed.
+    longint unsigned seen_generation_by_tag[bit [9:0]];
+
+    // Receiver-side proof that TLM error metadata became wire semantics.
+    int materialized_poisoned_tlps;
+    int materialized_bitmask_tlps;
 
     function new(string name = "pcie_tl_base_monitor", uvm_component parent = null);
         super.new(name, parent);
@@ -67,6 +70,13 @@ class pcie_tl_base_monitor extends uvm_monitor;
         if (tlp == null) begin
             #1ns;
             return;
+        end
+
+        if (tlp.wire_error_materialized) begin
+            if (tlp.inject_poisoned && tlp.ep_bit)
+                materialized_poisoned_tlps++;
+            if (tlp.field_bitmask != 0)
+                materialized_bitmask_tlps++;
         end
 
         // Read-back fold (SV_IF / interface-adapter mode only): the env TLM
@@ -129,25 +139,24 @@ class pcie_tl_base_monitor extends uvm_monitor;
     endfunction
 
     virtual function bit check_tag_validity(pcie_tl_tlp tlp);
-        pcie_tl_tlp origin;
+        longint unsigned generation;
 
         // For Non-Posted: allow the first observation of the currently
-        // registered request origin.  A legal switch clone shares that origin;
-        // observing the same origin again is a real duplicate.  Tag reuse has
-        // a new origin handle and therefore starts a new observation epoch.
+        // registered allocation epoch.  A legal switch clone shares that
+        // epoch; observing the same epoch again is a real duplicate.
         if (tlp.requires_completion()) begin
             if (tag_mgr.is_duplicate(tlp.tag)) begin
-                origin = tag_mgr.outstanding_txn[tlp.tag];
-                if (!seen_origin_by_tag.exists(tlp.tag) ||
-                    (seen_origin_by_tag[tlp.tag] != origin)) begin
-                    seen_origin_by_tag[tlp.tag] = origin;
+                generation = tag_mgr.get_outstanding_generation(tlp.tag);
+                if (!seen_generation_by_tag.exists(tlp.tag) ||
+                    (seen_generation_by_tag[tlp.tag] != generation)) begin
+                    seen_generation_by_tag[tlp.tag] = generation;
                     return 1;
                 end
                 `uvm_warning(get_name(), $sformatf(
                     "Duplicate tag detected: 0x%03h", tlp.tag))
                 return 0;
             end
-            seen_origin_by_tag.delete(tlp.tag);
+            seen_generation_by_tag.delete(tlp.tag);
         end
         return 1;
     endfunction

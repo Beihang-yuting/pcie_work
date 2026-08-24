@@ -1119,7 +1119,9 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
     int phase2_rc_wr_count;
     int phase2_rc_rd_count;
     int phase2_ep_dma_count;
+    int phase3_logical_rd_count;
     int phase3_split_rd_count;
+    int phase3_payload_bytes;
     int phase4_rc_wr_count;
     int phase4_rc_rd_count;
     int phase4_ep_dma_wr_count;
@@ -1338,40 +1340,66 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
     endtask
 
     //=========================================================================
-    // Phase 3: Multi-CplD split stress — 500 large reads
-    // Each read > MPS=128B, generating 2-4 CplDs per request
-    // ~500 requests, ~1600 CplDs
+    // Phase 3: Multi-CplD split stress — 500 logical large reads
+    // Preserve the original 256/384/512/768/1024B distribution while obeying
+    // MRRS=512: the final two sizes are split into two legal physical MRds.
+    // 500 logical operations become 700 requests and retain 294400B of data
+    // pressure (at least the original ~2300 split Completions).
     //=========================================================================
     task phase3_multi_cpl_stress();
         int scb_unexpected_before;
-        `uvm_info("BIDIR", "\n--- Phase 3: 500 Multi-CplD Split Reads (MPS=128B) ---", UVM_LOW)
+        int scb_completions_before;
+        int scb_completion_delta;
+        `uvm_info("BIDIR", "\n--- Phase 3: 500 Logical Multi-CplD Reads (MRRS=512B) ---", UVM_LOW)
+        phase3_logical_rd_count = 0;
         phase3_split_rd_count = 0;
+        phase3_payload_bytes = 0;
         scb_unexpected_before = env.scb.unexpected;
+        scb_completions_before = env.scb.total_completions;
 
         fork
-            // 500 large reads with varying sizes
+            // 500 logical reads with the original varying sizes.  Split only
+            // at the configured 512B MRRS boundary.
             begin
                 for (int i = 0; i < 500; i++) begin
-                    pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("p3_rd_%0d", i));
-                    rd.addr     = 64'h0000_0001_0000_0000 + ((i % 1000) * 1024);
-                    // Every size exceeds MPS=128B to force split Completions,
-                    // but remains within MRRS=512B.
+                    int logical_bytes;
+                    int remaining;
+                    int byte_offset;
+
                     case (i % 5)
-                        0: rd.length = 64;   // 256B -> 2 CplDs
-                        1: rd.length = 80;   // 320B -> 3 CplDs
-                        2: rd.length = 96;   // 384B -> 3 CplDs
-                        3: rd.length = 112;  // 448B -> 4 CplDs
-                        4: rd.length = 128;  // 512B -> 4 CplDs
+                        0: logical_bytes = 256;
+                        1: logical_bytes = 384;
+                        2: logical_bytes = 512;
+                        3: logical_bytes = 768;
+                        4: logical_bytes = 1024;
                     endcase
-                    rd.first_be = 4'hF;
-                    rd.last_be  = 4'hF;
-                    rd.is_64bit = 1;
-                    rd.start(env.rc_agent.sequencer);
-                    phase3_split_rd_count++;
+
+                    remaining = logical_bytes;
+                    byte_offset = 0;
+                    while (remaining > 0) begin
+                        int segment_bytes = (remaining > 512) ? 512 : remaining;
+                        pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
+                            $sformatf("p3_rd_%0d_seg_%0d", i, byte_offset / 512));
+                        rd.addr = 64'h0000_0001_0000_0000 +
+                                  (i * 1024) + byte_offset;
+                        rd.length   = segment_bytes / 4;
+                        rd.first_be = 4'hF;
+                        rd.last_be  = 4'hF;
+                        rd.is_64bit = 1;
+                        rd.start(env.rc_agent.sequencer);
+                        phase3_split_rd_count++;
+                        phase3_payload_bytes += segment_bytes;
+                        remaining -= segment_bytes;
+                        byte_offset += segment_bytes;
+                        // Pace physical requests to avoid tag exhaustion.
+                        #(5ns);
+                    end
+
+                    phase3_logical_rd_count++;
                     if (i % 100 == 99)
-                        `uvm_info("BIDIR", $sformatf("  Phase 3 progress: %0d large reads sent", i+1), UVM_LOW)
-                    // Pace to avoid tag exhaustion — 256 tags, each read holds tag until all CplDs arrive
-                    #(5ns);
+                        `uvm_info("BIDIR", $sformatf(
+                            "  Phase 3 progress: %0d logical / %0d physical reads sent",
+                            i + 1, phase3_split_rd_count), UVM_LOW)
                 end
             end
 
@@ -1388,7 +1416,12 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
         join
 
         #50000ns;
-        `uvm_info("BIDIR", $sformatf("Phase 3 done: %0d large reads + 200 EP DMA", phase3_split_rd_count), UVM_LOW)
+        scb_completion_delta = env.scb.total_completions - scb_completions_before;
+        `uvm_info("BIDIR", $sformatf(
+            {"Phase 3 done: logical_reads=%0d physical_reads=%0d bytes=%0d ",
+             "completion_delta=%0d + 200 EP DMA"},
+            phase3_logical_rd_count, phase3_split_rd_count,
+            phase3_payload_bytes, scb_completion_delta), UVM_LOW)
         `uvm_info("BIDIR", $sformatf("  SCB: matched=%0d, unexpected=%0d (new in phase3: %0d)",
             env.scb.matched, env.scb.unexpected,
             env.scb.unexpected - scb_unexpected_before), UVM_LOW)
@@ -1403,6 +1436,18 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
         end else begin
             `uvm_info("BIDIR", "Phase 3: PASS — no unexpected completions (multi-CplD fix verified)", UVM_LOW)
         end
+        if ((phase3_logical_rd_count != 500) ||
+            (phase3_split_rd_count != 700) ||
+            (phase3_payload_bytes != 294400))
+            `uvm_error("BIDIR_P3_BYTES", $sformatf(
+                {"Phase 3 load mismatch: logical=%0d/500 physical=%0d/700 ",
+                 "bytes=%0d/294400"},
+                phase3_logical_rd_count, phase3_split_rd_count,
+                phase3_payload_bytes))
+        if (scb_completion_delta < 2300)
+            `uvm_error("BIDIR_P3_CPL", $sformatf(
+                "Phase 3 completion pressure=%0d, expected at least 2300",
+                scb_completion_delta))
     endtask
 
     //=========================================================================
@@ -1543,8 +1588,11 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
         `uvm_info("BIDIR", $sformatf("  Phase 2: RC %0dW + %0dR + EP %0d DMA = %0d",
             phase2_rc_wr_count, phase2_rc_rd_count, phase2_ep_dma_count,
             phase2_rc_wr_count + phase2_rc_rd_count + phase2_ep_dma_count), UVM_LOW)
-        `uvm_info("BIDIR", $sformatf("  Phase 3: %0d large reads + 200 EP DMA = %0d",
-            phase3_split_rd_count, phase3_split_rd_count + 200), UVM_LOW)
+        `uvm_info("BIDIR", $sformatf(
+            {"  Phase 3: %0d logical / %0d physical reads (%0dB) + ",
+             "200 EP DMA = %0d requests"},
+            phase3_logical_rd_count, phase3_split_rd_count,
+            phase3_payload_bytes, phase3_split_rd_count + 200), UVM_LOW)
         `uvm_info("BIDIR", $sformatf("  Phase 4: RC %0dW + %0dR + EP %0dW + %0dR = %0d",
             phase4_rc_wr_count, phase4_rc_rd_count,
             phase4_ep_dma_wr_count, phase4_ep_dma_rd_count,
@@ -3311,6 +3359,8 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
     localparam int unsigned MAX_READ_BATCH    = 128;
     localparam time         TAG_DRAIN_TIMEOUT = 500us;
 
+    bit drain_failed;
+
     function new(string name = "pcie_tl_multi_prefix_test", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -3356,12 +3406,48 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
 
         remaining = env.tag_mgr.get_outstanding_count();
         if (remaining != 0) begin
+            drain_failed = 1;
             `uvm_error("TEST32_DRAIN", $sformatf(
                 "%s timed out after %0t at issued=%0d with %0d RC tags outstanding",
                 phase_name, TAG_DRAIN_TIMEOUT, issued, remaining))
         end else begin
             `uvm_info("TEST32_DRAIN", $sformatf(
                 "%s drained at issued=%0d", phase_name, issued), UVM_MEDIUM)
+        end
+    endtask
+
+    task wait_for_final_clean();
+        time start_time;
+
+        start_time = $time;
+        while (((env.scb.total_requests < 10000) ||
+                (env.scb.total_completions < 4000) ||
+                (env.scb.matched < 4000) ||
+                (env.tag_mgr.get_outstanding_count() != 0) ||
+                (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+                (env.scb.pending_requests.size() != 0) ||
+                (env.scb.cpl_trackers.size() != 0)) &&
+               (($time - start_time) < TAG_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        if ((env.scb.total_requests < 10000) ||
+            (env.scb.total_completions < 4000) ||
+            (env.scb.matched < 4000) ||
+            (env.tag_mgr.get_outstanding_count() != 0) ||
+            (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+            (env.scb.pending_requests.size() != 0) ||
+            (env.scb.cpl_trackers.size() != 0)) begin
+            drain_failed = 1;
+            `uvm_error("TEST32_DRAIN", $sformatf(
+                {"Final drain timed out after %0t: requests=%0d completions=%0d ",
+                 "matched=%0d tags=%0d rc_pending=%0d scb_pending=%0d ",
+                 "scb_trackers=%0d"},
+                TAG_DRAIN_TIMEOUT, env.scb.total_requests,
+                env.scb.total_completions, env.scb.matched,
+                env.tag_mgr.get_outstanding_count(),
+                env.rc_agent.rc_driver.get_pending_count(),
+                env.scb.pending_requests.size(), env.scb.cpl_trackers.size()))
         end
     endtask
 
@@ -3383,6 +3469,7 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
         phase.raise_objection(this);
         `uvm_info("TEST32", "=== Multi-Prefix Heavy: 10K+ TLPs ===", UVM_LOW)
         total_tlps = 0;
+        drain_failed = 0;
         batch_limit = read_batch_limit();
         `uvm_info("TEST32", $sformatf(
             "Read pacing: physical tag capacity=%0d, batch limit=%0d",
@@ -3471,6 +3558,8 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
             pace_read_batch("Phase 4 single-PASID reads", i + 1, 2000, batch_limit);
         end
 
+        wait_for_final_clean();
+
         tags_remaining = env.tag_mgr.get_outstanding_count();
         rc_pending     = env.rc_agent.rc_driver.get_pending_count();
         scb_pending    = env.scb.pending_requests.size();
@@ -3478,11 +3567,17 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
 
         `uvm_info("TEST32", $sformatf("=== Multi-Prefix Heavy DONE: %0d TLPs ===", total_tlps), UVM_LOW)
         `uvm_info("TEST32", $sformatf(
-            "Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d scb_trackers=%0d mismatched=%0d unexpected=%0d timed_out=%0d",
+            {"Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d ",
+             "scb_trackers=%0d requests=%0d completions=%0d matched=%0d ",
+             "mismatched=%0d unexpected=%0d timed_out=%0d prefix_format=%0d ",
+             "prefix_integrity=%0d drain_failed=%0b"},
             tags_remaining, rc_pending, scb_pending, scb_trackers,
-            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out), UVM_LOW)
+            env.scb.total_requests, env.scb.total_completions, env.scb.matched,
+            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out,
+            env.scb.prefix_format_errors, env.scb.prefix_integrity_errors,
+            drain_failed), UVM_LOW)
 
-        final_clean = 1;
+        final_clean = !drain_failed;
         if (total_tlps != 10000) begin
             `uvm_error("TEST32_FINAL", $sformatf(
                 "Expected exactly 10000 TLPs, observed %0d", total_tlps))
@@ -3504,11 +3599,29 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
                 scb_pending, scb_trackers))
             final_clean = 0;
         end
+        if ((env.scb.total_requests != 10000) ||
+            (env.scb.total_completions != 4000) ||
+            (env.scb.matched != 4000)) begin
+            `uvm_error("TEST32_FINAL", $sformatf(
+                {"Scoreboard accounting mismatch: requests=%0d/10000 ",
+                 "completions=%0d/4000 matched=%0d/4000"},
+                env.scb.total_requests, env.scb.total_completions,
+                env.scb.matched))
+            final_clean = 0;
+        end
         if ((env.scb.mismatched != 0) || (env.scb.unexpected != 0) ||
             (env.scb.timed_out != 0)) begin
             `uvm_error("TEST32_FINAL", $sformatf(
                 "Scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
                 env.scb.mismatched, env.scb.unexpected, env.scb.timed_out))
+            final_clean = 0;
+        end
+        if ((env.scb.prefix_format_errors != 0) ||
+            (env.scb.prefix_integrity_errors != 0)) begin
+            `uvm_error("TEST32_FINAL", $sformatf(
+                "Prefix errors: format=%0d integrity=%0d",
+                env.scb.prefix_format_errors,
+                env.scb.prefix_integrity_errors))
             final_clean = 0;
         end
         if (final_clean)

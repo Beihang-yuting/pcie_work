@@ -193,11 +193,45 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             mismatched++;
         end
 
-        // A no-data Completion (for example, a successful Config/IO write)
-        // or an error Completion terminates the request immediately.  Its
-        // byte_count and payload do not describe outstanding CplD data.
-        if (!cpl.has_data() || (cpl.cpl_status != CPL_STATUS_SC)) begin
+        // Every Completion status is checked against the request contract.
+        // An unexpected UR/CA/CRS is terminal, but it is not a successful
+        // match.  Negative tests may explicitly declare an expected error.
+        if (cpl.cpl_status != tracker.orig_req.expected_cpl_status) begin
+            `uvm_error("SCB_CPL_STATUS", $sformatf(
+                {"Completion status mismatch: tag=0x%03h expected=%s ",
+                 "got=%s request=%s"},
+                cpl.tag, tracker.orig_req.expected_cpl_status.name(),
+                cpl.cpl_status.name(), tracker.orig_req.kind.name()))
+            mismatched++;
+            cpl_trackers.delete(cpl.tag);
+            pending_requests.delete(cpl.tag);
+            return;
+        end
+
+        // A declared error response is terminal and carries no successful
+        // read payload.  Since the status matched the explicit expectation,
+        // it completes the request successfully from the test's perspective.
+        if (cpl.cpl_status != CPL_STATUS_SC) begin
             matched++;
+            cpl_trackers.delete(cpl.tag);
+            pending_requests.delete(cpl.tag);
+            return;
+        end
+
+        // A successful no-data Completion is legal only for requests whose
+        // protocol response has no payload.  A read receiving Cpl instead of
+        // CplD is a terminal failure, not a successful match.
+        if (!cpl.has_data()) begin
+            if (tracker.orig_req.kind inside {
+                    TLP_CFG_WR0, TLP_CFG_WR1, TLP_IO_WR}) begin
+                matched++;
+            end else begin
+                `uvm_error("SCB_CPL_NODATA", $sformatf(
+                    {"Successful no-data Completion for data-returning request: ",
+                     "tag=0x%03h request=%s"},
+                    cpl.tag, tracker.orig_req.kind.name()))
+                mismatched++;
+            end
             cpl_trackers.delete(cpl.tag);
             pending_requests.delete(cpl.tag);
             return;

@@ -51,7 +51,7 @@ class pcie_tl_codec extends uvm_object;
 
         // Apply field_bitmask bit flips on header portion
         if (tlp.field_bitmask != 0) begin
-            apply_bitmask(bytes, tlp.field_bitmask);
+            apply_bitmask(bytes, tlp.field_bitmask, prefix_bytes);
         end
 
         // Calculate and append ECRC
@@ -67,7 +67,8 @@ class pcie_tl_codec extends uvm_object;
 
         // Apply poisoned bit
         if (tlp.inject_poisoned)
-            bytes[1] = bytes[1] | 8'h40;  // Set EP bit in Byte 1
+            bytes[prefix_bytes + 2] = bytes[prefix_bytes + 2] | 8'h40;
+            // DW0[14] (EP) is bit 6 of the third big-endian header byte.
     endfunction
 
     //=========================================================================
@@ -266,10 +267,14 @@ class pcie_tl_codec extends uvm_object;
     //=========================================================================
     // Internal: Apply bitmask for error injection
     //=========================================================================
-    protected function void apply_bitmask(ref bit [7:0] bytes[], bit [31:0] mask);
-        // Apply bitmask to first 4 bytes (DW0) of header
-        for (int i = 0; i < 4 && i < bytes.size(); i++) begin
-            bytes[i] = bytes[i] ^ mask[(3-i)*8 +: 8];
+    protected function void apply_bitmask(ref bit [7:0] bytes[],
+                                          bit [31:0] mask,
+                                          int header_offset = 0);
+        // Apply bitmask to main TLP header DW0, after any Prefix DWs.
+        for (int i = 0;
+             i < 4 && (header_offset + i) < bytes.size(); i++) begin
+            bytes[header_offset + i] = bytes[header_offset + i] ^
+                                       mask[(3-i)*8 +: 8];
         end
     endfunction
 
