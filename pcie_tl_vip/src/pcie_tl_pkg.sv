@@ -49,6 +49,10 @@ package pcie_tl_pkg;
 
     //--- Env ---
     `include "env/pcie_tl_env_config.sv"
+
+    //--- Topology Adapter (requires native Switch and Env configuration) ---
+    `include "adapter/pcie_tl_topology_adapter.sv"
+
     `include "env/pcie_tl_virtual_sequencer.sv"
     `include "env/pcie_tl_scoreboard.sv"
     `include "env/pcie_tl_coverage_collector.sv"
