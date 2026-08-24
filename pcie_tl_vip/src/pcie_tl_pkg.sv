@@ -5,6 +5,7 @@
 package pcie_tl_pkg;
 
     import uvm_pkg::*;
+    import pcie_topology_pkg::*;
     import host_mem_pkg::*;
     import pcie_tl_bdf_utils_pkg::*;
     import pcie_tl_device_profile_pkg::*;

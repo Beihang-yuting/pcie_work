@@ -18,6 +18,7 @@
 +incdir+/home/ryan/pcie_work/pcie_tl_vip/src/seq/scenario
 +incdir+/home/ryan/pcie_work/pcie_tl_vip/src/seq/virtual
 +incdir+/home/ryan/pcie_work/pcie_tl_vip/src/switch
++incdir+/home/ryan/pcie_work/pcie_tl_vip/src/topology
 
 // ---- tests incdir (for test files compiled as separate units) ----
 +incdir+/home/ryan/pcie_work/pcie_tl_vip/tests
@@ -28,6 +29,7 @@
 // ---- standalone helpers imported by pcie_tl_pkg ----
 /home/ryan/pcie_work/pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv
 /home/ryan/pcie_work/pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
+/home/ryan/pcie_work/pcie_tl_vip/src/topology/pcie_topology_pkg.sv
 
 // ---- pcie_tl top package (includes all src via relative `include) ----
 /home/ryan/pcie_work/pcie_tl_vip/src/pcie_tl_pkg.sv
@@ -52,6 +54,7 @@
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_bar_state_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_bar_decoder_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_virtio_fix_regression_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_topology_model_unit_test.sv
 
 // ---- testbench top module ----
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_tb_top.sv
