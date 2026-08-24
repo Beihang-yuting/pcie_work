@@ -132,6 +132,47 @@ cfg.switch_enable   = 0;   // switch 关；开则 num_rc/num_ep 被忽略（取 
 
 > 句柄 `env.rc_agents[i]` / `env.ep_agents[i]`（`[0]` 别名单数）。出激励：`env.rc_agents[i].sequencer`。详见 User Guide §8.5。
 
+### 3.5 公共拓扑对象与自定义环境
+
+新集成可把公共拓扑对象和事务层 policy 分开注入，再创建 `pcie_tl_custom_env`：
+
+```systemverilog
+class my_topology_test extends uvm_test;
+    `uvm_component_utils(my_topology_test)
+
+    pcie_tl_custom_env env;
+    pcie_topology_cfg topology_cfg;
+    pcie_tl_env_config tl_policy_cfg;
+
+    function new(string name = "my_topology_test",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        topology_cfg = pcie_topology_builder::build_ep_2x8(5);
+        tl_policy_cfg = pcie_tl_env_config::type_id::create("tl_policy_cfg");
+        tl_policy_cfg.if_mode = TLM_MODE;
+        tl_policy_cfg.fc_enable = 1;
+        tl_policy_cfg.scb_enable = 1;
+        tl_policy_cfg.cpl_timeout_ns = 200000;
+
+        uvm_config_db#(pcie_topology_cfg)::set(
+            this, "env", "topology_cfg", topology_cfg);
+        uvm_config_db#(pcie_tl_env_config)::set(
+            this, "env", "tl_policy_cfg", tl_policy_cfg);
+        env = pcie_tl_custom_env::type_id::create("env", this);
+    endfunction
+endclass
+```
+
+`pcie_tl_custom_env` 在调用继承的 `build_phase` 之前验证并翻译整个拓扑。`tl_policy_cfg` 继续拥有 flow control、scoreboard、timeout、unified memory 等所有非拓扑字段；自定义环境只覆盖 native 环境所需的六个拓扑字段。合并后的同一个 policy 对象通过 root-context、当前环境完整实例名的精确 `cfg` scope 注入，因此继承的 `pcie_tl_env` build 使用它作为权威配置，且不会泄漏到兄弟环境。
+
+当前 TL 后端可在 TLM 模式验证 RC 到 EP 的下行 Memory Write/Read 数据往返，以及 EP 到 RC 的上行 Memory Read Completion；Switch 模式逐个经过 DSP 地址窗口和对应 EP。这些结果只证明事务层路由和数据行为，不证明 Serial/PIPE link-up、LTSSM 或任何物理速率协商。
+
+现有测试无需迁移：它们仍可直接创建 `pcie_tl_env`，并使用原生 `pcie_tl_env_config`/`pcie_tl_switch_config`。
+
 ---
 
 ## 4. 出激励 / 取句柄
@@ -220,3 +261,17 @@ endfunction
 | 大流量稳定性 | `pcie_tl_switch_heavy_traffic_test` |
 
 完整测试清单与结果见 User Guide §14。
+
+---
+
+## 9. 后续 SVT 后端边界
+
+本阶段只实现公共拓扑模型及 `pcie_tl_vip` 后端，尚未实现 SVT topology environment。后续环境的继承边界固定为：
+
+```systemverilog
+class pcie_svt_topology_env extends pcie_device_unified_vip_env;
+    // 后续阶段把 pcie_topology_cfg 翻译为 SVT 配置、状态和 agent 注册。
+endclass
+```
+
+基类来自 Synopsys 官方 `tb_pcie_svt_uvm_unified_vip_sys` 示例。该示例保持为本机 Synopsys 安装依赖，不把示例源码或产品源码复制进本仓库。只有后续 SVT 后端负责把保留的宽度/代际意图应用到 Serial/PIPE transport、LTSSM 和协商状态；不要把当前 TL profile 的通过结果解释为这些物理行为已经实现。

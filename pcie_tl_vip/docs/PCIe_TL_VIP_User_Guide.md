@@ -259,6 +259,26 @@ class my_first_test extends pcie_tl_base_test;
 endclass
 ```
 
+### 3.4 拓扑驱动的 TLM 测试
+
+新测试可通过 `pcie_tl_custom_base_test` 选择预定义拓扑。以下每行表示一组完整的拓扑参数，其中 `4|5` 表示必须明确选择 Gen4 或 Gen5：
+
+```text
++PCIE_TOPOLOGY=EP_X16 +PCIE_GEN=4|5
++PCIE_TOPOLOGY=EP_2X8 +PCIE_GEN=4|5
++PCIE_TOPOLOGY=SWITCH_1X16_4X4 +PCIE_GEN=4|5
+```
+
+- `EP_X16`：一条独立的 RC/EP 事务层路径，保留 x16 物理意图。
+- `EP_2X8`：两条相互隔离的 RC/EP 事务层路径，每条保留 x8 物理意图。
+- `SWITCH_1X16_4X4`：一个 Switch、一个 USP、四个 DSP，并且每个 DSP 后恰好连接一个 EP；USP 保留 x16、DSP 链路保留 x4 物理意图。
+
+命令行解析是严格的：必须且只能提供一个非空 `PCIE_TOPOLOGY` 和一个值为 `4` 或 `5` 的 `PCIE_GEN`。缺失、裸参数、空值、重复参数或未知值都会在创建环境前报 `TOPO_CLI` fatal。
+
+任意受 phase-one 规则支持的图使用 `pcie_topology_builder` 构造，并由派生测试覆盖 `configure_topology()` 返回完整的 `pcie_topology_cfg`。程序化模式不需要上述两个命令行参数，也禁止与 `PCIE_TOPOLOGY` 或 `PCIE_GEN` 混用。
+
+当前 `pcie_tl_vip` 后端的功能验证覆盖 RC 发起的下行 Memory Write/Read 数据往返，以及每个 EP 发起的上行 Memory Read Completion；Switch profile 还逐个覆盖 DSP 地址窗口和 EP。这里验证的是事务路由、端点隔离和数据完整性，不代表物理链路已经建立。链路宽度和最大代际只作为配置意图保留；Serial/PIPE 传输、LTSSM、协商宽度、协商代际及 Gen4/Gen5 数据速率均需要后续 SVT 后端。
+
 ---
 
 ## 4. 文件结构
