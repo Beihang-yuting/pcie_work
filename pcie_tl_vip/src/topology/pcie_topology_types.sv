@@ -28,8 +28,10 @@ class pcie_topology_node_cfg extends uvm_object;
         pcie_topology_node_cfg rhs_;
 
         super.do_copy(rhs);
-        if (!$cast(rhs_, rhs))
+        if (!$cast(rhs_, rhs)) begin
             `uvm_fatal("TOPO_COPY", "node copy source has wrong type")
+            return;
+        end
 
         node_id       = rhs_.node_id;
         kind          = rhs_.kind;
@@ -45,10 +47,10 @@ class pcie_topology_link_cfg extends uvm_object;
     string                    link_id;
     string                    upstream_node_id;
     pcie_topology_port_role_e upstream_role;
-    int unsigned              upstream_port_index;
+    int unsigned              upstream_port_index = 0;
     string                    downstream_node_id;
     pcie_topology_port_role_e downstream_role;
-    int unsigned              downstream_port_index;
+    int unsigned              downstream_port_index = 0;
     int unsigned              link_width = 4;
     int unsigned              max_gen = 4;
     bit                       enabled = 1'b1;
@@ -61,8 +63,10 @@ class pcie_topology_link_cfg extends uvm_object;
         pcie_topology_link_cfg rhs_;
 
         super.do_copy(rhs);
-        if (!$cast(rhs_, rhs))
+        if (!$cast(rhs_, rhs)) begin
             `uvm_fatal("TOPO_COPY", "link copy source has wrong type")
+            return;
+        end
 
         link_id               = rhs_.link_id;
         upstream_node_id      = rhs_.upstream_node_id;

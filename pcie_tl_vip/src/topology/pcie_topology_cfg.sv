@@ -29,8 +29,10 @@ class pcie_topology_cfg extends uvm_object;
         pcie_topology_link_cfg link_copy;
 
         super.do_copy(rhs);
-        if (!$cast(rhs_, rhs))
+        if (!$cast(rhs_, rhs)) begin
             `uvm_fatal("TOPO_COPY", "topology copy source has wrong type")
+            return;
+        end
 
         nodes.delete();
         foreach (rhs_.nodes[i]) begin
