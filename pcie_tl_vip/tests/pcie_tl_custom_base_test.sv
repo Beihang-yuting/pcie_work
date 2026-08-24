@@ -124,3 +124,39 @@ class pcie_tl_custom_base_test extends uvm_test;
         env = pcie_tl_custom_env::type_id::create("env", this);
     endfunction
 endclass
+
+class pcie_tl_custom_cfg_precedence_test extends pcie_tl_custom_base_test;
+    `uvm_component_utils(pcie_tl_custom_cfg_precedence_test)
+
+    pcie_tl_env_config conflicting_cfg;
+
+    function new(string name = "pcie_tl_custom_cfg_precedence_test",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+        conflicting_cfg = pcie_tl_env_config::type_id::create(
+            "conflicting_cfg");
+        conflicting_cfg.switch_enable = 0;
+        conflicting_cfg.num_rc = 1;
+        conflicting_cfg.num_ep = 1;
+        uvm_config_db#(pcie_tl_env_config)::set(
+            this, "env", "cfg", conflicting_cfg);
+        super.build_phase(phase);
+    endfunction
+
+    virtual function void end_of_elaboration_phase(uvm_phase phase);
+        super.end_of_elaboration_phase(phase);
+        if ((env == null) || (env.cfg == null)) begin
+            `uvm_error("TOPO_CFG", "custom env did not build a native cfg")
+        end
+        else if ((env.cfg != tl_policy_cfg) || env.cfg.switch_enable ||
+                 (env.cfg.num_rc != 2) || (env.cfg.num_ep != 2)) begin
+            `uvm_error("TOPO_CFG", $sformatf(
+                {"translated EP_2X8 cfg was not authoritative: ",
+                 "switch=%0b num_rc=%0d num_ep=%0d"},
+                env.cfg.switch_enable, env.cfg.num_rc, env.cfg.num_ep))
+        end
+    endfunction
+endclass

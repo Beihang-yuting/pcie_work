@@ -63,8 +63,8 @@ class pcie_tl_custom_env extends pcie_tl_env;
         policy_cfg.switch_cfg = translated_cfg.switch_cfg;
 
         uvm_config_db#(pcie_tl_env_config)::set(
-            this, "", "cfg", policy_cfg);
-        `uvm_info("TOPO_ENV", "PCIE_TL_CUSTOM_ENV_READY", UVM_LOW)
+            null, get_full_name(), "cfg", policy_cfg);
         super.build_phase(phase);
+        `uvm_info("TOPO_ENV", "PCIE_TL_CUSTOM_ENV_READY", UVM_LOW)
     endfunction
 endclass
