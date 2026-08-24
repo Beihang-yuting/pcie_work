@@ -222,6 +222,20 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
                     "Switch audit detects corrupted RC count");
             cfg.num_rc--;
 
+            cfg.switch_cfg.num_usp++;
+            adapter.audit(source, cfg, errors);
+            require(adapter.error_contains(errors,
+                                            "Switch USP count mismatch"),
+                    "Switch audit detects corrupted native USP count");
+            cfg.switch_cfg.num_usp--;
+
+            cfg.switch_cfg.num_ds_ports++;
+            adapter.audit(source, cfg, errors);
+            require(adapter.error_contains(errors,
+                                            "Switch DSP count mismatch"),
+                    "Switch audit detects corrupted native DSP count");
+            cfg.switch_cfg.num_ds_ports--;
+
             cfg.switch_cfg.dsp_owner[2] = 0;
             adapter.audit(source, cfg, errors);
             require(adapter.error_contains(errors, "ownership mismatch"),
