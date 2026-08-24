@@ -5,7 +5,7 @@ class pcie_topology_builder extends uvm_object;
 
     function new(string name = "pcie_topology_builder");
         super.new(name);
-        topology = pcie_topology_cfg::type_id::create("topology");
+        topology = pcie_topology_cfg::type_id::create({name, "_cfg"});
     endfunction
 
     function pcie_topology_node_cfg add_node(
