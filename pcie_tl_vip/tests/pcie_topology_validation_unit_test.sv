@@ -211,6 +211,13 @@ class pcie_topology_validation_unit_test extends uvm_test;
         topology.nodes[0].num_usp = 1;
         expect_invalid(topology, "Switch-only state", "RC Switch-only metadata");
 
+        topology = pcie_topology_builder::build_ep_x16(5);
+        topology.nodes[1].num_usp = 1;
+        topology.nodes[1].num_dsp = 1;
+        topology.nodes[1].dsp_owner_usp = new[1];
+        topology.nodes[1].dsp_owner_usp[0] = 0;
+        expect_invalid(topology, "Switch-only state", "Endpoint Switch-only metadata");
+
         topology = pcie_topology_builder::build_ep_2x8(5);
         topology.links[1].enabled = 1'b0;
         expect_invalid(topology, "direct topology", "lossy direct graph");
@@ -286,6 +293,22 @@ class pcie_topology_validation_unit_test extends uvm_test;
         expect_invalid(topology, "DSP 2", "missing enabled DSP link");
 
         topology = build_valid_switch_2x3();
+        node = pcie_topology_node_cfg::type_id::create("RC_EXTRA");
+        node.node_id = "RC_EXTRA";
+        node.kind = PCIE_TOPO_NODE_RC;
+        topology.nodes.push_back(node);
+        expect_invalid(topology, "phase-one Switch topology connectivity/counts",
+                       "Switch topology with extra RC");
+
+        topology = build_valid_switch_2x3();
+        node = pcie_topology_node_cfg::type_id::create("EP_EXTRA");
+        node.node_id = "EP_EXTRA";
+        node.kind = PCIE_TOPO_NODE_EP;
+        topology.nodes.push_back(node);
+        expect_invalid(topology, "phase-one Switch topology connectivity/counts",
+                       "Switch topology with extra Endpoint");
+
+        topology = build_valid_switch_2x3();
         topology.nodes[2].dsp_owner_usp = new[2];
         topology.nodes[2].dsp_owner_usp[0] = 0;
         topology.nodes[2].dsp_owner_usp[1] = 1;
@@ -313,6 +336,56 @@ class pcie_topology_validation_unit_test extends uvm_test;
         expect_invalid(topology, "unsupported width", "disabled structural width");
         expect_invalid(topology, "unsupported max_gen", "disabled structural generation");
         expect_invalid(topology, "unknown upstream node", "disabled structural endpoint");
+
+        topology = pcie_topology_builder::build_ep_x16(5);
+        link = pcie_topology_link_cfg::type_id::create("disabled_reversed");
+        link.link_id = "EP0_RC0_DISABLED";
+        link.upstream_node_id = "EP0";
+        link.upstream_role = PCIE_TOPO_PORT_EP;
+        link.downstream_node_id = "RC0";
+        link.downstream_role = PCIE_TOPO_PORT_RC;
+        link.link_width = 16;
+        link.max_gen = 5;
+        link.enabled = 1'b0;
+        topology.links.push_back(link);
+        expect_invalid(topology, "unsupported phase-one form",
+                       "disabled unsupported orientation");
+
+        topology = build_valid_switch_2x3();
+        owners = new[1];
+        owners[0] = 0;
+        node = pcie_topology_node_cfg::type_id::create("SW_DISABLED");
+        node.node_id = "SW_DISABLED";
+        node.kind = PCIE_TOPO_NODE_SWITCH;
+        node.num_usp = 1;
+        node.num_dsp = 1;
+        node.dsp_owner_usp = new[1](owners);
+        topology.nodes.push_back(node);
+        link = pcie_topology_link_cfg::type_id::create("disabled_cascade");
+        link.link_id = "SW0_SW_DISABLED";
+        link.upstream_node_id = "SW0";
+        link.upstream_role = PCIE_TOPO_PORT_DSP;
+        link.upstream_port_index = 0;
+        link.downstream_node_id = "SW_DISABLED";
+        link.downstream_role = PCIE_TOPO_PORT_USP;
+        link.downstream_port_index = 0;
+        link.link_width = 4;
+        link.max_gen = 5;
+        link.enabled = 1'b0;
+        topology.links.push_back(link);
+        expect_invalid(topology, "Switch cascading", "disabled Switch cascade");
+
+        topology = pcie_topology_builder::build_ep_x16(5);
+        link = pcie_topology_link_cfg::type_id::create("disabled_duplicate_ports");
+        link.copy(topology.links[0]);
+        link.link_id = "RC0_EP0_DISABLED_DUPLICATE_PORTS";
+        link.enabled = 1'b0;
+        topology.links.push_back(link);
+        expect_valid(topology, "valid disabled duplicate physical endpoints");
+
+        topology = pcie_topology_builder::build_ep_x16(5);
+        topology.links[0].enabled = 1'b0;
+        expect_invalid(topology, "at least one enabled link", "all links disabled");
 
         topology = pcie_topology_builder::build_ep_x16(5);
         node = pcie_topology_node_cfg::type_id::create("disabled_valid_ep");

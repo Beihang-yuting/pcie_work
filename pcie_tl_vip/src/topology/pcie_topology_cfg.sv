@@ -415,8 +415,53 @@ class pcie_topology_cfg extends uvm_object;
                 endcase
             end
 
+            supported_form = 1'b0;
+            if (upstream_valid && downstream_valid) begin
+                if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_SWITCH) &&
+                    (nodes[downstream_index].kind == PCIE_TOPO_NODE_SWITCH)) begin
+                    errors.push_back($sformatf(
+                        "link '%s' creates unsupported Switch cascading",
+                        links[i].link_id));
+                end
+                else if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_RC) &&
+                         (links[i].upstream_role == PCIE_TOPO_PORT_RC) &&
+                         (nodes[downstream_index].kind == PCIE_TOPO_NODE_EP) &&
+                         (links[i].downstream_role == PCIE_TOPO_PORT_EP)) begin
+                    supported_form = 1'b1;
+                end
+                else if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_RC) &&
+                         (links[i].upstream_role == PCIE_TOPO_PORT_RC) &&
+                         (nodes[downstream_index].kind == PCIE_TOPO_NODE_SWITCH) &&
+                         (links[i].downstream_role == PCIE_TOPO_PORT_USP)) begin
+                    supported_form = 1'b1;
+                end
+                else if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_SWITCH) &&
+                         (links[i].upstream_role == PCIE_TOPO_PORT_DSP) &&
+                         (nodes[downstream_index].kind == PCIE_TOPO_NODE_EP) &&
+                         (links[i].downstream_role == PCIE_TOPO_PORT_EP)) begin
+                    supported_form = 1'b1;
+                end
+                if (!supported_form) begin
+                    errors.push_back($sformatf(
+                        "link '%s' has an unsupported phase-one form",
+                        links[i].link_id));
+                end
+            end
+
             if (!links[i].enabled) continue;
             enabled_link_count++;
+            if (supported_form) begin
+                if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_RC) &&
+                    (nodes[downstream_index].kind == PCIE_TOPO_NODE_EP)) begin
+                    direct_link_count++;
+                end
+                else if (nodes[upstream_index].kind == PCIE_TOPO_NODE_RC) begin
+                    rc_switch_link_count++;
+                end
+                else begin
+                    switch_ep_link_count++;
+                end
+            end
             if (upstream_valid) enabled_degree[upstream_index]++;
             if (downstream_valid) begin
                 enabled_degree[downstream_index]++;
@@ -443,42 +488,6 @@ class pcie_topology_cfg extends uvm_object;
                 errors.push_back($sformatf(
                     "enabled link '%s' reuses the same physical port at both endpoints",
                     links[i].link_id));
-            end
-
-            supported_form = 1'b0;
-            if (upstream_valid && downstream_valid) begin
-                if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_SWITCH) &&
-                    (nodes[downstream_index].kind == PCIE_TOPO_NODE_SWITCH)) begin
-                    errors.push_back($sformatf(
-                        "link '%s' creates unsupported Switch cascading",
-                        links[i].link_id));
-                end
-                else if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_RC) &&
-                         (links[i].upstream_role == PCIE_TOPO_PORT_RC) &&
-                         (nodes[downstream_index].kind == PCIE_TOPO_NODE_EP) &&
-                         (links[i].downstream_role == PCIE_TOPO_PORT_EP)) begin
-                    supported_form = 1'b1;
-                    direct_link_count++;
-                end
-                else if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_RC) &&
-                         (links[i].upstream_role == PCIE_TOPO_PORT_RC) &&
-                         (nodes[downstream_index].kind == PCIE_TOPO_NODE_SWITCH) &&
-                         (links[i].downstream_role == PCIE_TOPO_PORT_USP)) begin
-                    supported_form = 1'b1;
-                    rc_switch_link_count++;
-                end
-                else if ((nodes[upstream_index].kind == PCIE_TOPO_NODE_SWITCH) &&
-                         (links[i].upstream_role == PCIE_TOPO_PORT_DSP) &&
-                         (nodes[downstream_index].kind == PCIE_TOPO_NODE_EP) &&
-                         (links[i].downstream_role == PCIE_TOPO_PORT_EP)) begin
-                    supported_form = 1'b1;
-                    switch_ep_link_count++;
-                end
-                if (!supported_form) begin
-                    errors.push_back($sformatf(
-                        "enabled link '%s' has an unsupported phase-one form",
-                        links[i].link_id));
-                end
             end
         end
 
