@@ -1,6 +1,9 @@
 class pcie_tl_topology_adapter extends uvm_object;
     `uvm_object_utils(pcie_tl_topology_adapter)
 
+    localparam int unsigned TL_MAX_SWITCH_USP = 8;
+    localparam int unsigned TL_MAX_SWITCH_DSP_PER_USP = 8;
+
     string direct_link_ids[$];
     string direct_rc_node_ids[$];
     string direct_ep_node_ids[$];
@@ -25,6 +28,7 @@ class pcie_tl_topology_adapter extends uvm_object;
         pcie_topology_node_cfg switch_node;
         pcie_tl_switch_config switch_cfg;
         string validation_errors[$];
+        int dsp_count_by_usp[];
 
         errors.delete();
         direct_link_ids.delete();
@@ -46,6 +50,25 @@ class pcie_tl_topology_adapter extends uvm_object;
         foreach (topology.nodes[i]) begin
             if (topology.nodes[i].kind == PCIE_TOPO_NODE_SWITCH)
                 switch_node = topology.nodes[i];
+        end
+
+        if (switch_node != null) begin
+            if (switch_node.num_usp > TL_MAX_SWITCH_USP) begin
+                errors.push_back($sformatf(
+                    "TL backend supports at most %0d Switch USPs; source declares %0d",
+                    TL_MAX_SWITCH_USP, switch_node.num_usp));
+            end
+            dsp_count_by_usp = new[switch_node.num_usp];
+            foreach (switch_node.dsp_owner_usp[i])
+                dsp_count_by_usp[switch_node.dsp_owner_usp[i]]++;
+            foreach (dsp_count_by_usp[i]) begin
+                if (dsp_count_by_usp[i] > TL_MAX_SWITCH_DSP_PER_USP) begin
+                    errors.push_back($sformatf(
+                        "Switch USP%0d owns %0d DSPs; maximum is %0d for TL backend",
+                        i, dsp_count_by_usp[i], TL_MAX_SWITCH_DSP_PER_USP));
+                end
+            end
+            if (errors.size() != 0) return null;
         end
 
         if (switch_node == null) begin
@@ -135,6 +158,11 @@ class pcie_tl_topology_adapter extends uvm_object;
             if ((topology.links[i] != null) && topology.links[i].enabled)
                 enabled_links++;
         end
+
+        if (!native_cfg.rc_agent_enable)
+            errors.push_back("RC agent is disabled");
+        if (!native_cfg.ep_agent_enable)
+            errors.push_back("Endpoint agent is disabled");
 
         if (switch_node == null) begin
             if (native_cfg.switch_enable)

@@ -15,6 +15,13 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
         if (!condition) `uvm_error("TOPO_ADAPT", message)
     endfunction
 
+    function bit errors_contain(input string errors[$], string fragment);
+        foreach (errors[i]) begin
+            if (uvm_is_match({"*", fragment, "*"}, errors[i])) return 1;
+        end
+        return 0;
+    endfunction
+
     function pcie_topology_cfg build_two_usp();
         pcie_topology_builder builder;
         int owners[];
@@ -140,6 +147,21 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
                     "direct audit detects corrupted RC count");
             require(adapter.error_contains(errors, "Endpoint count mismatch"),
                     "direct audit detects corrupted Endpoint count");
+            cfg.switch_enable = 0;
+            cfg.num_rc--;
+            cfg.num_ep--;
+
+            cfg.rc_agent_enable = 0;
+            adapter.audit(source, cfg, errors);
+            require(errors_contain(errors, "RC agent is disabled"),
+                    "direct audit detects disabled RC agent");
+            cfg.rc_agent_enable = 1;
+
+            cfg.ep_agent_enable = 0;
+            adapter.audit(source, cfg, errors);
+            require(errors_contain(errors, "Endpoint agent is disabled"),
+                    "direct audit detects disabled Endpoint agent");
+            cfg.ep_agent_enable = 1;
         end
 
         source = pcie_topology_builder::build_switch_1x16_4x4(5);
@@ -174,6 +196,19 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
             foreach (adapter.switch_ep_node_ids[i])
                 require(adapter.switch_ep_node_ids[i] == $sformatf("EP%0d", i),
                         "Switch Endpoint mapping follows DSP index");
+        end
+        if (cfg != null) begin
+            cfg.rc_agent_enable = 0;
+            adapter.audit(source, cfg, errors);
+            require(errors_contain(errors, "RC agent is disabled"),
+                    "Switch audit detects disabled RC agent");
+            cfg.rc_agent_enable = 1;
+
+            cfg.ep_agent_enable = 0;
+            adapter.audit(source, cfg, errors);
+            require(errors_contain(errors, "Endpoint agent is disabled"),
+                    "Switch audit detects disabled Endpoint agent");
+            cfg.ep_agent_enable = 1;
         end
 
         source = pcie_topology_builder::build_ep_x16(4);
@@ -253,6 +288,99 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
         require(adapter.error_contains(errors, "audit input is null"),
                 "null native audit input reports an error");
 
+        phase.drop_objection(this);
+    endtask
+endclass
+
+class pcie_tl_topology_adapter_capacity_unit_test extends uvm_test;
+    `uvm_component_utils(pcie_tl_topology_adapter_capacity_unit_test)
+
+    function new(string name = "pcie_tl_topology_adapter_capacity_unit_test",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    function void require(bit condition, string message);
+        if (!condition) `uvm_error("TOPO_CAPACITY", message)
+    endfunction
+
+    function bit errors_contain(input string errors[$], string fragment);
+        foreach (errors[i]) begin
+            if (uvm_is_match({"*", fragment, "*"}, errors[i])) return 1;
+        end
+        return 0;
+    endfunction
+
+    function pcie_topology_cfg build_switch_graph(int num_usp, int num_dsp,
+                                                   input int owners[]);
+        pcie_topology_builder builder;
+
+        builder = new("capacity_builder");
+        for (int i = 0; i < num_usp; i++)
+            void'(builder.add_rc($sformatf("RC%0d", i)));
+        void'(builder.add_switch("SW0", num_usp, num_dsp, owners));
+        for (int i = 0; i < num_dsp; i++)
+            void'(builder.add_ep($sformatf("EP%0d", i)));
+        for (int i = 0; i < num_usp; i++) begin
+            void'(builder.connect($sformatf("UP%0d", i),
+                                  $sformatf("RC%0d", i),
+                                  PCIE_TOPO_PORT_RC, 0,
+                                  "SW0", PCIE_TOPO_PORT_USP, i, 8, 4));
+        end
+        for (int i = 0; i < num_dsp; i++) begin
+            void'(builder.connect($sformatf("DOWN%0d", i),
+                                  "SW0", PCIE_TOPO_PORT_DSP, i,
+                                  $sformatf("EP%0d", i),
+                                  PCIE_TOPO_PORT_EP, 0, 4, 4));
+        end
+        return builder.finish();
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        pcie_tl_topology_adapter adapter;
+        pcie_tl_env_config cfg;
+        pcie_topology_cfg source;
+        string capacity_case;
+        string errors[$];
+        string validation_errors[$];
+        int owners[];
+
+        phase.raise_objection(this);
+        adapter = pcie_tl_topology_adapter::type_id::create("adapter");
+        if (!$value$plusargs("CAPACITY_CASE=%s", capacity_case))
+            `uvm_fatal("TOPO_CAPACITY", "CAPACITY_CASE is required")
+
+        case (capacity_case)
+            "9USP": begin
+                owners = new[9];
+                foreach (owners[i]) owners[i] = i;
+                source = build_switch_graph(9, 9, owners);
+            end
+            "17DSP": begin
+                owners = new[17];
+                foreach (owners[i]) owners[i] = (i < 9) ? 0 : 1;
+                source = build_switch_graph(2, 17, owners);
+            end
+            default:
+                `uvm_fatal("TOPO_CAPACITY", $sformatf(
+                    "unsupported CAPACITY_CASE '%s'", capacity_case))
+        endcase
+
+        source.validate(validation_errors);
+        require(validation_errors.size() == 0,
+                "capacity fixture must be valid in the common topology model");
+        cfg = adapter.translate(source, errors);
+        require(cfg == null,
+                "unrepresentable Switch topology must return null");
+        if (capacity_case == "9USP") begin
+            require(errors_contain(errors, "at most 8 Switch USPs"),
+                    "9-USP topology reports the native USP capacity");
+        end
+        else begin
+            require(errors_contain(errors,
+                                    "USP0 owns 9 DSPs; maximum is 8"),
+                    "9-DSP root reports the native per-USP capacity");
+        end
         phase.drop_objection(this);
     endtask
 endclass
