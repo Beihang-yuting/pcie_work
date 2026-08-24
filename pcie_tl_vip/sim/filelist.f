@@ -55,6 +55,7 @@
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_bar_decoder_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_virtio_fix_regression_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_topology_model_unit_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_topology_builder_unit_test.sv
 
 // ---- testbench top module ----
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_tb_top.sv
