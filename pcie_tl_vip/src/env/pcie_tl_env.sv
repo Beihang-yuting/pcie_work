@@ -552,7 +552,7 @@ class pcie_tl_env extends uvm_env;
                 begin
                     automatic pcie_tl_tlp req_copy = tlp;
                     fork
-                        rc_auto_respond(req_copy);
+                        rc_auto_respond(req_copy, ep_agent.ep_driver, 0, 0);
                     join_none
                 end
             end
@@ -615,6 +615,17 @@ class pcie_tl_env extends uvm_env;
                         rc_agents[i].rc_driver.handle_request(req_copy);
                     join_none
                 end
+            end else if (tlp.requires_completion()) begin
+                if (scbs.size() > i && scbs[i] != null)
+                    scbs[i].register_pending(tlp);
+                begin
+                    automatic pcie_tl_tlp req_copy = tlp;
+                    automatic pcie_tl_ep_driver requester_driver =
+                        ep_agents[i].ep_driver;
+                    fork
+                        rc_auto_respond(req_copy, requester_driver, i, 0);
+                    join_none
+                end
             end
         end
     endtask
@@ -622,9 +633,15 @@ class pcie_tl_env extends uvm_env;
     //=========================================================================
     // RC auto-response: generate completion for EP DMA reads
     //=========================================================================
-    protected task rc_auto_respond(pcie_tl_tlp req);
+    protected task rc_auto_respond(
+        pcie_tl_tlp req, pcie_tl_ep_driver requester_driver,
+        int root_index, bit switch_origin);
         pcie_tl_mem_tlp mem_req;
         pcie_tl_cpl_tlp cpl;
+        pcie_tl_ep_driver resolved_requester_driver;
+        switch_np_key_t switch_key;
+        int ingress_port;
+        int endpoint_index;
         int total_bytes, chunk, remaining, received;
         bit [63:0] cur_addr;
         int mps_bytes, rcb_bytes;
@@ -632,9 +649,40 @@ class pcie_tl_env extends uvm_env;
         if (!$cast(mem_req, req)) return;
         if (req.kind != TLP_MEM_RD && req.kind != TLP_MEM_RD_LK) return;
 
-        // Free EP's tag IMMEDIATELY so it can be reused
-        // (scoreboard tracks via pending_requests independently of tag_mgr)
-        tag_mgr.free_tag(req.tag, req.requester_id[2:0]);
+        if ((root_index < 0) || (root_index >= tag_mgrs.size()))
+            `uvm_fatal("ENV_LEGACY_CPL", $sformatf(
+                "invalid root index %0d for %0d tag managers",
+                root_index, tag_mgrs.size()))
+
+        resolved_requester_driver = requester_driver;
+        if (switch_origin) begin
+            if ((sw == null) || (cfg.switch_cfg == null))
+                `uvm_fatal("ENV_LEGACY_CPL",
+                           "switch-origin request has no switch")
+            switch_key = switch_np_key(req.requester_id, req.tag);
+            if (!sw.outstanding_ingress.exists(switch_key))
+                `uvm_fatal("ENV_LEGACY_CPL", $sformatf(
+                    "no switch ingress for requester=%04h tag=%03h",
+                    req.requester_id, req.tag))
+            ingress_port = sw.outstanding_ingress[switch_key];
+            endpoint_index = ingress_port - cfg.switch_cfg.num_usp;
+            if ((endpoint_index < 0) ||
+                (endpoint_index >= ep_agents.size()) ||
+                (endpoint_index >= cfg.switch_cfg.dsp_owner.size()) ||
+                (cfg.switch_cfg.dsp_owner[endpoint_index] != root_index) ||
+                (ep_agents[endpoint_index] == null) ||
+                (ep_agents[endpoint_index].ep_driver == null)) begin
+                `uvm_fatal("ENV_LEGACY_CPL", $sformatf(
+                    {"invalid switch completion destination root=%0d ",
+                     "ingress=%0d endpoint=%0d"},
+                    root_index, ingress_port, endpoint_index))
+            end
+            resolved_requester_driver = ep_agents[endpoint_index].ep_driver;
+        end
+        else if (resolved_requester_driver == null) begin
+            `uvm_fatal("ENV_LEGACY_CPL",
+                       "direct request has no requester EP driver")
+        end
 
         mps_bytes = int'(cfg.max_payload_size);
         rcb_bytes = int'(cfg.read_completion_boundary);
@@ -677,14 +725,20 @@ class pcie_tl_env extends uvm_env;
             // scoreboard write without changing functional behavior.
             legacy_rc_cpl_ap.write(cpl);
 
-            // Write to scoreboard directly (avoids tag-reuse race through delay path)
-            if (scb != null)
-                scb.write_ep(cpl);
+            // Preserve legacy observation-before-scoreboard ordering, then
+            // use the requesting EP driver's normal read-back foldback path.
+            if (scbs.size() > root_index && scbs[root_index] != null)
+                scbs[root_index].write_ep(cpl);
+            resolved_requester_driver.handle_completion(cpl);
 
             cur_addr  += chunk;
             remaining -= chunk;
             received  += chunk;
         end
+
+        if (switch_origin)
+            sw.outstanding_ingress.delete(switch_key);
+        tag_mgrs[root_index].free_tag(req.tag, req.requester_id[2:0]);
     endtask
 
     //=========================================================================
@@ -730,6 +784,15 @@ class pcie_tl_env extends uvm_env;
                     automatic pcie_tl_tlp req_copy = tlp;
                     fork
                         rc_agents[r].rc_driver.handle_request(req_copy);
+                    join_none
+                end
+            end else if (tlp.requires_completion()) begin
+                if (scbs[r] != null)
+                    scbs[r].register_pending(tlp);
+                begin
+                    automatic pcie_tl_tlp req_copy = tlp;
+                    fork
+                        rc_auto_respond(req_copy, null, r, 1);
                     join_none
                 end
             end

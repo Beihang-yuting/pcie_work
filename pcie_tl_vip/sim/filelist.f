@@ -37,6 +37,7 @@
 // ---- test files (separate compile units — each has top-level import) ----
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_base_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_custom_base_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_custom_profile_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_smoke_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_advanced_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_unified_mem_test.sv
