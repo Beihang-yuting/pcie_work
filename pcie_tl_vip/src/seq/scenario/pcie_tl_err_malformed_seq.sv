@@ -1,9 +1,40 @@
 class pcie_tl_err_malformed_seq extends uvm_sequence #(pcie_tl_tlp);
     `uvm_object_utils(pcie_tl_err_malformed_seq)
+
+    // Tests may redirect the malformed write to a topology-owned window.
+    // The default is aligned and leaves the complete 1-DW request in one page.
+    bit [63:0] target_addr = 64'h0000_0000_0000_1000;
+
     function new(string name = "pcie_tl_err_malformed_seq"); super.new(name); endfunction
     task body();
         pcie_tl_mem_tlp tlp;
-        `uvm_do_with(tlp, { tlp.kind == TLP_MEM_WR; tlp.constraint_mode_sel == CONSTRAINT_ILLEGAL;
-            tlp.field_bitmask != 0; })
+        `uvm_do_with(tlp, {
+            tlp.kind == TLP_MEM_WR;
+            tlp.constraint_mode_sel == CONSTRAINT_ILLEGAL;
+
+            // Keep field corruption as the sole malformed dimension.  Every
+            // other property is a deterministic, legal-shaped 1-DW write.
+            tlp.field_bitmask == 32'h0000_0001;
+            tlp.inject_poisoned == 0;
+            tlp.inject_ecrc_err == 0;
+            tlp.inject_lcrc_err == 0;
+            tlp.violate_ordering == 0;
+            tlp.ep_bit == 0;
+
+            tlp.has_prefix == 0;
+            tlp.prefixes.size() == 0;
+            tlp.tc == 0;
+            tlp.th == 0;
+            tlp.td == 0;
+            tlp.attr == 0;
+            tlp.at == 0;
+            tlp.is_64bit == (local::target_addr[63:32] != 0);
+            tlp.addr == local::target_addr;
+            tlp.length == 1;
+            tlp.first_be == 4'hF;
+            tlp.last_be == 4'h0;
+            tlp.payload.size() == 4;
+            foreach (tlp.payload[i]) tlp.payload[i] == 8'h5A;
+        })
     endtask
 endclass

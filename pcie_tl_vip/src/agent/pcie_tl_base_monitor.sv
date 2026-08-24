@@ -29,6 +29,12 @@ class pcie_tl_base_monitor extends uvm_monitor;
     //--- Coverage callbacks ---
     pcie_tl_coverage_callback  cov_callbacks[$];
 
+    // First requester-side observation associated with each outstanding tag.
+    // The switch may legally forward a cloned transaction object, so duplicate
+    // detection follows the tag manager's original request handle rather than
+    // comparing the monitored object handle directly.
+    pcie_tl_tlp seen_origin_by_tag[bit [9:0]];
+
     function new(string name = "pcie_tl_base_monitor", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -123,15 +129,25 @@ class pcie_tl_base_monitor extends uvm_monitor;
     endfunction
 
     virtual function bit check_tag_validity(pcie_tl_tlp tlp);
-        // For Non-Posted: check tag is not duplicate (skip self-registered tags)
+        pcie_tl_tlp origin;
+
+        // For Non-Posted: allow the first observation of the currently
+        // registered request origin.  A legal switch clone shares that origin;
+        // observing the same origin again is a real duplicate.  Tag reuse has
+        // a new origin handle and therefore starts a new observation epoch.
         if (tlp.requires_completion()) begin
             if (tag_mgr.is_duplicate(tlp.tag)) begin
-                // If the outstanding TLP is the same object, it's not a real duplicate
-                if (tag_mgr.outstanding_txn[tlp.tag] != tlp) begin
-                    `uvm_warning(get_name(), $sformatf("Duplicate tag detected: 0x%03h", tlp.tag))
-                    return 0;
+                origin = tag_mgr.outstanding_txn[tlp.tag];
+                if (!seen_origin_by_tag.exists(tlp.tag) ||
+                    (seen_origin_by_tag[tlp.tag] != origin)) begin
+                    seen_origin_by_tag[tlp.tag] = origin;
+                    return 1;
                 end
+                `uvm_warning(get_name(), $sformatf(
+                    "Duplicate tag detected: 0x%03h", tlp.tag))
+                return 0;
             end
+            seen_origin_by_tag.delete(tlp.tag);
         end
         return 1;
     endfunction

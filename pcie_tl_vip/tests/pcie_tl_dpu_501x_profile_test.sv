@@ -3,6 +3,27 @@ import pcie_tl_pkg::*;
 import pcie_tl_device_profile_pkg::*;
 `include "uvm_macros.svh"
 
+class pcie_tl_dpu_vf_513_warning_catcher extends uvm_report_catcher;
+    `uvm_object_utils(pcie_tl_dpu_vf_513_warning_catcher)
+
+    int matched_count;
+
+    function new(string name = "pcie_tl_dpu_vf_513_warning_catcher");
+        super.new(name);
+    endfunction
+
+    virtual function action_e catch();
+        if ((get_severity() == UVM_WARNING) &&
+            (get_id() == "FUNC_MGR") &&
+            (get_message() ==
+             "VF count 513 exceeds supported range 0..16, clamping to 16")) begin
+            matched_count++;
+            return CAUGHT;
+        end
+        return THROW;
+    endfunction
+endclass
+
 // Direct configuration-space regression for the DPU 20f9:501x PF profile.
 // It deliberately uses the function manager's public cfg_read/cfg_write API
 // rather than looking into the per-function config image.
@@ -189,8 +210,14 @@ class pcie_tl_dpu_501x_profile_test extends uvm_test;
         bit [31:0] proxy_read_data;
         bit [15:0] tag10_pf_bdf;
         bit [15:0] tag10_vf_bdf;
+        pcie_tl_dpu_vf_513_warning_catcher vf_513_catcher;
 
         phase.raise_objection(this);
+
+        vf_513_catcher = pcie_tl_dpu_vf_513_warning_catcher::type_id::create(
+            "vf_513_catcher");
+        if (vf_513_catcher == null)
+            `uvm_fatal("DPU_501X_CFG", "VF 513 warning catcher creation failed")
 
         mgr = pcie_tl_func_manager::type_id::create("mgr");
         mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
@@ -475,8 +502,14 @@ class pcie_tl_dpu_501x_profile_test extends uvm_test;
         // Update only the high NumVFs byte. Packed 0x02 lands in byte one, so
         // the requested value is 0x0201; the DPU accepts and exposes its
         // TotalVFs/max-context limit of 16 in both model and raw config state.
+        uvm_report_cb::add(null, vf_513_catcher);
         void'(dpu_sriov_proxy.handle_cfg_write_bdf(16'h0100, dpu_sriov_dw_base + 4,
                                                    32'h0000_0002, 1, 1));
+        uvm_report_cb::delete(null, vf_513_catcher);
+        if (vf_513_catcher.matched_count != 1)
+            `uvm_error("DPU_501X_CFG", $sformatf(
+                "VF 513 clamp warning count is %0d, expected 1",
+                vf_513_catcher.matched_count))
         if (mgr.sriov_caps[0].num_vfs != 16'h0010)
             `uvm_error("DPU_501X_CFG", $sformatf(
                 "DPU proxy partial NumVFs is %04h, expected accepted 0010",

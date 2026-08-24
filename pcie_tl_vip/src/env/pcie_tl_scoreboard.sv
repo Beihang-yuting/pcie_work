@@ -193,6 +193,16 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             mismatched++;
         end
 
+        // A no-data Completion (for example, a successful Config/IO write)
+        // or an error Completion terminates the request immediately.  Its
+        // byte_count and payload do not describe outstanding CplD data.
+        if (!cpl.has_data() || (cpl.cpl_status != CPL_STATUS_SC)) begin
+            matched++;
+            cpl_trackers.delete(cpl.tag);
+            pending_requests.delete(cpl.tag);
+            return;
+        end
+
         // Verify lower_addr
         if (cpl.lower_addr != tracker.expected_addr[6:0]) begin
             `uvm_warning("SCB", $sformatf(

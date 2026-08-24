@@ -17,10 +17,10 @@ import host_mem_pkg::*;
 //   - silently swallows the cross-root detection mechanism (violations counter
 //     must have fired at least for the deliberate probes).
 //
-// Injected error seqs (poisoned / malformed / tag_conflict)
-// DELIBERATELY raise UVM_ERROR and pollute the scoreboards, so per the agreed
-// criterion PASS = isolation + no-hang; scoreboard mismatch/unexpected counts
-// are reported for visibility but NOT asserted clean.
+// Poisoned / malformed stimulus remains mixed with a paired-read tag-pressure
+// cycle.  The paired reads are ordinary non-posted reads; they do not force or
+// guarantee a duplicate tag.  A positive run must remain clean while proving
+// isolation, liveness, and full completion drain.
 // Unknown-Completion fatal handling is covered independently by the
 // SWITCH_NEG_UNKNOWN_CPL unit-test mode; a positive stress run must not inject it.
 //
@@ -29,6 +29,9 @@ import host_mem_pkg::*;
 //=============================================================================
 class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_multi_root_stress_test)
+
+    localparam int unsigned MAX_ROOT_TAG_PRESSURE = 128;
+    localparam time         ROOT_TAG_WAIT_TIMEOUT = 500us;
 
     // ---- scale knobs ----
     int writes_per_ep  = 2500;   // random MWr per EP   (4 EP -> 10000)
@@ -41,6 +44,7 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
     int        ep_root[4]  = '{0, 0, 1, 1};   // owning root per EP (matches auto owner)
     bit [63:0] win_base[4];                   // EP window base (= ds_mem_base[i])
     bit [63:0] marker[4];                     // per-EP unique marker addr (isolation proof)
+    bit        final_state_clean;
 
     function new(string name = "pcie_tl_multi_root_stress_test",
                  uvm_component parent = null);
@@ -71,10 +75,9 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
         cfg.completion_check_enable = 1;
         cfg.data_integrity_enable   = 1;
         cfg.ep_auto_response        = 1;
-        // Error seqs (poisoned/malformed/tag_conflict) DELIBERATELY
-        // pollute the scoreboards; PASS = isolation + no-hang (see check_phase).
-        // Downgrade SCB mismatch/unexpected FAIL -> warning so the injected noise
-        // does not raise UVM_ERROR while real checks (MRSTRESS_FAIL) stay strict.
+        // Preserve the existing in-run visibility policy for malformed traffic.
+        // The explicit final assertions below still require every scoreboard
+        // counter and pending structure to be clean.
         cfg.scb_strict_check        = 0;
     endfunction
 
@@ -112,7 +115,7 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
         #1us;
 
         // -- Phase 1: THE MIX — all traffic classes concurrent on both roots --
-        `uvm_info("MRSTRESS", "--- Phase 1: heavy random writes + reads + errors + cross-root probes + EP DMA, ALL concurrent ---", UVM_LOW)
+        `uvm_info("MRSTRESS", "--- Phase 1: heavy random writes + reads + injected attributes + paired-read pressure + cross-root probes + EP DMA, ALL concurrent ---", UVM_LOW)
         fork
             //----- per-root heavy random writes (own EPs only) -----
             for (int r = 0; r < 2; r++) begin
@@ -138,6 +141,8 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
                         automatic int        ep  = (rr * 2) + (n & 1);
                         automatic bit [63:0] off = ($urandom_range(24'h00FF_FF00, 0)) & ~64'h3F;
                         automatic int        len = 1 + $urandom_range(15, 0);
+                        wait_for_root_tag_headroom(rr, 1,
+                            $sformatf("normal read %0d", n));
                         issue_rd(rr, win_base[ep] + off, len,
                                  $sformatf("r%0d_rd_%0d", rr, n));
                         #3ns;
@@ -145,12 +150,12 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
                 end join_none
             end
 
-            //----- error-sequence injection, cycled on BOTH roots -----
+            //----- injected attributes + paired-read pressure on BOTH roots -----
             for (int r = 0; r < 2; r++) begin
                 automatic int rr = r;
                 fork begin
                     for (int n = 0; n < err_iters; n++) begin
-                        inject_err(rr, n);
+                        inject_error_or_read_pair(rr, n);
                         #5ns;
                     end
                 end join_none
@@ -196,14 +201,19 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
             end
         join
 
-        // Drain heavy completions.
-        #150us;
+        // Drain both independent requester domains with a finite guard.
+        fork
+            wait_for_root_tag_drain(0);
+            wait_for_root_tag_drain(1);
+        join
+
+        check_final_clean_state();
         `uvm_info("MRSTRESS", "=== run_phase DONE ===", UVM_LOW)
         phase.drop_objection(this);
     endtask
 
     //=========================================================================
-    // check_phase — PASS = isolation + no-hang (errors are expected noise)
+    // check_phase — PASS = isolation + no-hang + clean final drain
     //=========================================================================
     function void check_phase(uvm_phase phase);
         bit ok = 1;
@@ -257,7 +267,7 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
                 "total_routed=%0d suspiciously low -- possible hang", env.sw.total_routed))
         end
 
-        // Visibility (NOT asserted clean — error seqs pollute these by design).
+        // Visibility (the run-phase final assertions already require this clean).
         `uvm_info("MRSTRESS", $sformatf(
             "STATS routed=%0d dropped=%0d xroot=%0d | scb0[m=%0d mis=%0d unx=%0d to=%0d] scb1[m=%0d mis=%0d unx=%0d to=%0d]",
             env.sw.total_routed, env.sw.total_dropped,
@@ -267,8 +277,12 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
             env.scbs[1].matched, env.scbs[1].mismatched, env.scbs[1].unexpected,
             env.scbs[1].timed_out), UVM_LOW)
 
-        if (ok) `uvm_info("MRSTRESS", "MRSTRESS PASSED (isolation intact, no hang)", UVM_LOW)
-        else    `uvm_info("MRSTRESS", "MRSTRESS FAILED", UVM_LOW)
+        if (ok && final_state_clean) begin
+            `uvm_info("MRSTRESS", "MRSTRESS PASSED (isolation intact, no hang)", UVM_LOW)
+            `uvm_info("MRSTRESS_PASS", "*** MULTI-ROOT STRESS CLEAN PASS ***", UVM_LOW)
+        end else begin
+            `uvm_info("MRSTRESS", "MRSTRESS FAILED", UVM_LOW)
+        end
     endfunction
 
     //=========================================================================
@@ -281,6 +295,110 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
         clamp_4kb = (bytes > room) ? room : bytes;
         if (clamp_4kb < 4) clamp_4kb = 4;
     endfunction
+
+    // Use the capacity actually installed on this root by +TAG_BIT.  Half the
+    // physical pool, capped at 128, leaves headroom for the two concurrent
+    // producer threads that share the same root sequencer and tag manager.
+    function int unsigned root_tag_pressure_limit(int root);
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgrs[root].max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_ROOT_TAG_PRESSURE) ?
+               half_capacity : MAX_ROOT_TAG_PRESSURE;
+    endfunction
+
+    task wait_for_root_tag_headroom(int root, int unsigned needed,
+                                    string context);
+        time         start_time;
+        int unsigned limit;
+        int unsigned outstanding;
+
+        start_time = $time;
+        limit      = root_tag_pressure_limit(root);
+        while (((env.tag_mgrs[root].get_outstanding_count() + needed) > limit) &&
+               (($time - start_time) < ROOT_TAG_WAIT_TIMEOUT)) begin
+            #100ns;
+        end
+
+        outstanding = env.tag_mgrs[root].get_outstanding_count();
+        if ((outstanding + needed) > limit) begin
+            `uvm_error("MRSTRESS_TAG_WAIT", $sformatf(
+                "root%0d timed out after %0t waiting for %0d tag slots for %s: outstanding=%0d limit=%0d capacity=%0d",
+                root, ROOT_TAG_WAIT_TIMEOUT, needed, context, outstanding,
+                limit, env.tag_mgrs[root].max_outstanding))
+        end
+    endtask
+
+    task wait_for_root_tag_drain(int root);
+        time         start_time;
+        int unsigned remaining;
+
+        start_time = $time;
+        while ((env.tag_mgrs[root].get_outstanding_count() != 0) &&
+               (($time - start_time) < ROOT_TAG_WAIT_TIMEOUT)) begin
+            #100ns;
+        end
+
+        remaining = env.tag_mgrs[root].get_outstanding_count();
+        if (remaining != 0) begin
+            `uvm_error("MRSTRESS_DRAIN", $sformatf(
+                "root%0d timed out after %0t with %0d tags outstanding",
+                root, ROOT_TAG_WAIT_TIMEOUT, remaining))
+        end else begin
+            `uvm_info("MRSTRESS_DRAIN", $sformatf(
+                "root%0d tag domain drained", root), UVM_LOW)
+        end
+    endtask
+
+    task check_final_clean_state();
+        int tags[2];
+        int rc_pending[2];
+        int scb_pending[2];
+        int scb_trackers[2];
+        int switch_outstanding;
+
+        final_state_clean = 1;
+        for (int root = 0; root < 2; root++) begin
+            tags[root]         = env.tag_mgrs[root].get_outstanding_count();
+            rc_pending[root]   = env.rc_agents[root].rc_driver.get_pending_count();
+            scb_pending[root]  = env.scbs[root].pending_requests.size();
+            scb_trackers[root] = env.scbs[root].cpl_trackers.size();
+
+            if ((tags[root] != 0) || (rc_pending[root] != 0) ||
+                (scb_pending[root] != 0) || (scb_trackers[root] != 0)) begin
+                `uvm_error("MRSTRESS_FINAL", $sformatf(
+                    "root%0d did not drain: tags=%0d rc_pending=%0d scb_pending=%0d scb_trackers=%0d",
+                    root, tags[root], rc_pending[root], scb_pending[root],
+                    scb_trackers[root]))
+                final_state_clean = 0;
+            end
+
+            if ((env.scbs[root].mismatched != 0) ||
+                (env.scbs[root].unexpected != 0) ||
+                (env.scbs[root].timed_out != 0)) begin
+                `uvm_error("MRSTRESS_FINAL", $sformatf(
+                    "root%0d scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
+                    root, env.scbs[root].mismatched,
+                    env.scbs[root].unexpected, env.scbs[root].timed_out))
+                final_state_clean = 0;
+            end
+        end
+
+        switch_outstanding = env.sw.outstanding_count();
+        if (switch_outstanding != 0) begin
+            `uvm_error("MRSTRESS_FINAL", $sformatf(
+                "switch still has %0d outstanding non-posted routes",
+                switch_outstanding))
+            final_state_clean = 0;
+        end
+
+        `uvm_info("MRSTRESS", $sformatf(
+            "FINAL CLEAN STATE root0[tags=%0d rc_pending=%0d scb_pending=%0d trackers=%0d] root1[tags=%0d rc_pending=%0d scb_pending=%0d trackers=%0d] switch_outstanding=%0d clean=%0d",
+            tags[0], rc_pending[0], scb_pending[0], scb_trackers[0],
+            tags[1], rc_pending[1], scb_pending[1], scb_trackers[1],
+            switch_outstanding, final_state_clean), UVM_LOW)
+    endtask
 
     task issue_wr(int root, bit [63:0] a, int bytes, string nm);
         int len = (clamp_4kb(a, bytes) + 3) / 4;
@@ -304,20 +422,33 @@ class pcie_tl_multi_root_stress_test extends pcie_tl_base_test;
         rd.start(env.v_seqr.rc_seqr_arr[root]);
     endtask
 
-    // Cycle the three non-fatal error sequence kinds on the given root's RC
-    // sequencer. Unknown Completions are fatal and covered by the unit negative.
-    task inject_err(int root, int n);
+    // Cycle poisoned / malformed traffic plus two ordinary reads that add tag
+    // pressure.  The read pair does not force a duplicate tag; both addresses
+    // are in a window owned by the selected root so every read can complete.
+    task inject_error_or_read_pair(int root, int n);
         uvm_sequencer #(pcie_tl_tlp) seqr = env.v_seqr.rc_seqr_arr[root];
         case (n % 3)
             0: begin pcie_tl_err_poisoned_seq      s =
                  pcie_tl_err_poisoned_seq::type_id::create($sformatf("err_pois_r%0d_%0d", root, n));
                  s.start(seqr); end
-            1: begin pcie_tl_err_malformed_seq     s =
-                 pcie_tl_err_malformed_seq::type_id::create($sformatf("err_mal_r%0d_%0d", root, n));
-                 s.start(seqr); end
-            2: begin pcie_tl_err_tag_conflict_seq  s =
-                 pcie_tl_err_tag_conflict_seq::type_id::create($sformatf("err_tag_r%0d_%0d", root, n));
-                 s.start(seqr); end
+            1: begin
+                pcie_tl_err_malformed_seq s =
+                    pcie_tl_err_malformed_seq::type_id::create(
+                        $sformatf("err_mal_r%0d_%0d", root, n));
+                // Keep all 83 malformed cycles per root in that root's first
+                // owned window.  The 64B stride makes each 1-DW write page-safe.
+                s.target_addr = win_base[root * 2] + 64'h0080_0000 + (n * 64);
+                s.start(seqr);
+            end
+            2: begin
+                bit [63:0] pair_base = win_base[root * 2];
+                wait_for_root_tag_headroom(root, 2,
+                    $sformatf("paired reads %0d", n));
+                issue_rd(root, pair_base, 1,
+                    $sformatf("pair_r%0d_%0d_a", root, n));
+                issue_rd(root, pair_base + 64'h1000, 1,
+                    $sformatf("pair_r%0d_%0d_b", root, n));
+            end
         endcase
     endtask
 

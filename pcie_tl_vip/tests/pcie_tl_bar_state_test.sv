@@ -37,6 +37,34 @@ class pcie_tl_cfg_write_recorder extends pcie_cfg_callback;
     endfunction
 endclass
 
+class pcie_tl_vf_clamp_warning_catcher extends uvm_report_catcher;
+    `uvm_object_utils(pcie_tl_vf_clamp_warning_catcher)
+
+    int count_512;
+    int count_32;
+
+    function new(string name = "pcie_tl_vf_clamp_warning_catcher");
+        super.new(name);
+    endfunction
+
+    virtual function action_e catch();
+        if ((get_severity() == UVM_WARNING) &&
+            (get_id() == "FUNC_MGR")) begin
+            if (get_message() ==
+                "VF count 512 exceeds supported range 0..16, clamping to 16") begin
+                count_512++;
+                return CAUGHT;
+            end
+            if (get_message() ==
+                "VF count 32 exceeds supported range 0..16, clamping to 16") begin
+                count_32++;
+                return CAUGHT;
+            end
+        end
+        return THROW;
+    endfunction
+endclass
+
 class pcie_tl_bar_state_proxy extends pcie_tl_config_proxy;
     `uvm_component_utils(pcie_tl_bar_state_proxy)
 
@@ -204,10 +232,16 @@ class pcie_tl_bar_state_test extends uvm_test;
         pcie_tl_cfg_write_recorder num_vfs_cb;
         pcie_tl_cfg_write_recorder direct_control_cb;
         pcie_tl_cfg_write_recorder direct_num_vfs_cb;
+        pcie_tl_vf_clamp_warning_catcher clamp_catcher;
         bit [15:0] callback_pf_bdf;
         int callback_sriov_dw;
 
         phase.raise_objection(this);
+
+        clamp_catcher = pcie_tl_vf_clamp_warning_catcher::type_id::create(
+            "clamp_catcher");
+        if (clamp_catcher == null)
+            `uvm_fatal("BAR_STATE", "VF clamp warning catcher creation failed")
 
         mgr = pcie_tl_func_manager::type_id::create("mgr");
         mgr.cfg_profile = PCIE_CFG_PROFILE_DPU_20F9_501X;
@@ -243,8 +277,10 @@ class pcie_tl_bar_state_test extends uvm_test;
             callback_pf_bdf, (callback_sriov_dw + 4) << 2);
         control_cb.clear_write_history();
         num_vfs_cb.clear_write_history();
+        uvm_report_cb::add(null, clamp_catcher);
         void'(proxy.handle_cfg_write_bdf(
             callback_pf_bdf, callback_sriov_dw + 4, 32'h0000_0002, 1, 1));
+        uvm_report_cb::delete(null, clamp_catcher);
         cfg_dw = callback_mgr.cfg_read(
             callback_pf_bdf, (callback_sriov_dw + 4) << 2);
         if (callback_mgr.sriov_caps[0].num_vfs != 16 ||
@@ -417,7 +453,9 @@ class pcie_tl_bar_state_test extends uvm_test;
         enable_notifications = proxy.vf_enable_notifications;
         disable_notifications = proxy.vf_disable_notifications;
         lifecycle_notifications = proxy.vf_lifecycle_notifications;
+        uvm_report_cb::add(null, clamp_catcher);
         void'(proxy.handle_cfg_write_bdf(pf_bdf, sriov_dw + 4, 32'd32, 0, 2));
+        uvm_report_cb::delete(null, clamp_catcher);
         cfg_dw = mgr.cfg_read(pf_bdf, (sriov_dw + 4) << 2);
         if (mgr.sriov_caps[0].num_vfs != 16 || cfg_dw[15:0] != 16)
             `uvm_error("BAR_STATE",
@@ -770,7 +808,9 @@ class pcie_tl_bar_state_test extends uvm_test;
         direct_control_cb.clear_write_history();
         direct_num_vfs_cb.clear_write_history();
         g0 = direct_mgr.config_generation;
+        uvm_report_cb::add(null, clamp_catcher);
         direct_mgr.enable_vfs(0, 32);
+        uvm_report_cb::delete(null, clamp_catcher);
         cfg_dw = direct_mgr.cfg_read(
             direct_mgr.pf_ctx[0].bdf, (sriov_dw + 4) << 2);
         old_cfg_dw = direct_mgr.cfg_read(
@@ -826,6 +866,12 @@ class pcie_tl_bar_state_test extends uvm_test;
             `uvm_error("BAR_STATE", "disabled VF wrong-object LUT key was not removed")
         expect_generation("disabled VF wrong-object LUT reconciliation",
                           mgr.config_generation, g0 + 1);
+
+        if ((clamp_catcher.count_512 != 1) ||
+            (clamp_catcher.count_32 != 2))
+            `uvm_error("BAR_STATE", $sformatf(
+                "VF clamp warning counts 512=%0d 32=%0d expected 1/2",
+                clamp_catcher.count_512, clamp_catcher.count_32))
 
         phase.drop_objection(this);
     endtask

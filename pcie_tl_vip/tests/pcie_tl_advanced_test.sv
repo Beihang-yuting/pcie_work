@@ -1286,8 +1286,10 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
             begin
                 for (int i = 0; i < 1000; i++) begin
                     pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("p2_rd_%0d", i));
-                    rd.addr     = 64'h0000_0001_0000_0000 + ((i % 2000) * 64);
-                    rd.length   = 8 + (i % 8) * 4;  // 32B-160B, mix of single/multi CplD
+                    // 256B stride is greater than the maximum 144B transfer,
+                    // so every request is disjoint and remains within 4KB.
+                    rd.addr     = 64'h0000_0001_0000_0000 + (i * 256);
+                    rd.length   = 8 + (i % 8) * 4;  // 32B-144B, mix of single/multi CplD
                     rd.first_be = 4'hF;
                     rd.last_be  = 4'hF;
                     rd.is_64bit = 1;
@@ -1337,8 +1339,8 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
 
     //=========================================================================
     // Phase 3: Multi-CplD split stress — 500 large reads
-    // Each read > MPS=128B, generating 2-8 CplDs per request
-    // ~500 requests, ~2000+ CplDs
+    // Each read > MPS=128B, generating 2-4 CplDs per request
+    // ~500 requests, ~1600 CplDs
     //=========================================================================
     task phase3_multi_cpl_stress();
         int scb_unexpected_before;
@@ -1352,13 +1354,14 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
                 for (int i = 0; i < 500; i++) begin
                     pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("p3_rd_%0d", i));
                     rd.addr     = 64'h0000_0001_0000_0000 + ((i % 1000) * 1024);
-                    // Cycle through sizes: 256B(64DW), 384B(96DW), 512B(128DW), 768B(192DW), 1024B(256DW)
+                    // Every size exceeds MPS=128B to force split Completions,
+                    // but remains within MRRS=512B.
                     case (i % 5)
                         0: rd.length = 64;   // 256B -> 2 CplDs
-                        1: rd.length = 96;   // 384B -> 3 CplDs
-                        2: rd.length = 128;  // 512B -> 4 CplDs
-                        3: rd.length = 192;  // 768B -> 6 CplDs
-                        4: rd.length = 256;  // 1024B -> 8 CplDs
+                        1: rd.length = 80;   // 320B -> 3 CplDs
+                        2: rd.length = 96;   // 384B -> 3 CplDs
+                        3: rd.length = 112;  // 448B -> 4 CplDs
+                        4: rd.length = 128;  // 512B -> 4 CplDs
                     endcase
                     rd.first_be = 4'hF;
                     rd.last_be  = 4'hF;
@@ -1425,8 +1428,10 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
             begin
                 for (int i = 0; i < 2500; i++) begin
                     pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("p4_wr_%0d", i));
-                    wr.addr     = 64'h0000_0001_0020_0000 + (i * 64);
-                    wr.length   = 8 + (i % 24);  // 32B-128B varying
+                    // 128B stride covers the maximum 124B transfer without
+                    // overlap or crossing a 4KB boundary.
+                    wr.addr     = 64'h0000_0001_0020_0000 + (i * 128);
+                    wr.length   = 8 + (i % 24);  // 32B-124B varying
                     wr.first_be = 4'hF;
                     wr.last_be  = 4'hF;
                     wr.is_64bit = 1;
@@ -1442,8 +1447,9 @@ class pcie_tl_bidir_traffic_test extends pcie_tl_base_test;
             begin
                 for (int i = 0; i < 1500; i++) begin
                     pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create($sformatf("p4_rd_%0d", i));
-                    rd.addr     = 64'h0000_0001_0000_0000 + ((i % 2000) * 64);
-                    rd.length   = 4 + (i % 28);  // 16B-128B varying
+                    // Keep the variable reads disjoint and 4KB-safe too.
+                    rd.addr     = 64'h0000_0001_0000_0000 + (i * 128);
+                    rd.length   = 4 + (i % 28);  // 16B-124B varying
                     rd.first_be = 4'hF;
                     rd.last_be  = 4'hF;
                     rd.is_64bit = 1;
@@ -1744,6 +1750,11 @@ class pcie_tl_switch_enum_test extends pcie_tl_base_test;
         env.sw.dsp[1].route_entry.subordinate_bus = 8'h03;
         env.sw.dsp[1].route_entry.mem_base        = 32'h9000_0000;
         env.sw.dsp[1].route_entry.mem_limit       = 32'h9FFF_FFFF;
+        for (int i = 0; i < 2; i++) begin
+            // Complete the simulated enumeration by enabling Memory Space on
+            // each downstream bridge before sending address-routed traffic.
+            env.sw.dsp[i].cfg_write(12'h004, 32'h0000_0002, 4'h3);
+        end
         #100ns;
         // Send traffic
         for (int i = 0; i < 10; i++) begin
@@ -2194,10 +2205,12 @@ class pcie_tl_switch_addr_boundary_test extends pcie_tl_base_test;
             wr0.start(env.rc_agent.sequencer);
             #10ns;
 
-            // Write to last valid address
+            // Write the final valid DWORD.  A one-DW request covers four
+            // bytes, so it must start at limit-3 to end exactly at the window
+            // limit without crossing the 4KB boundary.
             begin
                 pcie_tl_mem_wr_seq wr1 = pcie_tl_mem_wr_seq::type_id::create("wr_last");
-                wr1.addr = cfg.switch_cfg.ds_mem_limit[0]; // 0x8FFF_FFFF
+                wr1.addr = cfg.switch_cfg.ds_mem_limit[0] - 3; // [0x8FFF_FFFC..0x8FFF_FFFF]
                 wr1.length = 1; wr1.first_be = 4'hF; wr1.last_be = 4'h0; wr1.is_64bit = 0;
                 wr1.start(env.rc_agent.sequencer);
             end
@@ -2454,6 +2467,10 @@ class pcie_tl_switch_cfg_space_test extends pcie_tl_base_test;
             env.sw.dsp[i].route_entry.primary_bus     = 8'h01;
             env.sw.dsp[i].route_entry.secondary_bus   = 8'h02 + i;
             env.sw.dsp[i].route_entry.subordinate_bus = 8'h02 + i;
+            // Enumeration mode starts with bridge forwarding disabled.  Model
+            // the RC enabling Memory Space through the Type-1 Command register
+            // before exercising the programmed windows.
+            env.sw.dsp[i].cfg_write(12'h004, 32'h0000_0002, 4'h3);
         end
 
         // Phase 2: Write memory windows with different sizes
@@ -2537,8 +2554,12 @@ endclass
 class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_switch_heavy_traffic_test)
 
+    localparam int unsigned MAX_NP_BATCH        = 128;
+    localparam time         NP_DRAIN_TIMEOUT    = 500us;
+
     int p1_wr, p2_rd, p3_dma, p4_p2p;
     int p5_rc_wr, p5_rc_rd, p5_ep_dma, p5_p2p;
+    bit drain_failed;
 
     function new(string name = "pcie_tl_switch_heavy_traffic_test", uvm_component parent = null);
         super.new(name, parent);
@@ -2563,8 +2584,63 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
         cfg.cpl_timeout_ns           = 500000;
     endfunction
 
+    function int unsigned np_batch_limit();
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgr.max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_NP_BATCH) ? half_capacity : MAX_NP_BATCH;
+    endfunction
+
+    task wait_for_np_batch_drain(string phase_name, int unsigned issued);
+        time start_time;
+
+        start_time = $time;
+        while ((env.tag_mgr.get_outstanding_count() != 0) &&
+               (($time - start_time) < NP_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+        if (env.tag_mgr.get_outstanding_count() != 0) begin
+            drain_failed = 1;
+            `uvm_error("SW_HEAVY_DRAIN", $sformatf(
+                "%s timed out after %0t at issued=%0d with %0d tags outstanding",
+                phase_name, NP_DRAIN_TIMEOUT, issued,
+                env.tag_mgr.get_outstanding_count()))
+        end
+    endtask
+
+    task pace_np_batch(string phase_name, int unsigned issued,
+                       int unsigned total, int unsigned batch_limit);
+        if (((issued % batch_limit) == 0) || (issued == total))
+            wait_for_np_batch_drain(phase_name, issued);
+    endtask
+
+    task issue_phase2_ep_batch(input int unsigned batch_start,
+                               input int unsigned batch_end,
+                               input int unsigned ep);
+        for (int request_idx = batch_start; request_idx < batch_end;
+             request_idx++) begin
+            if ((request_idx % 4) == ep) begin
+                int i;
+                pcie_tl_mem_rd_seq rd;
+
+                i = request_idx / 4;
+                rd = pcie_tl_mem_rd_seq::type_id::create(
+                    $sformatf("p2_rd_e%0d_%0d", ep, i));
+                rd.addr     = cfg.switch_cfg.ds_mem_base[ep] + (i * 512);
+                rd.length   = 32 + (i % 3) * 32;
+                rd.first_be = 4'hF;
+                rd.last_be  = 4'hF;
+                rd.is_64bit = 0;
+                rd.start(env.rc_agent.sequencer);
+                #2ns;
+            end
+        end
+    endtask
+
     task run_phase(uvm_phase phase);
         int grand_total;
+        int unsigned batch_limit;
         realtime t_start, t_end;
         phase.raise_objection(this);
 
@@ -2572,6 +2648,8 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
         `uvm_info("SW_HEAVY", "=== Test 22: Switch 20K Heavy Traffic ===", UVM_LOW)
         `uvm_info("SW_HEAVY", "============================================================", UVM_LOW)
         t_start = $realtime;
+        drain_failed = 0;
+        batch_limit = np_batch_limit();
 
         // Phase 1: RC -> 4EP writes (8000)
         `uvm_info("SW_HEAVY", "\n--- Phase 1: RC writes 8000 (2000/EP) ---", UVM_LOW)
@@ -2583,7 +2661,9 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
                     for (int i = 0; i < 2000; i++) begin
                         pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
                             $sformatf("p1_wr_e%0d_%0d", e, i));
-                        wr.addr     = cfg.switch_cfg.ds_mem_base[e] + (i * 64);
+                        // 128B stride covers the maximum 124B request and
+                        // keeps every write within one 4KB page.
+                        wr.addr     = cfg.switch_cfg.ds_mem_base[e] + (i * 128);
                         wr.length   = 8 + (i % 24);
                         wr.first_be = 4'hF; wr.last_be = 4'hF; wr.is_64bit = 0;
                         wr.start(env.rc_agent.sequencer);
@@ -2600,24 +2680,20 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
         // Phase 2: RC -> 4EP reads (2000, multi-CplD)
         `uvm_info("SW_HEAVY", "\n--- Phase 2: RC reads 2000 (500/EP, multi-CplD) ---", UVM_LOW)
         p2_rd = 0;
-        fork
-            for (int ep = 0; ep < 4; ep++) begin
-                automatic int e = ep;
-                fork begin
-                    for (int i = 0; i < 500; i++) begin
-                        pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
-                            $sformatf("p2_rd_e%0d_%0d", e, i));
-                        rd.addr     = cfg.switch_cfg.ds_mem_base[e] + ((i % 2000) * 64);
-                        rd.length   = 32 + (i % 3) * 32;
-                        rd.first_be = 4'hF; rd.last_be = 4'hF; rd.is_64bit = 0;
-                        rd.start(env.rc_agent.sequencer);
-                        p2_rd++;
-                        #2ns;
-                    end
-                end join_none
-            end
-        join
-        #50000ns;
+        for (int batch_start = 0; batch_start < 2000;
+             batch_start += batch_limit) begin
+            int batch_end;
+            batch_end = ((batch_start + batch_limit) < 2000) ?
+                        (batch_start + batch_limit) : 2000;
+            fork
+                issue_phase2_ep_batch(batch_start, batch_end, 0);
+                issue_phase2_ep_batch(batch_start, batch_end, 1);
+                issue_phase2_ep_batch(batch_start, batch_end, 2);
+                issue_phase2_ep_batch(batch_start, batch_end, 3);
+            join
+            p2_rd = batch_end;
+            wait_for_np_batch_drain("Phase 2 switch reads", p2_rd);
+        end
         `uvm_info("SW_HEAVY", $sformatf("Phase 2 done: %0d reads, matched=%0d cpl=%0d",
             p2_rd, env.scb.matched, env.scb.total_completions), UVM_LOW)
 
@@ -2694,6 +2770,8 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
                     rd.start(env.rc_agent.sequencer);
                     p5_rc_rd++;
                     #3ns;
+                    pace_np_batch("Phase 5 switch reads", p5_rc_rd, 1000,
+                                  batch_limit);
                 end
             end
             // EP DMA upstream: 2000
@@ -2760,11 +2838,17 @@ class pcie_tl_switch_heavy_traffic_test extends pcie_tl_base_test;
             env.scb.matched, env.scb.mismatched, env.scb.unexpected), UVM_LOW)
         `uvm_info("SW_HEAVY", $sformatf("  Sim time: %0t", t_end - t_start), UVM_LOW)
 
-        if (env.sw.total_dropped == 0 && env.scb.mismatched == 0 && env.scb.unexpected == 0)
+        if (!drain_failed && env.tag_mgr.get_outstanding_count() == 0 &&
+            env.sw.outstanding_count() == 0 && env.sw.total_dropped == 0 &&
+            env.scb.mismatched == 0 && env.scb.unexpected == 0)
             `uvm_info("SW_HEAVY", "*** SWITCH 20K HEAVY TRAFFIC PASSED — ZERO DROPS ***", UVM_LOW)
         else
-            `uvm_error("SW_HEAVY", $sformatf("FAILED: dropped=%0d mismatch=%0d unexpected=%0d",
-                env.sw.total_dropped, env.scb.mismatched, env.scb.unexpected))
+            `uvm_error("SW_HEAVY", $sformatf(
+                {"FAILED: drain=%0b tags=%0d switch_outstanding=%0d dropped=%0d ",
+                 "mismatch=%0d unexpected=%0d"},
+                drain_failed, env.tag_mgr.get_outstanding_count(),
+                env.sw.outstanding_count(), env.sw.total_dropped,
+                env.scb.mismatched, env.scb.unexpected))
         `uvm_info("SW_HEAVY", "============================================================\n", UVM_LOW)
         phase.drop_objection(this);
     endtask
@@ -2775,6 +2859,15 @@ endclass
 //=============================================================================
 class pcie_tl_sriov_basic_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_sriov_basic_test)
+
+    localparam int unsigned MAX_READ_BATCH              = 128;
+    localparam int unsigned EXPECTED_TOTAL_REQUESTS      = 10000;
+    localparam int unsigned EXPECTED_TOTAL_COMPLETIONS   = 5000;
+    localparam int unsigned EXPECTED_MATCHED_REQUESTS    = 5000;
+    localparam time         TEST23_DRAIN_TIMEOUT         = 500us;
+
+    bit drain_failed;
+
     function new(string name = "pcie_tl_sriov_basic_test", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -2791,13 +2884,93 @@ class pcie_tl_sriov_basic_test extends pcie_tl_base_test;
         cfg.response_delay_max = 2;
         cfg.cpl_timeout_ns   = 500000;
     endfunction
+
+    function int unsigned read_batch_limit();
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgr.max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_READ_BATCH) ? half_capacity : MAX_READ_BATCH;
+    endfunction
+
+    task wait_for_read_batch_drain(int unsigned issued);
+        time         start_time;
+        int unsigned remaining;
+
+        start_time = $time;
+        while ((env.tag_mgr.get_outstanding_count() != 0) &&
+               (($time - start_time) < TEST23_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        remaining = env.tag_mgr.get_outstanding_count();
+        if (remaining != 0) begin
+            drain_failed = 1;
+            `uvm_error("TEST23_DRAIN", $sformatf(
+                "Phase 3 timed out after %0t at issued=%0d with %0d RC tags outstanding",
+                TEST23_DRAIN_TIMEOUT, issued, remaining))
+        end else begin
+            `uvm_info("TEST23_DRAIN", $sformatf(
+                "Phase 3 drained at issued=%0d", issued), UVM_MEDIUM)
+        end
+    endtask
+
+    task pace_read_batch(int unsigned issued, int unsigned total,
+                         int unsigned batch_limit);
+        if (((issued % batch_limit) == 0) || (issued == total))
+            wait_for_read_batch_drain(issued);
+    endtask
+
+    task wait_for_final_clean();
+        time start_time;
+
+        start_time = $time;
+        while (((env.scb.total_requests < EXPECTED_TOTAL_REQUESTS) ||
+                (env.tag_mgr.get_outstanding_count() != 0) ||
+                (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+                (env.scb.pending_requests.size() != 0) ||
+                (env.scb.cpl_trackers.size() != 0)) &&
+               (($time - start_time) < TEST23_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        if ((env.scb.total_requests < EXPECTED_TOTAL_REQUESTS) ||
+            (env.tag_mgr.get_outstanding_count() != 0) ||
+            (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+            (env.scb.pending_requests.size() != 0) ||
+            (env.scb.cpl_trackers.size() != 0)) begin
+            drain_failed = 1;
+            `uvm_error("TEST23_DRAIN", $sformatf(
+                {"Final drain timed out after %0t: requests=%0d tags=%0d ",
+                 "rc_pending=%0d scb_pending=%0d scb_trackers=%0d"},
+                TEST23_DRAIN_TIMEOUT, env.scb.total_requests,
+                env.tag_mgr.get_outstanding_count(),
+                env.rc_agent.rc_driver.get_pending_count(),
+                env.scb.pending_requests.size(), env.scb.cpl_trackers.size()))
+        end
+    endtask
+
     task run_phase(uvm_phase phase);
-        int total_cfg, total_wr, total_rd;
+        int          total_cfg, total_wr, total_rd;
+        int          grand_total;
+        int unsigned batch_limit;
+        int          active_functions;
+        int          tags_remaining;
+        int          rc_pending;
+        int          scb_pending;
+        int          scb_trackers;
+        bit          final_clean;
+
         phase.raise_objection(this);
         `uvm_info("TEST23", "=== SR-IOV Heavy: 4 PFs x 16 VFs, 10K+ TLPs ===", UVM_LOW)
+        drain_failed = 0;
+        batch_limit = read_batch_limit();
+        `uvm_info("TEST23", $sformatf(
+            "Read pacing: physical tag capacity=%0d, batch limit=%0d",
+            env.tag_mgr.max_outstanding, batch_limit), UVM_LOW)
 
         // Phase 1: Config reads to all 4 PFs + 64 VFs (1000 rounds)
-        `uvm_info("TEST23", "--- Phase 1: 4000 config reads across all Functions ---", UVM_LOW)
+        `uvm_info("TEST23", "--- Phase 1: 1000 config reads across all Functions ---", UVM_LOW)
         total_cfg = 0;
         for (int round = 0; round < 1000; round++) begin
             int pf = round % 4;
@@ -2823,8 +2996,10 @@ class pcie_tl_sriov_basic_test extends pcie_tl_base_test;
             int vf_idx = (i / 4) % 16;
             pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
                 $sformatf("wr_%0d", i));
+            // 128B stride covers the maximum 128B request, keeping every
+            // transfer disjoint and within a single 4KB page.
             wr.addr     = 64'h0000_0001_0000_0000 + (pf_idx * 64'h1000_0000) +
-                          (vf_idx * 64'h100_0000) + (i * 64);
+                          (vf_idx * 64'h100_0000) + (i * 128);
             wr.length   = 1 + (i % 32);
             wr.first_be = 4'hF;
             wr.last_be  = (wr.length > 1) ? 4'hF : 4'h0;
@@ -2844,8 +3019,9 @@ class pcie_tl_sriov_basic_test extends pcie_tl_base_test;
             int vf_idx = (i / 4) % 16;
             pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
                 $sformatf("rd_%0d", i));
+            // Match the Phase-2 write locations after widening their stride.
             rd.addr     = 64'h0000_0001_0000_0000 + (pf_idx * 64'h1000_0000) +
-                          (vf_idx * 64'h100_0000) + ((i % 5000) * 64);
+                          (vf_idx * 64'h100_0000) + ((i % 5000) * 128);
             rd.length   = 1 + (i % 16);
             rd.first_be = 4'hF;
             rd.last_be  = (rd.length > 1) ? 4'hF : 4'h0;
@@ -2853,11 +3029,79 @@ class pcie_tl_sriov_basic_test extends pcie_tl_base_test;
             rd.start(env.rc_agent.sequencer);
             total_rd++;
             #2ns;
+            pace_read_batch(total_rd, 4000, batch_limit);
         end
 
-        #50000ns;
+        wait_for_final_clean();
+        grand_total      = total_cfg + total_wr + total_rd;
+        active_functions = env.func_mgr_sriov.get_active_count();
+        tags_remaining   = env.tag_mgr.get_outstanding_count();
+        rc_pending       = env.rc_agent.rc_driver.get_pending_count();
+        scb_pending      = env.scb.pending_requests.size();
+        scb_trackers     = env.scb.cpl_trackers.size();
+
         `uvm_info("TEST23", $sformatf("=== SR-IOV Heavy DONE: cfg=%0d wr=%0d rd=%0d total=%0d ===",
-            total_cfg, total_wr, total_rd, total_cfg + total_wr + total_rd), UVM_LOW)
+            total_cfg, total_wr, total_rd, grand_total), UVM_LOW)
+        `uvm_info("TEST23", $sformatf("Active functions: %0d", active_functions), UVM_LOW)
+        `uvm_info("TEST23", $sformatf(
+            {"Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d ",
+             "scb_trackers=%0d requests=%0d completions=%0d matched=%0d ",
+             "mismatched=%0d unexpected=%0d timed_out=%0d drain_failed=%0b"},
+            tags_remaining, rc_pending, scb_pending, scb_trackers,
+            env.scb.total_requests, env.scb.total_completions, env.scb.matched,
+            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out,
+            drain_failed), UVM_LOW)
+
+        final_clean = !drain_failed;
+        if ((total_cfg != 1000) || (total_wr != 5000) ||
+            (total_rd != 4000) || (grand_total != EXPECTED_TOTAL_REQUESTS)) begin
+            `uvm_error("TEST23_FINAL", $sformatf(
+                "Phase accounting mismatch: cfg=%0d wr=%0d rd=%0d total=%0d",
+                total_cfg, total_wr, total_rd, grand_total))
+            final_clean = 0;
+        end
+        if (active_functions != 68) begin
+            `uvm_error("TEST23_FINAL", $sformatf(
+                "Expected 68 active functions, observed %0d", active_functions))
+            final_clean = 0;
+        end
+        if (tags_remaining != 0) begin
+            `uvm_error("TEST23_FINAL", $sformatf(
+                "RC tag manager still has %0d outstanding tags", tags_remaining))
+            final_clean = 0;
+        end
+        if (rc_pending != 0) begin
+            `uvm_error("TEST23_FINAL", $sformatf(
+                "RC driver still has %0d pending completions", rc_pending))
+            final_clean = 0;
+        end
+        if ((scb_pending != 0) || (scb_trackers != 0)) begin
+            `uvm_error("TEST23_FINAL", $sformatf(
+                "Scoreboard did not drain: pending=%0d trackers=%0d",
+                scb_pending, scb_trackers))
+            final_clean = 0;
+        end
+        if ((env.scb.total_requests != EXPECTED_TOTAL_REQUESTS) ||
+            (env.scb.total_completions != EXPECTED_TOTAL_COMPLETIONS) ||
+            (env.scb.matched != EXPECTED_MATCHED_REQUESTS)) begin
+            `uvm_error("TEST23_FINAL", $sformatf(
+                {"Scoreboard accounting mismatch: requests=%0d/%0d ",
+                 "completions=%0d/%0d matched=%0d/%0d"},
+                env.scb.total_requests, EXPECTED_TOTAL_REQUESTS,
+                env.scb.total_completions, EXPECTED_TOTAL_COMPLETIONS,
+                env.scb.matched, EXPECTED_MATCHED_REQUESTS))
+            final_clean = 0;
+        end
+        if ((env.scb.mismatched != 0) || (env.scb.unexpected != 0) ||
+            (env.scb.timed_out != 0)) begin
+            `uvm_error("TEST23_FINAL", $sformatf(
+                "Scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
+                env.scb.mismatched, env.scb.unexpected, env.scb.timed_out))
+            final_clean = 0;
+        end
+        if (final_clean)
+            `uvm_info("TEST23_PASS", "*** SR-IOV BASIC 10000 CLEAN PASS ***", UVM_LOW)
+
         phase.drop_objection(this);
     endtask
 endclass
@@ -2867,6 +3111,12 @@ endclass
 //=============================================================================
 class pcie_tl_pasid_prefix_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_pasid_prefix_test)
+
+    localparam int unsigned MAX_READ_BATCH    = 128;
+    localparam time         TAG_DRAIN_TIMEOUT = 500us;
+
+    bit drain_failed;
+
     function new(string name = "pcie_tl_pasid_prefix_test", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -2881,10 +3131,64 @@ class pcie_tl_pasid_prefix_test extends pcie_tl_base_test;
         cfg.response_delay_max = 2;
         cfg.cpl_timeout_ns     = 500000;
     endfunction
+
+    // Bound each non-posted launch batch by the physical tag capacity that
+    // +TAG_BIT installed on this RC, while retaining meaningful concurrency.
+    function int unsigned read_batch_limit();
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgr.max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_READ_BATCH) ? half_capacity : MAX_READ_BATCH;
+    endfunction
+
+    // Make every batch boundary a completion barrier.  The finite guard turns
+    // a missing Completion into a deterministic failure instead of a hang.
+    task wait_for_read_batch_drain(int unsigned issued);
+        time         start_time;
+        int unsigned remaining;
+
+        start_time = $time;
+        while ((env.tag_mgr.get_outstanding_count() != 0) &&
+               (($time - start_time) < TAG_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        remaining = env.tag_mgr.get_outstanding_count();
+        if (remaining != 0) begin
+            drain_failed = 1;
+            `uvm_error("TEST28_DRAIN", $sformatf(
+                "Timed out after %0t at issued=%0d with %0d RC tags outstanding",
+                TAG_DRAIN_TIMEOUT, issued, remaining))
+        end else begin
+            `uvm_info("TEST28_DRAIN", $sformatf(
+                "Read batch drained at issued=%0d", issued), UVM_MEDIUM)
+        end
+    endtask
+
+    task pace_read_batch(int unsigned issued, int unsigned total,
+                         int unsigned batch_limit);
+        if (((issued % batch_limit) == 0) || (issued == total))
+            wait_for_read_batch_drain(issued);
+    endtask
+
     task run_phase(uvm_phase phase);
-        int total_wr, total_rd;
+        int          total_wr, total_rd;
+        int unsigned batch_limit;
+        int          tags_remaining;
+        int          rc_pending;
+        int          scb_pending;
+        int          scb_trackers;
+        bit          final_clean;
+
         phase.raise_objection(this);
         `uvm_info("TEST28", "=== PASID Prefix Heavy: 10K+ TLPs ===", UVM_LOW)
+
+        drain_failed = 0;
+        batch_limit = read_batch_limit();
+        `uvm_info("TEST28", $sformatf(
+            "Read pacing: physical tag capacity=%0d, batch limit=%0d",
+            env.tag_mgr.max_outstanding, batch_limit), UVM_LOW)
 
         // Phase 1: 6000 writes with PASID prefix (varying PASID, Exe, PMR)
         `uvm_info("TEST28", "--- Phase 1: 6000 PASID writes ---", UVM_LOW)
@@ -2924,11 +3228,76 @@ class pcie_tl_pasid_prefix_test extends pcie_tl_base_test;
             rd.start(env.rc_agent.sequencer);
             total_rd++;
             #2ns;
+            pace_read_batch(i + 1, 4000, batch_limit);
         end
 
-        #50000ns;
+        tags_remaining = env.tag_mgr.get_outstanding_count();
+        rc_pending     = env.rc_agent.rc_driver.get_pending_count();
+        scb_pending    = env.scb.pending_requests.size();
+        scb_trackers   = env.scb.cpl_trackers.size();
+
         `uvm_info("TEST28", $sformatf("=== PASID Heavy DONE: wr=%0d rd=%0d total=%0d ===",
             total_wr, total_rd, total_wr + total_rd), UVM_LOW)
+        `uvm_info("TEST28", $sformatf(
+            {"Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d ",
+             "scb_trackers=%0d requests=%0d completions=%0d matched=%0d ",
+             "mismatched=%0d unexpected=%0d timed_out=%0d ",
+             "prefix_format=%0d prefix_integrity=%0d drain_failed=%0b"},
+            tags_remaining, rc_pending, scb_pending, scb_trackers,
+            env.scb.total_requests, env.scb.total_completions, env.scb.matched,
+            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out,
+            env.scb.prefix_format_errors, env.scb.prefix_integrity_errors,
+            drain_failed), UVM_LOW)
+
+        final_clean = !drain_failed;
+        if ((total_wr != 6000) || (total_rd != 4000) ||
+            ((total_wr + total_rd) != 10000)) begin
+            `uvm_error("TEST28_FINAL", $sformatf(
+                "Expected wr=6000 rd=4000 total=10000, observed wr=%0d rd=%0d total=%0d",
+                total_wr, total_rd, total_wr + total_rd))
+            final_clean = 0;
+        end
+        if (tags_remaining != 0) begin
+            `uvm_error("TEST28_FINAL", $sformatf(
+                "RC tag manager still has %0d outstanding tags", tags_remaining))
+            final_clean = 0;
+        end
+        if (rc_pending != 0) begin
+            `uvm_error("TEST28_FINAL", $sformatf(
+                "RC driver still has %0d pending completions", rc_pending))
+            final_clean = 0;
+        end
+        if ((scb_pending != 0) || (scb_trackers != 0)) begin
+            `uvm_error("TEST28_FINAL", $sformatf(
+                "Scoreboard did not drain: pending=%0d trackers=%0d",
+                scb_pending, scb_trackers))
+            final_clean = 0;
+        end
+        if ((env.scb.total_requests != 10000) ||
+            (env.scb.total_completions != 4000) ||
+            (env.scb.matched != 4000)) begin
+            `uvm_error("TEST28_FINAL", $sformatf(
+                "Scoreboard accounting mismatch: requests=%0d completions=%0d matched=%0d",
+                env.scb.total_requests, env.scb.total_completions, env.scb.matched))
+            final_clean = 0;
+        end
+        if ((env.scb.mismatched != 0) || (env.scb.unexpected != 0) ||
+            (env.scb.timed_out != 0)) begin
+            `uvm_error("TEST28_FINAL", $sformatf(
+                "Scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
+                env.scb.mismatched, env.scb.unexpected, env.scb.timed_out))
+            final_clean = 0;
+        end
+        if ((env.scb.prefix_format_errors != 0) ||
+            (env.scb.prefix_integrity_errors != 0)) begin
+            `uvm_error("TEST28_FINAL", $sformatf(
+                "Prefix errors: format=%0d integrity=%0d",
+                env.scb.prefix_format_errors, env.scb.prefix_integrity_errors))
+            final_clean = 0;
+        end
+        if (final_clean)
+            `uvm_info("TEST28_PASS", "*** PASID-PREFIX 10K CLEAN PASS ***", UVM_LOW)
+
         phase.drop_objection(this);
     endtask
 endclass
@@ -2938,6 +3307,10 @@ endclass
 //=============================================================================
 class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_multi_prefix_test)
+
+    localparam int unsigned MAX_READ_BATCH    = 128;
+    localparam time         TAG_DRAIN_TIMEOUT = 500us;
+
     function new(string name = "pcie_tl_multi_prefix_test", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -2955,11 +3328,65 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
         cfg.response_delay_max = 2;
         cfg.cpl_timeout_ns     = 500000;
     endfunction
+
+    // Keep each non-posted launch batch below the physical tag capacity that
+    // +TAG_BIT applied to this RC's owning manager.  Capping at 128 also keeps
+    // ample headroom when the physical requester has a 10-bit tag pool.
+    function int unsigned read_batch_limit();
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgr.max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_READ_BATCH) ? half_capacity : MAX_READ_BATCH;
+    endfunction
+
+    // A batch boundary is a real completion barrier, not an arbitrary delay:
+    // wait until this RC has released every outstanding tag, with a finite
+    // simulation-time guard so a missing Completion is reported and cannot
+    // hang the regression indefinitely.
+    task wait_for_read_batch_drain(string phase_name, int unsigned issued);
+        time         start_time;
+        int unsigned remaining;
+
+        start_time = $time;
+        while ((env.tag_mgr.get_outstanding_count() != 0) &&
+               (($time - start_time) < TAG_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        remaining = env.tag_mgr.get_outstanding_count();
+        if (remaining != 0) begin
+            `uvm_error("TEST32_DRAIN", $sformatf(
+                "%s timed out after %0t at issued=%0d with %0d RC tags outstanding",
+                phase_name, TAG_DRAIN_TIMEOUT, issued, remaining))
+        end else begin
+            `uvm_info("TEST32_DRAIN", $sformatf(
+                "%s drained at issued=%0d", phase_name, issued), UVM_MEDIUM)
+        end
+    endtask
+
+    task pace_read_batch(string phase_name, int unsigned issued,
+                         int unsigned total, int unsigned batch_limit);
+        if (((issued % batch_limit) == 0) || (issued == total))
+            wait_for_read_batch_drain(phase_name, issued);
+    endtask
+
     task run_phase(uvm_phase phase);
-        int total_tlps;
+        int          total_tlps;
+        int unsigned batch_limit;
+        int          tags_remaining;
+        int          rc_pending;
+        int          scb_pending;
+        int          scb_trackers;
+        bit          final_clean;
+
         phase.raise_objection(this);
         `uvm_info("TEST32", "=== Multi-Prefix Heavy: 10K+ TLPs ===", UVM_LOW)
         total_tlps = 0;
+        batch_limit = read_batch_limit();
+        `uvm_info("TEST32", $sformatf(
+            "Read pacing: physical tag capacity=%0d, batch limit=%0d",
+            env.tag_mgr.max_outstanding, batch_limit), UVM_LOW)
 
         // Phase 1: 3000 writes with MR-IOV + PASID + IDE (3 prefixes)
         `uvm_info("TEST32", "--- Phase 1: 3000 triple-prefix writes ---", UVM_LOW)
@@ -2990,7 +3417,9 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
             pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create($sformatf("wr2_%0d", i));
             pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(20'(i * 13));
             pcie_tl_prefix tph_pfx   = pcie_tl_prefix::create_ext_tph(8'(i % 256));
-            wr.addr     = 64'h0000_0003_0000_0000 + (i * 64);
+            // 128B stride covers the maximum 68B request and keeps every
+            // transfer disjoint and inside a single 4KB page.
+            wr.addr     = 64'h0000_0003_0000_0000 + (i * 128);
             wr.length   = 2 + (i % 16);
             wr.first_be = 4'hF;
             wr.last_be  = 4'hF;
@@ -3020,8 +3449,8 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
             rd.start(env.rc_agent.sequencer);
             total_tlps++;
             #2ns;
+            pace_read_batch("Phase 3 single-IDE reads", i + 1, 2000, batch_limit);
         end
-        #10000ns;
 
         // Phase 4: 2000 reads with single PASID (separate address space to avoid data mismatch)
         `uvm_info("TEST32", "--- Phase 4: 2000 single-PASID reads ---", UVM_LOW)
@@ -3039,10 +3468,52 @@ class pcie_tl_multi_prefix_test extends pcie_tl_base_test;
             rd.start(env.rc_agent.sequencer);
             total_tlps++;
             #2ns;
+            pace_read_batch("Phase 4 single-PASID reads", i + 1, 2000, batch_limit);
         end
 
-        #50000ns;
+        tags_remaining = env.tag_mgr.get_outstanding_count();
+        rc_pending     = env.rc_agent.rc_driver.get_pending_count();
+        scb_pending    = env.scb.pending_requests.size();
+        scb_trackers   = env.scb.cpl_trackers.size();
+
         `uvm_info("TEST32", $sformatf("=== Multi-Prefix Heavy DONE: %0d TLPs ===", total_tlps), UVM_LOW)
+        `uvm_info("TEST32", $sformatf(
+            "Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d scb_trackers=%0d mismatched=%0d unexpected=%0d timed_out=%0d",
+            tags_remaining, rc_pending, scb_pending, scb_trackers,
+            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out), UVM_LOW)
+
+        final_clean = 1;
+        if (total_tlps != 10000) begin
+            `uvm_error("TEST32_FINAL", $sformatf(
+                "Expected exactly 10000 TLPs, observed %0d", total_tlps))
+            final_clean = 0;
+        end
+        if (tags_remaining != 0) begin
+            `uvm_error("TEST32_FINAL", $sformatf(
+                "RC tag manager still has %0d outstanding tags", tags_remaining))
+            final_clean = 0;
+        end
+        if (rc_pending != 0) begin
+            `uvm_error("TEST32_FINAL", $sformatf(
+                "RC driver still has %0d pending completions", rc_pending))
+            final_clean = 0;
+        end
+        if ((scb_pending != 0) || (scb_trackers != 0)) begin
+            `uvm_error("TEST32_FINAL", $sformatf(
+                "Scoreboard did not drain: pending=%0d trackers=%0d",
+                scb_pending, scb_trackers))
+            final_clean = 0;
+        end
+        if ((env.scb.mismatched != 0) || (env.scb.unexpected != 0) ||
+            (env.scb.timed_out != 0)) begin
+            `uvm_error("TEST32_FINAL", $sformatf(
+                "Scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
+                env.scb.mismatched, env.scb.unexpected, env.scb.timed_out))
+            final_clean = 0;
+        end
+        if (final_clean)
+            `uvm_info("TEST32_PASS", "*** MULTI-PREFIX 10K CLEAN PASS ***", UVM_LOW)
+
         phase.drop_objection(this);
     endtask
 endclass
@@ -3052,6 +3523,12 @@ endclass
 //=============================================================================
 class pcie_tl_vf_pasid_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_vf_pasid_test)
+
+    localparam int unsigned MAX_READ_BATCH    = 128;
+    localparam time         TAG_DRAIN_TIMEOUT = 500us;
+
+    bit drain_failed;
+
     function new(string name = "pcie_tl_vf_pasid_test", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -3070,10 +3547,61 @@ class pcie_tl_vf_pasid_test extends pcie_tl_base_test;
         cfg.response_delay_max = 2;
         cfg.cpl_timeout_ns     = 500000;
     endfunction
+
+    function int unsigned read_batch_limit();
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgr.max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_READ_BATCH) ? half_capacity : MAX_READ_BATCH;
+    endfunction
+
+    task wait_for_read_batch_drain(int unsigned issued);
+        time         start_time;
+        int unsigned remaining;
+
+        start_time = $time;
+        while ((env.tag_mgr.get_outstanding_count() != 0) &&
+               (($time - start_time) < TAG_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        remaining = env.tag_mgr.get_outstanding_count();
+        if (remaining != 0) begin
+            drain_failed = 1;
+            `uvm_error("TEST33_DRAIN", $sformatf(
+                "Timed out after %0t at issued=%0d with %0d RC tags outstanding",
+                TAG_DRAIN_TIMEOUT, issued, remaining))
+        end else begin
+            `uvm_info("TEST33_DRAIN", $sformatf(
+                "Read batch drained at issued=%0d", issued), UVM_MEDIUM)
+        end
+    endtask
+
+    task pace_read_batch(int unsigned issued, int unsigned total,
+                         int unsigned batch_limit);
+        if (((issued % batch_limit) == 0) || (issued == total))
+            wait_for_read_batch_drain(issued);
+    endtask
+
     task run_phase(uvm_phase phase);
-        int total_wr, total_rd;
+        int          total_wr, total_rd;
+        int unsigned batch_limit;
+        int          active_functions;
+        int          tags_remaining;
+        int          rc_pending;
+        int          scb_pending;
+        int          scb_trackers;
+        bit          final_clean;
+
         phase.raise_objection(this);
         `uvm_info("TEST33", "=== VF+PASID Heavy: 4PF x 16VF, 10K+ TLPs ===", UVM_LOW)
+
+        drain_failed = 0;
+        batch_limit = read_batch_limit();
+        `uvm_info("TEST33", $sformatf(
+            "Read pacing: physical tag capacity=%0d, batch limit=%0d",
+            env.tag_mgr.max_outstanding, batch_limit), UVM_LOW)
 
         // Phase 1: 6000 writes, each VF gets unique PASID ranges
         `uvm_info("TEST33", "--- Phase 1: 6000 VF+PASID writes ---", UVM_LOW)
@@ -3087,7 +3615,7 @@ class pcie_tl_vf_pasid_test extends pcie_tl_base_test;
                 20'(pf_idx * 50000 + vf_idx * 1000 + (i % 1000)),
                 .exe(i[0]), .pmr(i[1]));
             wr.addr     = 64'h0000_0010_0000_0000 + (pf_idx * 64'h1000_0000) +
-                          (vf_idx * 64'h100_0000) + (i * 64);
+                          (vf_idx * 64'h100_0000) + (i * 128);
             wr.length   = 1 + (i % 32);
             wr.first_be = 4'hF;
             wr.last_be  = (wr.length > 1) ? 4'hF : 4'h0;
@@ -3112,7 +3640,7 @@ class pcie_tl_vf_pasid_test extends pcie_tl_base_test;
             pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(
                 20'(pf_idx * 50000 + vf_idx * 1000 + (i % 500)));
             rd.addr     = 64'h0000_0010_0000_0000 + (pf_idx * 64'h1000_0000) +
-                          (vf_idx * 64'h100_0000) + ((i % 6000) * 64);
+                          (vf_idx * 64'h100_0000) + ((i % 6000) * 128);
             rd.length   = 1 + (i % 16);
             rd.first_be = 4'hF;
             rd.last_be  = (rd.length > 1) ? 4'hF : 4'h0;
@@ -3122,20 +3650,102 @@ class pcie_tl_vf_pasid_test extends pcie_tl_base_test;
             rd.start(env.rc_agent.sequencer);
             total_rd++;
             #2ns;
+            pace_read_batch(total_rd, 4000, batch_limit);
         end
 
-        #50000ns;
+        active_functions = env.func_mgr_sriov.get_active_count();
+        tags_remaining   = env.tag_mgr.get_outstanding_count();
+        rc_pending       = env.rc_agent.rc_driver.get_pending_count();
+        scb_pending      = env.scb.pending_requests.size();
+        scb_trackers     = env.scb.cpl_trackers.size();
+
         `uvm_info("TEST33", $sformatf("=== VF+PASID Heavy DONE: wr=%0d rd=%0d total=%0d ===",
             total_wr, total_rd, total_wr + total_rd), UVM_LOW)
+        `uvm_info("TEST33", $sformatf("Active functions: %0d", active_functions), UVM_LOW)
+        `uvm_info("TEST33", $sformatf(
+            {"Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d ",
+             "scb_trackers=%0d requests=%0d completions=%0d matched=%0d ",
+             "mismatched=%0d unexpected=%0d timed_out=%0d ",
+             "prefix_format=%0d prefix_integrity=%0d drain_failed=%0b"},
+            tags_remaining, rc_pending, scb_pending, scb_trackers,
+            env.scb.total_requests, env.scb.total_completions, env.scb.matched,
+            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out,
+            env.scb.prefix_format_errors, env.scb.prefix_integrity_errors,
+            drain_failed), UVM_LOW)
+
+        final_clean = !drain_failed;
+        if ((total_wr != 6000) || (total_rd != 4000) ||
+            ((total_wr + total_rd) != 10000)) begin
+            `uvm_error("TEST33_FINAL", $sformatf(
+                "Expected wr=6000 rd=4000 total=10000, observed wr=%0d rd=%0d total=%0d",
+                total_wr, total_rd, total_wr + total_rd))
+            final_clean = 0;
+        end
+        if (active_functions != 68) begin
+            `uvm_error("TEST33_FINAL", $sformatf(
+                "Expected 68 active functions, observed %0d", active_functions))
+            final_clean = 0;
+        end
+        if (tags_remaining != 0) begin
+            `uvm_error("TEST33_FINAL", $sformatf(
+                "RC tag manager still has %0d outstanding tags", tags_remaining))
+            final_clean = 0;
+        end
+        if (rc_pending != 0) begin
+            `uvm_error("TEST33_FINAL", $sformatf(
+                "RC driver still has %0d pending completions", rc_pending))
+            final_clean = 0;
+        end
+        if ((scb_pending != 0) || (scb_trackers != 0)) begin
+            `uvm_error("TEST33_FINAL", $sformatf(
+                "Scoreboard did not drain: pending=%0d trackers=%0d",
+                scb_pending, scb_trackers))
+            final_clean = 0;
+        end
+        if ((env.scb.total_requests != 10000) ||
+            (env.scb.total_completions != 4000) ||
+            (env.scb.matched != 4000)) begin
+            `uvm_error("TEST33_FINAL", $sformatf(
+                "Scoreboard accounting mismatch: requests=%0d completions=%0d matched=%0d",
+                env.scb.total_requests, env.scb.total_completions, env.scb.matched))
+            final_clean = 0;
+        end
+        if ((env.scb.mismatched != 0) || (env.scb.unexpected != 0) ||
+            (env.scb.timed_out != 0)) begin
+            `uvm_error("TEST33_FINAL", $sformatf(
+                "Scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
+                env.scb.mismatched, env.scb.unexpected, env.scb.timed_out))
+            final_clean = 0;
+        end
+        if ((env.scb.prefix_format_errors != 0) ||
+            (env.scb.prefix_integrity_errors != 0)) begin
+            `uvm_error("TEST33_FINAL", $sformatf(
+                "Prefix errors: format=%0d integrity=%0d",
+                env.scb.prefix_format_errors, env.scb.prefix_integrity_errors))
+            final_clean = 0;
+        end
+        if (final_clean)
+            `uvm_info("TEST33_PASS", "*** VF+PASID 10K CLEAN PASS ***", UVM_LOW)
+
         phase.drop_objection(this);
     endtask
 endclass
 
 //=============================================================================
-// Test 35: SR-IOV + Switch Heavy (4 DSP, 4 PF x 8 VF, 15K+ TLPs)
+// Test 35: SR-IOV + Switch Heavy (4 DSP, 4 PF x 8 VF, 21K TLPs)
 //=============================================================================
 class pcie_tl_sriov_stress_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_sriov_stress_test)
+
+    localparam int unsigned MAX_NP_BATCH                = 128;
+    localparam int unsigned EXPECTED_TOTAL_REQUESTS      = 21000;
+    localparam int unsigned EXPECTED_TOTAL_COMPLETIONS   = 6808;
+    localparam int unsigned EXPECTED_MATCHED_REQUESTS    = 3000;
+    localparam int unsigned EXPECTED_SWITCH_ROUTED       = 27808;
+    localparam time         TEST35_DRAIN_TIMEOUT         = 500us;
+
+    bit drain_failed;
+
     function new(string name = "pcie_tl_sriov_stress_test", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -3169,12 +3779,116 @@ class pcie_tl_sriov_stress_test extends pcie_tl_base_test;
         cfg.response_delay_max = 2;
         cfg.cpl_timeout_ns     = 500000;
     endfunction
+
+    function int unsigned np_batch_limit();
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgr.max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_NP_BATCH) ? half_capacity : MAX_NP_BATCH;
+    endfunction
+
+    task wait_for_np_batch_drain(string phase_name, int unsigned issued);
+        time         start_time;
+        int unsigned remaining;
+
+        start_time = $time;
+        while ((env.tag_mgr.get_outstanding_count() != 0) &&
+               (($time - start_time) < TEST35_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        remaining = env.tag_mgr.get_outstanding_count();
+        if (remaining != 0) begin
+            drain_failed = 1;
+            `uvm_error("TEST35_DRAIN", $sformatf(
+                "%s timed out after %0t at issued=%0d with %0d RC tags outstanding",
+                phase_name, TEST35_DRAIN_TIMEOUT, issued, remaining))
+        end else begin
+            `uvm_info("TEST35_DRAIN", $sformatf(
+                "%s drained at issued=%0d", phase_name, issued), UVM_MEDIUM)
+        end
+    endtask
+
+    task pace_np_batch(string phase_name, int unsigned issued,
+                       int unsigned total, int unsigned batch_limit);
+        if (((issued % batch_limit) == 0) || (issued == total))
+            wait_for_np_batch_drain(phase_name, issued);
+    endtask
+
+    task issue_phase2_ep_batch(input int unsigned batch_start,
+                               input int unsigned batch_end,
+                               input int unsigned ep);
+        for (int request_idx = batch_start; request_idx < batch_end; request_idx++) begin
+            if ((request_idx % 4) == ep) begin
+                int i;
+                pcie_tl_mem_rd_seq rd;
+
+                i = request_idx / 4;
+                rd = pcie_tl_mem_rd_seq::type_id::create(
+                    $sformatf("p2_rd_e%0d_%0d", ep, i));
+                rd.addr     = cfg.switch_cfg.ds_mem_base[ep] + (i * 256);
+                rd.length   = 16 + (i % 48);
+                rd.first_be = 4'hF;
+                rd.last_be  = 4'hF;
+                rd.is_64bit = 0;
+                rd.start(env.rc_agent.sequencer);
+                #2ns;
+            end
+        end
+    endtask
+
+    task wait_for_final_clean();
+        time start_time;
+
+        start_time = $time;
+        while (((env.scb.total_requests < EXPECTED_TOTAL_REQUESTS) ||
+                (env.sw.total_routed < EXPECTED_SWITCH_ROUTED) ||
+                (env.tag_mgr.get_outstanding_count() != 0) ||
+                (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+                (env.scb.pending_requests.size() != 0) ||
+                (env.scb.cpl_trackers.size() != 0)) &&
+               (($time - start_time) < TEST35_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        if ((env.scb.total_requests < EXPECTED_TOTAL_REQUESTS) ||
+            (env.sw.total_routed < EXPECTED_SWITCH_ROUTED) ||
+            (env.tag_mgr.get_outstanding_count() != 0) ||
+            (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+            (env.scb.pending_requests.size() != 0) ||
+            (env.scb.cpl_trackers.size() != 0)) begin
+            drain_failed = 1;
+            `uvm_error("TEST35_DRAIN", $sformatf(
+                {"Final drain timed out after %0t: requests=%0d routed=%0d tags=%0d ",
+                 "rc_pending=%0d scb_pending=%0d scb_trackers=%0d"},
+                TEST35_DRAIN_TIMEOUT, env.scb.total_requests,
+                env.sw.total_routed, env.tag_mgr.get_outstanding_count(),
+                env.rc_agent.rc_driver.get_pending_count(),
+                env.scb.pending_requests.size(), env.scb.cpl_trackers.size()))
+        end
+    endtask
+
     task run_phase(uvm_phase phase);
         int p1_count, p2_count, p3_count, p4_count, p5_count;
+        int grand_total;
+        int active_functions;
+        int tags_remaining;
+        int rc_pending;
+        int scb_pending;
+        int scb_trackers;
+        int unsigned batch_limit;
+        bit [15:0] p5_pf_base_bdf;
+        bit final_clean;
         phase.raise_objection(this);
         `uvm_info("TEST35", "============================================================", UVM_LOW)
-        `uvm_info("TEST35", "=== Test 35: SR-IOV + Switch Heavy (15K+ TLPs) ===", UVM_LOW)
+        `uvm_info("TEST35", "=== Test 35: SR-IOV + Switch Heavy (21K TLPs) ===", UVM_LOW)
         `uvm_info("TEST35", "============================================================", UVM_LOW)
+        drain_failed = 0;
+        batch_limit = np_batch_limit();
+        `uvm_info("TEST35", $sformatf(
+            "NP pacing: physical tag capacity=%0d, aggregate batch limit=%0d",
+            env.tag_mgr.max_outstanding, batch_limit), UVM_LOW)
 
         // Phase 1: RC -> 4 EPs writes via Switch, 3000 per EP = 12000
         `uvm_info("TEST35", "\n--- Phase 1: RC writes 12000 (3000/EP via Switch) ---", UVM_LOW)
@@ -3186,7 +3900,7 @@ class pcie_tl_sriov_stress_test extends pcie_tl_base_test;
                     for (int i = 0; i < 3000; i++) begin
                         pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create(
                             $sformatf("p1_wr_e%0d_%0d", e, i));
-                        wr.addr     = cfg.switch_cfg.ds_mem_base[e] + (i * 64);
+                        wr.addr     = cfg.switch_cfg.ds_mem_base[e] + (i * 256);
                         wr.length   = 4 + (i % 28);
                         wr.first_be = 4'hF;
                         wr.last_be  = 4'hF;
@@ -3205,26 +3919,20 @@ class pcie_tl_sriov_stress_test extends pcie_tl_base_test;
         // Phase 2: RC -> EPs reads via Switch, 500 per EP = 2000
         `uvm_info("TEST35", "\n--- Phase 2: RC reads 2000 via Switch (multi-CplD) ---", UVM_LOW)
         p2_count = 0;
-        fork
-            for (int ep = 0; ep < 4; ep++) begin
-                automatic int e = ep;
-                fork begin
-                    for (int i = 0; i < 500; i++) begin
-                        pcie_tl_mem_rd_seq rd = pcie_tl_mem_rd_seq::type_id::create(
-                            $sformatf("p2_rd_e%0d_%0d", e, i));
-                        rd.addr     = cfg.switch_cfg.ds_mem_base[e] + ((i % 3000) * 64);
-                        rd.length   = 16 + (i % 48);
-                        rd.first_be = 4'hF;
-                        rd.last_be  = 4'hF;
-                        rd.is_64bit = 0;
-                        rd.start(env.rc_agent.sequencer);
-                        p2_count++;
-                        #2ns;
-                    end
-                end join_none
-            end
-        join
-        #30000ns;
+        for (int batch_start = 0; batch_start < 2000;
+             batch_start += batch_limit) begin
+            int batch_end;
+            batch_end = ((batch_start + batch_limit) < 2000) ?
+                        (batch_start + batch_limit) : 2000;
+            fork
+                issue_phase2_ep_batch(batch_start, batch_end, 0);
+                issue_phase2_ep_batch(batch_start, batch_end, 1);
+                issue_phase2_ep_batch(batch_start, batch_end, 2);
+                issue_phase2_ep_batch(batch_start, batch_end, 3);
+            join
+            p2_count = batch_end;
+            wait_for_np_batch_drain("Phase 2 switch reads", p2_count);
+        end
         `uvm_info("TEST35", $sformatf("Phase 2 done: %0d reads", p2_count), UVM_LOW)
 
         // Phase 3: Writes with PASID prefix via Switch, 1000 per EP = 4000
@@ -3292,34 +4000,122 @@ class pcie_tl_sriov_stress_test extends pcie_tl_base_test;
         // Phase 5: Config reads to PFs via Switch
         `uvm_info("TEST35", "\n--- Phase 5: 1000 config reads across PFs ---", UVM_LOW)
         p5_count = 0;
+        // Place the four PF functions on DSP0's secondary bus, beyond the
+        // switch ports' own 0200/0208/0210/0218 Type-1 BDFs.  This keeps every
+        // request on the routed EP path instead of terminating locally.
+        p5_pf_base_bdf = {cfg.switch_cfg.ds_secondary_bus[0], 5'h04, 3'b000};
+        if (!env.func_mgr_sriov.bind_runtime_pf_base(p5_pf_base_bdf)) begin
+            drain_failed = 1;
+            `uvm_error("TEST35_P5", $sformatf(
+                "Failed to bind SR-IOV PF base BDF to 0x%04h", p5_pf_base_bdf))
+        end
         for (int i = 0; i < 1000; i++) begin
             int pf = i % 4;
             pcie_tl_cfg_rd_seq cfg_rd = pcie_tl_cfg_rd_seq::type_id::create(
                 $sformatf("p5_cfg_%0d", i));
-            cfg_rd.completer_id = {8'h01, 5'h00, pf[2:0]};
+            cfg_rd.completer_id = p5_pf_base_bdf + pf;
+            cfg_rd.is_type1     = 1;
             cfg_rd.start(env.rc_agent.sequencer);
             p5_count++;
             #1ns;
+            pace_np_batch("Phase 5 config reads", p5_count, 1000, batch_limit);
         end
 
-        #50000ns;
-        begin
-            int grand_total = p1_count + p2_count + p3_count + p4_count + p5_count;
-            `uvm_info("TEST35", "============================================================", UVM_LOW)
-            `uvm_info("TEST35", $sformatf("Switch routed=%0d, dropped=%0d, P2P=%0d",
-                env.sw.total_routed, env.sw.total_dropped, env.sw.total_p2p), UVM_LOW)
-            `uvm_info("TEST35", $sformatf("Per-DSP fwd: [%0d, %0d, %0d, %0d]",
-                env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count,
-                env.sw.dsp[2].forwarded_count, env.sw.dsp[3].forwarded_count), UVM_LOW)
-            `uvm_info("TEST35", $sformatf("Grand total: %0d TLPs (wr=%0d rd=%0d pasid=%0d multi=%0d cfg=%0d)",
-                grand_total, p1_count, p2_count, p3_count, p4_count, p5_count), UVM_LOW)
-            if (env.sw.total_dropped == 0 && env.scb.unexpected == 0 && env.scb.mismatched == 0)
-                `uvm_info("TEST35", "*** SR-IOV + SWITCH HEAVY PASSED ***", UVM_LOW)
-            else
-                `uvm_error("TEST35", $sformatf("FAILED: dropped=%0d unexpected=%0d mismatched=%0d",
-                    env.sw.total_dropped, env.scb.unexpected, env.scb.mismatched))
-            `uvm_info("TEST35", "============================================================", UVM_LOW)
+        wait_for_final_clean();
+        grand_total     = p1_count + p2_count + p3_count + p4_count + p5_count;
+        active_functions = env.func_mgr_sriov.get_active_count();
+        tags_remaining  = env.tag_mgr.get_outstanding_count();
+        rc_pending      = env.rc_agent.rc_driver.get_pending_count();
+        scb_pending     = env.scb.pending_requests.size();
+        scb_trackers    = env.scb.cpl_trackers.size();
+
+        `uvm_info("TEST35", "============================================================", UVM_LOW)
+        `uvm_info("TEST35", $sformatf("Switch routed=%0d, dropped=%0d, P2P=%0d",
+            env.sw.total_routed, env.sw.total_dropped, env.sw.total_p2p), UVM_LOW)
+        `uvm_info("TEST35", $sformatf("Per-DSP fwd: [%0d, %0d, %0d, %0d]",
+            env.sw.dsp[0].forwarded_count, env.sw.dsp[1].forwarded_count,
+            env.sw.dsp[2].forwarded_count, env.sw.dsp[3].forwarded_count), UVM_LOW)
+        `uvm_info("TEST35", $sformatf(
+            "Grand total: %0d TLPs (wr=%0d rd=%0d pasid=%0d multi=%0d cfg=%0d)",
+            grand_total, p1_count, p2_count, p3_count, p4_count, p5_count), UVM_LOW)
+        `uvm_info("TEST35", $sformatf("Active functions: %0d", active_functions), UVM_LOW)
+        `uvm_info("TEST35", $sformatf(
+            {"Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d ",
+             "scb_trackers=%0d requests=%0d completions=%0d matched=%0d ",
+             "mismatched=%0d unexpected=%0d timed_out=%0d prefix_format=%0d ",
+             "prefix_integrity=%0d drain_failed=%0b"},
+            tags_remaining, rc_pending, scb_pending, scb_trackers,
+            env.scb.total_requests, env.scb.total_completions, env.scb.matched,
+            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out,
+            env.scb.prefix_format_errors, env.scb.prefix_integrity_errors,
+            drain_failed), UVM_LOW)
+
+        final_clean = !drain_failed;
+        if ((p1_count != 12000) || (p2_count != 2000) ||
+            (p3_count != 4000) || (p4_count != 2000) ||
+            (p5_count != 1000) || (grand_total != EXPECTED_TOTAL_REQUESTS)) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                "Phase accounting mismatch: p1=%0d p2=%0d p3=%0d p4=%0d p5=%0d total=%0d",
+                p1_count, p2_count, p3_count, p4_count, p5_count, grand_total))
+            final_clean = 0;
         end
+        if (active_functions != 36) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                "Expected 36 active functions, observed %0d", active_functions))
+            final_clean = 0;
+        end
+        if (tags_remaining != 0) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                "RC tag manager still has %0d outstanding tags", tags_remaining))
+            final_clean = 0;
+        end
+        if (rc_pending != 0) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                "RC driver still has %0d pending completions", rc_pending))
+            final_clean = 0;
+        end
+        if ((scb_pending != 0) || (scb_trackers != 0)) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                "Scoreboard did not drain: pending=%0d trackers=%0d",
+                scb_pending, scb_trackers))
+            final_clean = 0;
+        end
+        if ((env.scb.total_requests != EXPECTED_TOTAL_REQUESTS) ||
+            (env.scb.total_completions != EXPECTED_TOTAL_COMPLETIONS) ||
+            (env.scb.matched != EXPECTED_MATCHED_REQUESTS)) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                {"Scoreboard accounting mismatch: requests=%0d/%0d ",
+                 "completions=%0d/%0d matched=%0d/%0d"},
+                env.scb.total_requests, EXPECTED_TOTAL_REQUESTS,
+                env.scb.total_completions, EXPECTED_TOTAL_COMPLETIONS,
+                env.scb.matched, EXPECTED_MATCHED_REQUESTS))
+            final_clean = 0;
+        end
+        if ((env.scb.mismatched != 0) || (env.scb.unexpected != 0) ||
+            (env.scb.timed_out != 0)) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                "Scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
+                env.scb.mismatched, env.scb.unexpected, env.scb.timed_out))
+            final_clean = 0;
+        end
+        if ((env.scb.prefix_format_errors != 0) ||
+            (env.scb.prefix_integrity_errors != 0)) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                "Prefix errors: format=%0d integrity=%0d",
+                env.scb.prefix_format_errors, env.scb.prefix_integrity_errors))
+            final_clean = 0;
+        end
+        if ((env.sw.total_routed != EXPECTED_SWITCH_ROUTED) ||
+            (env.sw.total_dropped != 0)) begin
+            `uvm_error("TEST35_FINAL", $sformatf(
+                "Switch accounting mismatch: routed=%0d/%0d dropped=%0d/0",
+                env.sw.total_routed, EXPECTED_SWITCH_ROUTED,
+                env.sw.total_dropped))
+            final_clean = 0;
+        end
+        if (final_clean)
+            `uvm_info("TEST35_PASS", "*** SR-IOV+SWITCH 21000 CLEAN PASS ***", UVM_LOW)
+        `uvm_info("TEST35", "============================================================", UVM_LOW)
         phase.drop_objection(this);
     endtask
 endclass
@@ -3331,7 +4127,14 @@ endclass
 class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_rc_ep_sriov_heavy_test)
 
+    localparam int unsigned MAX_READ_BATCH              = 128;
+    localparam int unsigned EXPECTED_TOTAL_REQUESTS      = 31280;
+    localparam int unsigned EXPECTED_TOTAL_COMPLETIONS   = 23655;
+    localparam int unsigned EXPECTED_MATCHED_REQUESTS    = 11280;
+    localparam time         TEST36_DRAIN_TIMEOUT         = 500us;
+
     int p1_cfg, p2_wr, p3_rd, p4_mixed, p5_vf_disable, p6_renable;
+    bit drain_failed;
 
     function new(string name = "pcie_tl_rc_ep_sriov_heavy_test", uvm_component parent = null);
         super.new(name, parent);
@@ -3355,8 +4158,81 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
         enable_coverage();
     endfunction
 
+    function int unsigned read_batch_limit();
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgr.max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_READ_BATCH) ? half_capacity : MAX_READ_BATCH;
+    endfunction
+
+    task wait_for_read_batch_drain(string phase_name, int unsigned issued);
+        time         start_time;
+        int unsigned remaining;
+
+        start_time = $time;
+        while ((env.tag_mgr.get_outstanding_count() != 0) &&
+               (($time - start_time) < TEST36_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        remaining = env.tag_mgr.get_outstanding_count();
+        if (remaining != 0) begin
+            drain_failed = 1;
+            `uvm_error("TEST36_DRAIN", $sformatf(
+                "%s timed out after %0t at issued=%0d with %0d RC tags outstanding",
+                phase_name, TEST36_DRAIN_TIMEOUT, issued, remaining))
+        end else begin
+            `uvm_info("TEST36_DRAIN", $sformatf(
+                "%s drained at issued=%0d", phase_name, issued), UVM_MEDIUM)
+        end
+    endtask
+
+    task pace_read_batch(string phase_name, int unsigned issued,
+                         int unsigned total, int unsigned batch_limit);
+        if (((issued % batch_limit) == 0) || (issued == total))
+            wait_for_read_batch_drain(phase_name, issued);
+    endtask
+
+    task wait_for_final_clean();
+        time start_time;
+
+        start_time = $time;
+        while (((env.scb.total_requests < EXPECTED_TOTAL_REQUESTS) ||
+                (env.tag_mgr.get_outstanding_count() != 0) ||
+                (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+                (env.scb.pending_requests.size() != 0) ||
+                (env.scb.cpl_trackers.size() != 0)) &&
+               (($time - start_time) < TEST36_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        if ((env.scb.total_requests < EXPECTED_TOTAL_REQUESTS) ||
+            (env.tag_mgr.get_outstanding_count() != 0) ||
+            (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+            (env.scb.pending_requests.size() != 0) ||
+            (env.scb.cpl_trackers.size() != 0)) begin
+            drain_failed = 1;
+            `uvm_error("TEST36_DRAIN", $sformatf(
+                {"Final drain timed out after %0t: requests=%0d tags=%0d ",
+                 "rc_pending=%0d scb_pending=%0d scb_trackers=%0d"},
+                TEST36_DRAIN_TIMEOUT, env.scb.total_requests,
+                env.tag_mgr.get_outstanding_count(),
+                env.rc_agent.rc_driver.get_pending_count(),
+                env.scb.pending_requests.size(), env.scb.cpl_trackers.size()))
+        end
+    endtask
+
     task run_phase(uvm_phase phase);
-        int grand_total;
+        int          grand_total;
+        int          p4_reads_issued;
+        int unsigned batch_limit;
+        int          active_functions;
+        int          tags_remaining;
+        int          rc_pending;
+        int          scb_pending;
+        int          scb_trackers;
+        bit          final_clean;
         realtime t_start, t_end;
         phase.raise_objection(this);
 
@@ -3364,11 +4240,15 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
         `uvm_info("TEST36", "=== Test 36: RC->EP SR-IOV Heavy (8PF x 32VF, 30K+ TLPs) ===", UVM_LOW)
         `uvm_info("TEST36", "============================================================", UVM_LOW)
         t_start = $realtime;
+        drain_failed = 0;
+        batch_limit = read_batch_limit();
+        `uvm_info("TEST36", $sformatf(
+            "Read pacing: physical tag capacity=%0d, batch limit=%0d",
+            env.tag_mgr.max_outstanding, batch_limit), UVM_LOW)
 
         //--------------------------------------------------------------
-        // Phase 1: Config enumeration — read all 264 functions (3 rounds = 792)
-        // Then write config to each PF's SR-IOV registers (208 writes)
-        // Total: ~1000 config TLPs
+        // Phase 1: three Config reads per PF plus one per VF
+        // Total: (3 * 8 PFs) + 256 VFs = 280 Config reads
         //--------------------------------------------------------------
         `uvm_info("TEST36", "\n--- Phase 1: Config enumeration of all 264 functions ---", UVM_LOW)
         p1_cfg = 0;
@@ -3399,7 +4279,7 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
             #10ns;
         end
 
-        // Config read from every VF (32 VFs per PF x 8 PFs = 256 VFs, 3 regs each = 768)
+        // Config read from every VF (32 VFs per PF x 8 PFs = 256 reads)
         for (int pf = 0; pf < 8; pf++) begin
             for (int vf = 0; vf < 32; vf++) begin
                 pcie_tl_cfg_rd_seq cfg_rd;
@@ -3466,8 +4346,8 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
             rd.start(env.rc_agent.sequencer);
             p3_rd++;
             #2ns;
+            pace_read_batch("Phase 3 VF reads", p3_rd, 8000, batch_limit);
         end
-        #50000ns;
         `uvm_info("TEST36", $sformatf("Phase 3 done: %0d reads", p3_rd), UVM_LOW)
 
         //--------------------------------------------------------------
@@ -3476,6 +4356,7 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
         //--------------------------------------------------------------
         `uvm_info("TEST36", "\n--- Phase 4: 6000 interleaved R/W across VFs ---", UVM_LOW)
         p4_mixed = 0;
+        p4_reads_issued = 0;
         for (int i = 0; i < 6000; i++) begin
             int pf_idx = i % 8;
             int vf_idx = (i / 8) % 32;
@@ -3502,11 +4383,13 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
                 rd.last_be  = 4'hF;
                 rd.is_64bit = 1;
                 rd.start(env.rc_agent.sequencer);
+                p4_reads_issued++;
+                pace_read_batch("Phase 4 interleaved reads",
+                                p4_reads_issued, 3000, batch_limit);
             end
             p4_mixed++;
             #1ns;
         end
-        #50000ns;
         `uvm_info("TEST36", $sformatf("Phase 4 done: %0d mixed TLPs", p4_mixed), UVM_LOW)
 
         //--------------------------------------------------------------
@@ -3561,9 +4444,9 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
         `uvm_info("TEST36", $sformatf("Phase 5 done: %0d config TLPs (disable test)", p5_vf_disable), UVM_LOW)
 
         //--------------------------------------------------------------
-        // Phase 6: Re-enable VFs and verify traffic resumes — 3000 TLPs
+        // Phase 6: Re-enable VFs and verify traffic resumes — 5000 TLPs
         //--------------------------------------------------------------
-        `uvm_info("TEST36", "\n--- Phase 6: Re-enable VFs + 3000 writes ---", UVM_LOW)
+        `uvm_info("TEST36", "\n--- Phase 6: Re-enable VFs + 5000 writes ---", UVM_LOW)
         p6_renable = 0;
 
         // Re-enable VFs on PF0-3
@@ -3579,7 +4462,7 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
             wr.addr     = 64'h0000_0003_0000_0000 +
                           (pf_idx * 64'h1000_0000) +
                           (vf_idx * 64'h10_0000) +
-                          (i * 64);
+                          (i * 128);
             wr.length   = 4 + (i % 28);
             wr.first_be = 4'hF;
             wr.last_be  = 4'hF;
@@ -3589,7 +4472,7 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
             #1ns;
         end
 
-        #50000ns;
+        wait_for_final_clean();
         `uvm_info("TEST36", $sformatf("Phase 6 done: %0d writes after re-enable", p6_renable), UVM_LOW)
 
         //--------------------------------------------------------------
@@ -3597,6 +4480,12 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
         //--------------------------------------------------------------
         t_end = $realtime;
         grand_total = p1_cfg + p2_wr + p3_rd + p4_mixed + p5_vf_disable + p6_renable;
+        active_functions = env.func_mgr_sriov.get_active_count();
+        tags_remaining   = env.tag_mgr.get_outstanding_count();
+        rc_pending       = env.rc_agent.rc_driver.get_pending_count();
+        scb_pending      = env.scb.pending_requests.size();
+        scb_trackers     = env.scb.cpl_trackers.size();
+
         `uvm_info("TEST36", "============================================================", UVM_LOW)
         `uvm_info("TEST36", $sformatf("Elapsed: %0t", t_end - t_start), UVM_LOW)
         `uvm_info("TEST36", $sformatf("Grand total: %0d TLPs", grand_total), UVM_LOW)
@@ -3606,13 +4495,70 @@ class pcie_tl_rc_ep_sriov_heavy_test extends pcie_tl_base_test;
         `uvm_info("TEST36", $sformatf("  Phase 4 (interleaved):   %0d", p4_mixed), UVM_LOW)
         `uvm_info("TEST36", $sformatf("  Phase 5 (disable/UR):    %0d", p5_vf_disable), UVM_LOW)
         `uvm_info("TEST36", $sformatf("  Phase 6 (re-enable):     %0d", p6_renable), UVM_LOW)
-        `uvm_info("TEST36", $sformatf("Active functions: %0d",
-            env.func_mgr_sriov.get_active_count()), UVM_LOW)
-        if (env.scb.mismatched == 0)
-            `uvm_info("TEST36", "*** RC->EP SR-IOV HEAVY PASSED ***", UVM_LOW)
-        else
-            `uvm_error("TEST36", $sformatf("FAILED: mismatched=%0d unexpected=%0d",
-                env.scb.mismatched, env.scb.unexpected))
+        `uvm_info("TEST36", $sformatf("Active functions: %0d", active_functions), UVM_LOW)
+        `uvm_info("TEST36", $sformatf(
+            {"Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d ",
+             "scb_trackers=%0d requests=%0d completions=%0d matched=%0d ",
+             "mismatched=%0d unexpected=%0d timed_out=%0d drain_failed=%0b"},
+            tags_remaining, rc_pending, scb_pending, scb_trackers,
+            env.scb.total_requests, env.scb.total_completions, env.scb.matched,
+            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out,
+            drain_failed), UVM_LOW)
+
+        final_clean = !drain_failed;
+        if ((p1_cfg != 280) || (p2_wr != 10000) || (p3_rd != 8000) ||
+            (p4_mixed != 6000) || (p4_reads_issued != 3000) ||
+            (p5_vf_disable != 2000) || (p6_renable != 5000) ||
+            (grand_total != EXPECTED_TOTAL_REQUESTS)) begin
+            `uvm_error("TEST36_FINAL", $sformatf(
+                {"Phase accounting mismatch: p1=%0d p2=%0d p3=%0d p4=%0d ",
+                 "p4_reads=%0d p5=%0d p6=%0d total=%0d"},
+                p1_cfg, p2_wr, p3_rd, p4_mixed, p4_reads_issued,
+                p5_vf_disable, p6_renable, grand_total))
+            final_clean = 0;
+        end
+        if (active_functions != 264) begin
+            `uvm_error("TEST36_FINAL", $sformatf(
+                "Expected 264 active functions after re-enable, observed %0d",
+                active_functions))
+            final_clean = 0;
+        end
+        if (tags_remaining != 0) begin
+            `uvm_error("TEST36_FINAL", $sformatf(
+                "RC tag manager still has %0d outstanding tags", tags_remaining))
+            final_clean = 0;
+        end
+        if (rc_pending != 0) begin
+            `uvm_error("TEST36_FINAL", $sformatf(
+                "RC driver still has %0d pending completions", rc_pending))
+            final_clean = 0;
+        end
+        if ((scb_pending != 0) || (scb_trackers != 0)) begin
+            `uvm_error("TEST36_FINAL", $sformatf(
+                "Scoreboard did not drain: pending=%0d trackers=%0d",
+                scb_pending, scb_trackers))
+            final_clean = 0;
+        end
+        if ((env.scb.total_requests != EXPECTED_TOTAL_REQUESTS) ||
+            (env.scb.total_completions != EXPECTED_TOTAL_COMPLETIONS) ||
+            (env.scb.matched != EXPECTED_MATCHED_REQUESTS)) begin
+            `uvm_error("TEST36_FINAL", $sformatf(
+                {"Scoreboard accounting mismatch: requests=%0d/%0d ",
+                 "completions=%0d/%0d matched=%0d/%0d"},
+                env.scb.total_requests, EXPECTED_TOTAL_REQUESTS,
+                env.scb.total_completions, EXPECTED_TOTAL_COMPLETIONS,
+                env.scb.matched, EXPECTED_MATCHED_REQUESTS))
+            final_clean = 0;
+        end
+        if ((env.scb.mismatched != 0) || (env.scb.unexpected != 0) ||
+            (env.scb.timed_out != 0)) begin
+            `uvm_error("TEST36_FINAL", $sformatf(
+                "Scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
+                env.scb.mismatched, env.scb.unexpected, env.scb.timed_out))
+            final_clean = 0;
+        end
+        if (final_clean)
+            `uvm_info("TEST36_PASS", "*** RC->EP SR-IOV 31280 CLEAN PASS ***", UVM_LOW)
         `uvm_info("TEST36", "============================================================", UVM_LOW)
         phase.drop_objection(this);
     endtask
@@ -3624,7 +4570,14 @@ endclass
 class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
     `uvm_component_utils(pcie_tl_rc_ep_sriov_prefix_heavy_test)
 
+    localparam int unsigned MAX_READ_BATCH              = 128;
+    localparam int unsigned EXPECTED_TOTAL_REQUESTS      = 20000;
+    localparam int unsigned EXPECTED_TOTAL_COMPLETIONS   = 9000;
+    localparam int unsigned EXPECTED_MATCHED_REQUESTS    = 7000;
+    localparam time         TEST37_DRAIN_TIMEOUT         = 500us;
+
     int p1_pasid_wr, p2_pasid_rd, p3_multi_wr, p4_ide_wr, p5_tph_wr, p6_mixed;
+    bit drain_failed;
 
     function new(string name = "pcie_tl_rc_ep_sriov_prefix_heavy_test", uvm_component parent = null);
         super.new(name, parent);
@@ -3650,8 +4603,80 @@ class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
         enable_coverage();
     endfunction
 
+    function int unsigned read_batch_limit();
+        int unsigned half_capacity;
+        half_capacity = env.tag_mgr.max_outstanding / 2;
+        if (half_capacity == 0)
+            return 1;
+        return (half_capacity < MAX_READ_BATCH) ? half_capacity : MAX_READ_BATCH;
+    endfunction
+
+    task wait_for_read_batch_drain(string phase_name, int unsigned issued);
+        time         start_time;
+        int unsigned remaining;
+
+        start_time = $time;
+        while ((env.tag_mgr.get_outstanding_count() != 0) &&
+               (($time - start_time) < TEST37_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        remaining = env.tag_mgr.get_outstanding_count();
+        if (remaining != 0) begin
+            drain_failed = 1;
+            `uvm_error("TEST37_DRAIN", $sformatf(
+                "%s timed out after %0t at issued=%0d with %0d RC tags outstanding",
+                phase_name, TEST37_DRAIN_TIMEOUT, issued, remaining))
+        end else begin
+            `uvm_info("TEST37_DRAIN", $sformatf(
+                "%s drained at issued=%0d", phase_name, issued), UVM_MEDIUM)
+        end
+    endtask
+
+    task pace_read_batch(string phase_name, int unsigned issued,
+                         int unsigned total, int unsigned batch_limit);
+        if (((issued % batch_limit) == 0) || (issued == total))
+            wait_for_read_batch_drain(phase_name, issued);
+    endtask
+
+    task wait_for_final_clean();
+        time start_time;
+
+        start_time = $time;
+        while (((env.scb.total_requests < EXPECTED_TOTAL_REQUESTS) ||
+                (env.tag_mgr.get_outstanding_count() != 0) ||
+                (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+                (env.scb.pending_requests.size() != 0) ||
+                (env.scb.cpl_trackers.size() != 0)) &&
+               (($time - start_time) < TEST37_DRAIN_TIMEOUT)) begin
+            #100ns;
+        end
+
+        if ((env.scb.total_requests < EXPECTED_TOTAL_REQUESTS) ||
+            (env.tag_mgr.get_outstanding_count() != 0) ||
+            (env.rc_agent.rc_driver.get_pending_count() != 0) ||
+            (env.scb.pending_requests.size() != 0) ||
+            (env.scb.cpl_trackers.size() != 0)) begin
+            drain_failed = 1;
+            `uvm_error("TEST37_DRAIN", $sformatf(
+                {"Final drain timed out after %0t: requests=%0d tags=%0d ",
+                 "rc_pending=%0d scb_pending=%0d scb_trackers=%0d"},
+                TEST37_DRAIN_TIMEOUT, env.scb.total_requests,
+                env.tag_mgr.get_outstanding_count(),
+                env.rc_agent.rc_driver.get_pending_count(),
+                env.scb.pending_requests.size(), env.scb.cpl_trackers.size()))
+        end
+    endtask
+
     task run_phase(uvm_phase phase);
-        int grand_total;
+        int          grand_total;
+        int unsigned batch_limit;
+        int          active_functions;
+        int          tags_remaining;
+        int          rc_pending;
+        int          scb_pending;
+        int          scb_trackers;
+        bit          final_clean;
         realtime t_start, t_end;
         phase.raise_objection(this);
 
@@ -3659,6 +4684,11 @@ class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
         `uvm_info("TEST37", "=== Test 37: RC->EP SR-IOV+Prefix Heavy (8PF x 32VF, 20K+) ===", UVM_LOW)
         `uvm_info("TEST37", "============================================================", UVM_LOW)
         t_start = $realtime;
+        drain_failed = 0;
+        batch_limit = read_batch_limit();
+        `uvm_info("TEST37", $sformatf(
+            "Read pacing: physical tag capacity=%0d, batch limit=%0d",
+            env.tag_mgr.max_outstanding, batch_limit), UVM_LOW)
 
         //--------------------------------------------------------------
         // Phase 1: 5000 writes with PASID prefix, unique PASID per VF
@@ -3715,8 +4745,8 @@ class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
             rd.start(env.rc_agent.sequencer);
             p2_pasid_rd++;
             #2ns;
+            pace_read_batch("Phase 2 PASID reads", p2_pasid_rd, 4000, batch_limit);
         end
-        #30000ns;
         `uvm_info("TEST37", $sformatf("Phase 2 done: %0d PASID reads", p2_pasid_rd), UVM_LOW)
 
         //--------------------------------------------------------------
@@ -3733,10 +4763,12 @@ class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
             pcie_tl_prefix pasid_pfx = pcie_tl_prefix::create_pasid(20'(i * 7 + pf_idx));
             pcie_tl_prefix ide_pfx   = pcie_tl_prefix::create_ide(
                 i[0], 8'(i % 64), i[1], 1, i[2]);
+            // 128B stride covers the maximum 124B transfer, keeping every
+            // request disjoint and within a single 4KB page.
             wr.addr     = 64'h0000_0020_0000_0000 +
                           (pf_idx * 64'h1000_0000) +
                           (vf_idx * 64'h10_0000) +
-                          (i * 64);
+                          (i * 128);
             wr.length   = 4 + (i % 28);
             wr.first_be = 4'hF;
             wr.last_be  = 4'hF;
@@ -3764,10 +4796,11 @@ class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
                 $sformatf("p4_wr_%0d", i));
             pcie_tl_prefix ide_pfx = pcie_tl_prefix::create_ide(
                 i[3], 8'(i % 128), i[0], i[1], i[2]);
+            // The 128B stride also makes the maximum 68B IDE write 4KB-safe.
             wr.addr     = 64'h0000_0030_0000_0000 +
                           (pf_idx * 64'h1000_0000) +
                           (vf_idx * 64'h10_0000) +
-                          (i * 64);
+                          (i * 128);
             wr.length   = 2 + (i % 16);
             wr.first_be = 4'hF;
             wr.last_be  = 4'hF;
@@ -3859,9 +4892,10 @@ class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
             rd.start(env.rc_agent.sequencer);
             p6_mixed++;
             #2ns;
+            pace_read_batch("Phase 6 mixed-prefix reads", p6_mixed, 3000, batch_limit);
         end
 
-        #50000ns;
+        wait_for_final_clean();
         `uvm_info("TEST37", $sformatf("Phase 6 done: %0d mixed-prefix reads", p6_mixed), UVM_LOW)
 
         //--------------------------------------------------------------
@@ -3869,6 +4903,12 @@ class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
         //--------------------------------------------------------------
         t_end = $realtime;
         grand_total = p1_pasid_wr + p2_pasid_rd + p3_multi_wr + p4_ide_wr + p5_tph_wr + p6_mixed;
+        active_functions = env.func_mgr_sriov.get_active_count();
+        tags_remaining   = env.tag_mgr.get_outstanding_count();
+        rc_pending       = env.rc_agent.rc_driver.get_pending_count();
+        scb_pending      = env.scb.pending_requests.size();
+        scb_trackers     = env.scb.cpl_trackers.size();
+
         `uvm_info("TEST37", "============================================================", UVM_LOW)
         `uvm_info("TEST37", $sformatf("Elapsed: %0t", t_end - t_start), UVM_LOW)
         `uvm_info("TEST37", $sformatf("Grand total: %0d TLPs", grand_total), UVM_LOW)
@@ -3879,13 +4919,78 @@ class pcie_tl_rc_ep_sriov_prefix_heavy_test extends pcie_tl_base_test;
         `uvm_info("TEST37", $sformatf("  Phase 5 (TPH+PASID):    %0d", p5_tph_wr), UVM_LOW)
         `uvm_info("TEST37", $sformatf("  Phase 6 (mixed rd):     %0d", p6_mixed), UVM_LOW)
         `uvm_info("TEST37", $sformatf("Prefix types covered: PASID, IDE, ExtTPH, MR-IOV, combos"), UVM_LOW)
-        `uvm_info("TEST37", $sformatf("Active functions: %0d",
-            env.func_mgr_sriov.get_active_count()), UVM_LOW)
-        if (env.scb.mismatched == 0)
-            `uvm_info("TEST37", "*** RC->EP SR-IOV+PREFIX HEAVY PASSED ***", UVM_LOW)
-        else
-            `uvm_error("TEST37", $sformatf("FAILED: mismatched=%0d unexpected=%0d",
-                env.scb.mismatched, env.scb.unexpected))
+        `uvm_info("TEST37", $sformatf("Active functions: %0d", active_functions), UVM_LOW)
+        `uvm_info("TEST37", $sformatf(
+            {"Final clean state: tags=%0d rc_pending=%0d scb_pending=%0d ",
+             "scb_trackers=%0d requests=%0d completions=%0d matched=%0d ",
+             "mismatched=%0d unexpected=%0d timed_out=%0d prefix_format=%0d ",
+             "prefix_integrity=%0d drain_failed=%0b"},
+            tags_remaining, rc_pending, scb_pending, scb_trackers,
+            env.scb.total_requests, env.scb.total_completions, env.scb.matched,
+            env.scb.mismatched, env.scb.unexpected, env.scb.timed_out,
+            env.scb.prefix_format_errors, env.scb.prefix_integrity_errors,
+            drain_failed), UVM_LOW)
+
+        final_clean = !drain_failed;
+        if ((p1_pasid_wr != 5000) || (p2_pasid_rd != 4000) ||
+            (p3_multi_wr != 3000) || (p4_ide_wr != 3000) ||
+            (p5_tph_wr != 2000) || (p6_mixed != 3000) ||
+            (grand_total != EXPECTED_TOTAL_REQUESTS)) begin
+            `uvm_error("TEST37_FINAL", $sformatf(
+                {"Phase accounting mismatch: p1=%0d p2=%0d p3=%0d p4=%0d ",
+                 "p5=%0d p6=%0d total=%0d"},
+                p1_pasid_wr, p2_pasid_rd, p3_multi_wr, p4_ide_wr,
+                p5_tph_wr, p6_mixed, grand_total))
+            final_clean = 0;
+        end
+        if (active_functions != 264) begin
+            `uvm_error("TEST37_FINAL", $sformatf(
+                "Expected 264 active functions, observed %0d", active_functions))
+            final_clean = 0;
+        end
+        if (tags_remaining != 0) begin
+            `uvm_error("TEST37_FINAL", $sformatf(
+                "RC tag manager still has %0d outstanding tags", tags_remaining))
+            final_clean = 0;
+        end
+        if (rc_pending != 0) begin
+            `uvm_error("TEST37_FINAL", $sformatf(
+                "RC driver still has %0d pending completions", rc_pending))
+            final_clean = 0;
+        end
+        if ((scb_pending != 0) || (scb_trackers != 0)) begin
+            `uvm_error("TEST37_FINAL", $sformatf(
+                "Scoreboard did not drain: pending=%0d trackers=%0d",
+                scb_pending, scb_trackers))
+            final_clean = 0;
+        end
+        if ((env.scb.total_requests != EXPECTED_TOTAL_REQUESTS) ||
+            (env.scb.total_completions != EXPECTED_TOTAL_COMPLETIONS) ||
+            (env.scb.matched != EXPECTED_MATCHED_REQUESTS)) begin
+            `uvm_error("TEST37_FINAL", $sformatf(
+                {"Scoreboard accounting mismatch: requests=%0d/%0d ",
+                 "completions=%0d/%0d matched=%0d/%0d"},
+                env.scb.total_requests, EXPECTED_TOTAL_REQUESTS,
+                env.scb.total_completions, EXPECTED_TOTAL_COMPLETIONS,
+                env.scb.matched, EXPECTED_MATCHED_REQUESTS))
+            final_clean = 0;
+        end
+        if ((env.scb.mismatched != 0) || (env.scb.unexpected != 0) ||
+            (env.scb.timed_out != 0)) begin
+            `uvm_error("TEST37_FINAL", $sformatf(
+                "Scoreboard errors: mismatched=%0d unexpected=%0d timed_out=%0d",
+                env.scb.mismatched, env.scb.unexpected, env.scb.timed_out))
+            final_clean = 0;
+        end
+        if ((env.scb.prefix_format_errors != 0) ||
+            (env.scb.prefix_integrity_errors != 0)) begin
+            `uvm_error("TEST37_FINAL", $sformatf(
+                "Prefix errors: format=%0d integrity=%0d",
+                env.scb.prefix_format_errors, env.scb.prefix_integrity_errors))
+            final_clean = 0;
+        end
+        if (final_clean)
+            `uvm_info("TEST37_PASS", "*** RC->EP SR-IOV+PREFIX 20000 CLEAN PASS ***", UVM_LOW)
         `uvm_info("TEST37", "============================================================", UVM_LOW)
         phase.drop_objection(this);
     endtask
