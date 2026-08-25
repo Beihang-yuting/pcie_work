@@ -114,9 +114,31 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
     end
     foreach (primary_ports[i]) begin
       string peer_link_id;
+      string expected_rc_node_id;
+      string expected_ep_node_id;
       pcie_topology_link_cfg peer_link;
+      pcie_topology_node_cfg expected_rc_node;
+      pcie_topology_node_cfg expected_ep_node;
+      expected_rc_node_id = $sformatf("RC_%0d", i);
+      expected_ep_node_id = $sformatf("EP_%0d", i);
       peer_link_id = $sformatf("PEER_LINK_%0d",
                                primary_ports[i].slot_index);
+      expected_rc_node = peer_topology.find_node(expected_rc_node_id);
+      expected_ep_node = peer_topology.find_node(expected_ep_node_id);
+      require(expected_rc_node != null,
+              $sformatf("%s omitted exact peer node %s", profile_name,
+                        expected_rc_node_id));
+      if (expected_rc_node != null)
+        require(expected_rc_node.kind == PCIE_TOPO_NODE_RC,
+                $sformatf("%s peer node %s is not an RC", profile_name,
+                          expected_rc_node_id));
+      require(expected_ep_node != null,
+              $sformatf("%s omitted exact peer node %s", profile_name,
+                        expected_ep_node_id));
+      if (expected_ep_node != null)
+        require(expected_ep_node.kind == PCIE_TOPO_NODE_EP,
+                $sformatf("%s peer node %s is not an EP", profile_name,
+                          expected_ep_node_id));
       peer_link = null;
       foreach (peer_topology.links[j]) begin
         if ((peer_topology.links[j] != null) &&
@@ -130,6 +152,11 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
                 peer_link.link_width == primary_ports[i].physical_width &&
                 peer_link.max_gen == primary_ports[i].max_gen,
                 $sformatf("%s physical parameters mismatch", peer_link_id));
+        require(peer_link.upstream_node_id == expected_rc_node_id &&
+                peer_link.downstream_node_id == expected_ep_node_id,
+                $sformatf("%s does not connect exact pair %s/%s",
+                          peer_link_id, expected_rc_node_id,
+                          expected_ep_node_id));
       end
       require(peer_policy.hdl_slot_by_link.exists(peer_link_id) &&
               peer_policy.hdl_slot_by_link[peer_link_id] ==
@@ -462,9 +489,13 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
       ports, peer_topology, peer_policy, errors);
     require(errors.size() == 0 && peer_topology.links.size() == 1 &&
             peer_topology.links[0].link_id == "PEER_LINK_1" &&
+            peer_topology.links[0].upstream_node_id == "RC_0" &&
+            peer_topology.links[0].downstream_node_id == "EP_0" &&
+            peer_topology.find_node("RC_0") != null &&
+            peer_topology.find_node("EP_0") != null &&
             peer_policy.hdl_slot_by_link.exists("PEER_LINK_1") &&
             peer_policy.hdl_slot_by_link["PEER_LINK_1"] == 1,
-            "peer fixture compacted disabled primary slot gap");
+            "peer fixture pair index or disabled primary slot gap is wrong");
     adapter.translate(peer_topology, peer_policy, invalid_primary_ports,
                       errors);
     require(errors.size() == 0 && invalid_primary_ports.size() == 1 &&

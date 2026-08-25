@@ -81,8 +81,8 @@ class pcie_svt_peer_fixture_builder extends uvm_object;
       string ep_node_id;
       string peer_link_id;
 
-      rc_node_id = $sformatf("PEER_RC_%0d", primary_ports[i].slot_index);
-      ep_node_id = $sformatf("PEER_EP_%0d", primary_ports[i].slot_index);
+      rc_node_id = $sformatf("RC_%0d", i);
+      ep_node_id = $sformatf("EP_%0d", i);
       peer_link_id = $sformatf("PEER_LINK_%0d",
                                primary_ports[i].slot_index);
       builder.add_rc(rc_node_id);
