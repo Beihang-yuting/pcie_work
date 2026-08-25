@@ -21,4 +21,5 @@
 ../uvm/pcie_svt_topology_pkg.sv
 ../uvm/tests/pcie_svt_topology_model_unit_test.sv
 ../uvm/tests/pcie_svt_topology_adapter_unit_test.sv
+../uvm/tests/pcie_svt_cli_parser_unit_test.sv
 ../rtl/pcie_svt_topology_top.sv
