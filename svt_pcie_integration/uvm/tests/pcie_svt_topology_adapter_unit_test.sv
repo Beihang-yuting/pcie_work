@@ -38,6 +38,9 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
     require(error_contains(errors, expected_fragment),
             $sformatf("%s omitted expected diagnostic '%s'", label,
                       expected_fragment));
+    require(ports.size() == 0,
+            $sformatf("%s returned %0d non-atomic descriptors", label,
+                      ports.size()));
   endtask
 
   task run_phase(uvm_phase phase);
@@ -46,6 +49,11 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
     pcie_svt_topology_policy_cfg policy;
     pcie_svt_topology_policy_cfg disabled_policy;
     pcie_svt_topology_policy_cfg invalid_policy;
+    pcie_svt_topology_policy_cfg mapped_policy;
+    pcie_svt_topology_policy_cfg propagation_policy;
+    pcie_topology_cfg invalid_topology;
+    pcie_topology_cfg disabled_link_topology;
+    pcie_topology_link_cfg disabled_link;
     pcie_svt_link_override_cfg override_cfg;
     pcie_svt_port_descriptor ports[$];
     string errors[$];
@@ -61,6 +69,7 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
     expected_switch_ids[4] = "SW0_DSP3_EP3";
 
     topology = pcie_topology_builder::build_switch_1x16_4x4(5);
+    topology.links.reverse();
     policy = pcie_svt_topology_policy_cfg::type_id::create("switch_policy");
     policy.init_defaults();
     policy.dut_node_ids.push_back("SW0");
@@ -118,6 +127,7 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
     end
 
     topology = pcie_topology_builder::build_ep_2x8(5);
+    topology.links.reverse();
     policy = pcie_svt_topology_policy_cfg::type_id::create("ep_2x8_policy");
     policy.init_defaults();
     policy.dut_node_ids.push_back("EP0");
@@ -146,6 +156,82 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
       end
     end
 
+    $cast(mapped_policy, policy.clone());
+    mapped_policy.hdl_slot_by_link["RC0_EP0"] = 1;
+    mapped_policy.hdl_slot_by_link["RC1_EP1"] = 0;
+    adapter.translate(topology, mapped_policy, ports, errors);
+    require(errors.size() == 0, "non-identity HDL-slot map was rejected");
+    require(ports.size() == 2,
+            "non-identity HDL-slot map changed the descriptor count");
+    if (ports.size() == 2) begin
+      require(ports[0].link_id == "RC0_EP0" &&
+              ports[1].link_id == "RC1_EP1",
+              "non-identity HDL-slot map changed lexical link order");
+      require(ports[0].slot_index == 1 &&
+              ports[0].vif_key == "primary_vif_1",
+              "non-identity HDL-slot map did not remap RC0_EP0");
+      require(ports[1].slot_index == 0 &&
+              ports[1].vif_key == "primary_vif_0",
+              "non-identity HDL-slot map did not remap RC1_EP1");
+      require(ports[0].root_hierarchy == 0 &&
+              ports[1].root_hierarchy == 1,
+              "HDL-slot mapping changed physical root hierarchies");
+    end
+
+    $cast(propagation_policy, policy.clone());
+    propagation_policy.cfg_timeout = 11us;
+    propagation_policy.link_timeout = 12us;
+    propagation_policy.enum_timeout = 14us;
+    propagation_policy.traffic_timeout = 15us;
+    propagation_policy.ep_bars[0].initial_base = 64'd33554432;
+    override_cfg = pcie_svt_link_override_cfg::type_id::create(
+      "combined_override");
+    override_cfg.link_id = "RC0_EP0";
+    override_cfg.has_width = 1'b1;
+    override_cfg.link_width = 4;
+    override_cfg.has_gen = 1'b1;
+    override_cfg.max_gen = 4;
+    override_cfg.has_fast_link_training = 1'b1;
+    override_cfg.fast_link_training = 1'b1;
+    override_cfg.has_link_timeout = 1'b1;
+    override_cfg.link_timeout = 13us;
+    propagation_policy.link_overrides.push_back(override_cfg);
+    adapter.translate(topology, propagation_policy, ports, errors);
+    require(errors.size() == 0, "legal combined override was rejected");
+    require(ports.size() == 2,
+            "legal combined override changed the descriptor count");
+    if (ports.size() == 2) begin
+      require(ports[0].link_width == 4 && ports[0].max_gen == 4 &&
+              ports[0].fast_link_training,
+              "combined override did not propagate to RC0_EP0");
+      require(ports[1].link_width == 8 && ports[1].max_gen == 5 &&
+              !ports[1].fast_link_training,
+              "policy defaults did not remain on RC1_EP1");
+      require(ports[0].transport == PCIE_SVT_TRANSPORT_SERIAL &&
+              ports[1].transport == PCIE_SVT_TRANSPORT_SERIAL,
+              "Serial transport did not propagate");
+      require(ports[0].cfg_timeout == 11us &&
+              ports[0].link_timeout == 13us &&
+              ports[0].enum_timeout == 14us &&
+              ports[0].traffic_timeout == 15us,
+              "override descriptor timeouts are wrong");
+      require(ports[1].cfg_timeout == 11us &&
+              ports[1].link_timeout == 12us &&
+              ports[1].enum_timeout == 14us &&
+              ports[1].traffic_timeout == 15us,
+              "default descriptor timeouts are wrong");
+      require(ports[0].ep_bars[0] != propagation_policy.ep_bars[0] &&
+              ports[1].ep_bars[0] != propagation_policy.ep_bars[0] &&
+              ports[0].ep_bars[0] != ports[1].ep_bars[0],
+              "translated BAR handles alias policy or another descriptor");
+      propagation_policy.ep_bars[0].initial_base = 0;
+      ports[0].ep_bars[0].aperture = 64'd4096;
+      require(ports[0].ep_bars[0].initial_base == 64'd33554432,
+              "descriptor BAR payload aliases policy BAR payload");
+      require(ports[1].ep_bars[0].aperture == 64'd33554432,
+              "descriptor BAR payload aliases another descriptor");
+    end
+
     $cast(disabled_policy, policy.clone());
     override_cfg = pcie_svt_link_override_cfg::type_id::create(
       "disable_rc0_ep0");
@@ -167,6 +253,68 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
       require(ports[0].root_hierarchy == 1,
               "disabled EP_2X8 link compacted the root hierarchy");
     end
+
+    disabled_link_topology = pcie_topology_builder::build_ep_x16(4);
+    disabled_link = pcie_topology_link_cfg::type_id::create(
+      "disabled_duplicate");
+    disabled_link.copy(disabled_link_topology.links[0]);
+    disabled_link.link_id = "A_DISABLED_RC0_EP0";
+    disabled_link.enabled = 1'b0;
+    disabled_link_topology.links.push_back(disabled_link);
+    disabled_policy = pcie_svt_topology_policy_cfg::type_id::create(
+      "physical_disabled_policy");
+    disabled_policy.init_defaults();
+    disabled_policy.dut_node_ids.push_back("EP0");
+    adapter.translate(disabled_link_topology, disabled_policy, ports, errors);
+    require(errors.size() == 0,
+            "physical disabled link without override was rejected");
+    require(ports.size() == 1,
+            "physical disabled link without override was not omitted");
+    if (ports.size() == 1) begin
+      require(ports[0].link_id == "RC0_EP0" &&
+              ports[0].slot_index == 1 &&
+              ports[0].vif_key == "primary_vif_1" &&
+              ports[0].root_hierarchy == 1,
+              "physical disabled link compacted sorted physical positions");
+    end
+
+    override_cfg = pcie_svt_link_override_cfg::type_id::create(
+      "resurrect_disabled_link");
+    override_cfg.link_id = "A_DISABLED_RC0_EP0";
+    override_cfg.has_enable = 1'b1;
+    override_cfg.enabled = 1'b1;
+    disabled_policy.link_overrides.push_back(override_cfg);
+    check_error("physical disabled resurrection", adapter,
+                disabled_link_topology, disabled_policy,
+                "override references disabled link");
+
+    invalid_policy = pcie_svt_topology_policy_cfg::type_id::create(
+      "physical_disabled_gen_policy");
+    invalid_policy.init_defaults();
+    invalid_policy.dut_node_ids.push_back("EP0");
+    override_cfg = pcie_svt_link_override_cfg::type_id::create(
+      "override_disabled_link_gen");
+    override_cfg.link_id = "A_DISABLED_RC0_EP0";
+    override_cfg.has_gen = 1'b1;
+    override_cfg.max_gen = 4;
+    invalid_policy.link_overrides.push_back(override_cfg);
+    check_error("physical disabled non-enable override", adapter,
+                disabled_link_topology, invalid_policy,
+                "override references disabled link");
+
+    invalid_policy = pcie_svt_topology_policy_cfg::type_id::create(
+      "physical_unknown_policy");
+    invalid_policy.init_defaults();
+    invalid_policy.dut_node_ids.push_back("EP0");
+    invalid_topology = pcie_topology_builder::build_ep_x16(4);
+    invalid_topology.links[0].link_width = 'x;
+    check_error("unknown physical width", adapter, invalid_topology,
+                invalid_policy, "has unsupported width x0");
+
+    invalid_topology = pcie_topology_builder::build_ep_x16(4);
+    invalid_topology.links[0].max_gen = 'x;
+    check_error("unknown physical max_gen", adapter, invalid_topology,
+                invalid_policy, "has unsupported max_gen 0");
 
     check_error("null topology", adapter, null, policy,
                 "topology and policy must both be non-null");

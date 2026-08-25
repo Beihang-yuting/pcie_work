@@ -157,6 +157,43 @@ class pcie_svt_topology_model_unit_test extends uvm_test;
             "unknown traffic_timeout was accepted");
 
     $cast(invalid_policy, policy.clone());
+    invalid_policy.transport = PCIE_SVT_TRANSPORT_PIPE;
+    invalid_policy.validate(errors);
+    require(error_contains(errors, "PIPE transport is not implemented"),
+            "known PIPE transport lost its stable diagnostic");
+
+    $cast(invalid_policy, policy.clone());
+    invalid_policy.ep_bars[0].aperture = 'x;
+    invalid_policy.validate(errors);
+    require(error_contains(errors,
+              "BAR0 aperture must be a power of two and at least 16 bytes"),
+            "coerced-zero implemented BAR0 aperture was accepted");
+
+    $cast(invalid_policy, policy.clone());
+    override_cfg = pcie_svt_link_override_cfg::type_id::create(
+      "unknown_gen_override");
+    override_cfg.link_id = "SW0_DSP1_EP1";
+    override_cfg.has_gen = 1'b1;
+    override_cfg.max_gen = 'x;
+    invalid_policy.link_overrides.push_back(override_cfg);
+    invalid_policy.validate(errors);
+    require(error_contains(errors,
+              "link override 'SW0_DSP1_EP1' Gen must be 4 or 5"),
+            "unknown active override max_gen was accepted");
+
+    $cast(invalid_policy, policy.clone());
+    override_cfg = pcie_svt_link_override_cfg::type_id::create(
+      "unknown_width_override");
+    override_cfg.link_id = "SW0_DSP2_EP2";
+    override_cfg.has_width = 1'b1;
+    override_cfg.link_width = 'x;
+    invalid_policy.link_overrides.push_back(override_cfg);
+    invalid_policy.validate(errors);
+    require(error_contains(errors,
+              "link override 'SW0_DSP2_EP2' width must be 4, 8, or 16"),
+            "unknown active override link_width was accepted");
+
+    $cast(invalid_policy, policy.clone());
     override_cfg = pcie_svt_link_override_cfg::type_id::create(
       "unknown_timeout_override");
     override_cfg.link_id = "SW0_DSP1_EP1";

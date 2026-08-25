@@ -81,7 +81,15 @@ class pcie_svt_topology_adapter extends uvm_object;
 
       override_cfg = null;
       void'(find_override(policy, link.link_id, override_cfg));
-      effective_enabled = link.enabled;
+      if (!link.enabled) begin
+        if (override_cfg != null) begin
+          errors.push_back($sformatf(
+            "link '%s': override references disabled link", link.link_id));
+        end
+        continue;
+      end
+
+      effective_enabled = 1'b1;
       if ((override_cfg != null) && override_cfg.has_enable)
         effective_enabled = override_cfg.enabled;
       if (!effective_enabled) begin
@@ -195,6 +203,8 @@ class pcie_svt_topology_adapter extends uvm_object;
     end
     if ((ports.size() == 0) && (errors.size() == 0))
       errors.push_back("topology produced no SVT port descriptors");
+    if (errors.size() != 0)
+      ports.delete();
   endfunction
 
   protected function bit find_override(
