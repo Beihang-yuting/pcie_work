@@ -31,9 +31,8 @@ class pcie_svt_peer_fixture_builder extends uvm_object;
           "primary port descriptor at index %0d is null", i));
         continue;
       end
-      if ($isunknown(primary_ports[i].role) ||
-          ((primary_ports[i].role != PCIE_SVT_ROLE_RC) &&
-           (primary_ports[i].role != PCIE_SVT_ROLE_EP))) begin
+      if ((primary_ports[i].role != PCIE_SVT_ROLE_RC) &&
+          (primary_ports[i].role != PCIE_SVT_ROLE_EP)) begin
         errors.push_back($sformatf(
           "primary port descriptor at index %0d has an illegal role", i));
       end
@@ -43,6 +42,22 @@ class pcie_svt_peer_fixture_builder extends uvm_object;
         errors.push_back($sformatf(
           "primary port descriptor at index %0d has illegal physical width x%0d",
           i, primary_ports[i].physical_width));
+      end
+      if ((primary_ports[i].link_width != 4) &&
+          (primary_ports[i].link_width != 8) &&
+          (primary_ports[i].link_width != 16)) begin
+        errors.push_back($sformatf(
+          "primary port descriptor at index %0d has illegal active width x%0d",
+          i, primary_ports[i].link_width));
+      end else if (((primary_ports[i].physical_width == 4) ||
+                    (primary_ports[i].physical_width == 8) ||
+                    (primary_ports[i].physical_width == 16)) &&
+                   (primary_ports[i].link_width >
+                    primary_ports[i].physical_width)) begin
+        errors.push_back($sformatf(
+          "primary port descriptor at index %0d active width x%0d exceeds physical width x%0d",
+          i, primary_ports[i].link_width,
+          primary_ports[i].physical_width));
       end
       if ((primary_ports[i].max_gen != 4) &&
           (primary_ports[i].max_gen != 5)) begin
@@ -80,6 +95,7 @@ class pcie_svt_peer_fixture_builder extends uvm_object;
       string rc_node_id;
       string ep_node_id;
       string peer_link_id;
+      pcie_svt_link_override_cfg width_override;
 
       rc_node_id = $sformatf("RC_%0d", i);
       ep_node_id = $sformatf("EP_%0d", i);
@@ -98,6 +114,12 @@ class pcie_svt_peer_fixture_builder extends uvm_object;
         candidate_policy.dut_node_ids.push_back(ep_node_id);
       candidate_policy.hdl_slot_by_link[peer_link_id] =
         primary_ports[i].slot_index;
+      width_override = pcie_svt_link_override_cfg::type_id::create(
+        $sformatf("peer_width_override_%0d", i));
+      width_override.link_id = peer_link_id;
+      width_override.has_width = 1'b1;
+      width_override.link_width = primary_ports[i].link_width;
+      candidate_policy.link_overrides.push_back(width_override);
     end
     candidate_topology = builder.finish();
     candidate_topology.validate(validation_errors);

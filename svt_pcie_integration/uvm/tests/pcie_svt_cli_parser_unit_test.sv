@@ -39,6 +39,11 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
 
     stale_override = pcie_svt_link_override_cfg::type_id::create(
       {label, "_stale_override"});
+    profile_name = "STALE_PROFILE";
+    max_gen = 99;
+    fast_link_training = 1'b1;
+    transport = PCIE_SVT_TRANSPORT_PIPE;
+    run_mode = PCIE_SVT_RUN_TRAFFIC;
     overrides.push_back(stale_override);
     errors.push_back("stale error");
     parser.parse_tokens(args, profile_name, max_gen, fast_link_training,
@@ -48,6 +53,13 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
     require(error_contains(errors, expected_fragment),
             $sformatf("%s omitted expected diagnostic '%s': %s", label,
                       expected_fragment, pcie_svt_join_errors(errors)));
+    require(!error_contains(errors, "stale error"),
+            $sformatf("%s retained stale diagnostics", label));
+    require(profile_name == "" && max_gen == 0 && !fast_link_training &&
+            transport == PCIE_SVT_TRANSPORT_SERIAL &&
+            run_mode == PCIE_SVT_RUN_COMPILE,
+            $sformatf("%s did not restore deterministic scalar defaults",
+                      label));
     require(overrides.size() == 0,
             $sformatf("%s exposed %0d partial overrides", label,
                       overrides.size()));
@@ -189,7 +201,7 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
                 $sformatf("%s peer VIF key is wrong", profile_name));
         require(matching_peer.physical_width ==
                   primary_ports[i].physical_width &&
-                matching_peer.link_width == primary_ports[i].physical_width &&
+                matching_peer.link_width == primary_ports[i].link_width &&
                 matching_peer.max_gen == primary_ports[i].max_gen,
                 $sformatf("%s peer descriptor parameters mismatch",
                           profile_name));
@@ -213,14 +225,18 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
     pcie_svt_run_mode_e run_mode;
     pcie_svt_link_override_cfg overrides[$];
     pcie_svt_link_override_cfg override_cfg;
+    pcie_svt_link_override_cfg policy_sentinel;
+    pcie_svt_link_override_cfg peer_width_override;
     pcie_svt_link_override_cfg invalid_overrides[$];
     pcie_topology_cfg topology;
     pcie_topology_cfg peer_topology;
     pcie_svt_topology_policy_cfg policy;
     pcie_svt_topology_policy_cfg peer_policy;
     pcie_svt_port_descriptor ports[$];
+    pcie_svt_port_descriptor peer_ports[$];
     pcie_svt_port_descriptor invalid_primary_ports[$];
     pcie_svt_port_descriptor duplicate_port;
+    pcie_svt_port_descriptor invalid_width_port;
     string errors[$];
     string validation_errors[$];
 
@@ -410,6 +426,66 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
             ports[1].link_width == 4 && ports[1].max_gen == 4,
             "factory override did not reach adapter descriptor");
 
+    pcie_svt_peer_fixture_builder::build(
+      ports, peer_topology, peer_policy, errors);
+    require(errors.size() == 0 && peer_topology != null &&
+            peer_policy != null,
+            {"active-width peer fixture failed: ",
+             pcie_svt_join_errors(errors)});
+    peer_width_override = null;
+    if (peer_policy != null) begin
+      foreach (peer_policy.link_overrides[i]) begin
+        if ((peer_policy.link_overrides[i] != null) &&
+            (peer_policy.link_overrides[i].link_id == "PEER_LINK_1"))
+          peer_width_override = peer_policy.link_overrides[i];
+      end
+    end
+    require(peer_width_override != null,
+            "peer policy omitted its owned PEER_LINK_1 x4 override");
+    if (peer_width_override != null) begin
+      require(peer_width_override.has_width &&
+              peer_width_override.link_width == 4 &&
+              peer_width_override != policy.link_overrides[0],
+              "peer PEER_LINK_1 width override is wrong or aliased");
+    end
+    ports[1].link_width = 8;
+    if (peer_width_override != null)
+      require(peer_width_override.link_width == 4,
+              "peer width override aliases the primary descriptor");
+    adapter.translate(peer_topology, peer_policy, peer_ports, errors);
+    require(errors.size() == 0 && peer_ports.size() == 2,
+            {"active-width peer adapter failed: ",
+             pcie_svt_join_errors(errors)});
+    if (peer_ports.size() == 2) begin
+      require(peer_ports[1].slot_index == 1 &&
+              peer_ports[1].physical_width == 8 &&
+              peer_ports[1].link_width == 4,
+              "peer descriptor lost active x4 on physical x8");
+    end
+
+    invalid_overrides.delete();
+    override_cfg = pcie_svt_link_override_cfg::type_id::create(
+      "invalid_candidate_gen_override");
+    override_cfg.link_id = "RC0_EP0";
+    override_cfg.has_gen = 1'b1;
+    override_cfg.max_gen = 3;
+    invalid_overrides.push_back(override_cfg);
+    policy_sentinel = policy.link_overrides[0];
+    pcie_svt_profile_factory::apply_overrides(topology, invalid_overrides,
+                                              policy, errors);
+    require(error_contains(errors,
+                           "link override 'RC0_EP0' Gen must be 4 or 5") &&
+            policy.link_overrides.size() == 1 &&
+            policy.link_overrides[0] == policy_sentinel &&
+            policy_sentinel.link_id == "RC1_EP1" &&
+            policy_sentinel.has_width &&
+            policy_sentinel.link_width == 4 &&
+            policy_sentinel.has_gen && policy_sentinel.max_gen == 4,
+            "candidate validation failure mutated valid policy state");
+    override_cfg.max_gen = 5;
+    require(policy_sentinel.max_gen == 4,
+            "failed candidate override aliases the valid policy sentinel");
+
     invalid_overrides.delete();
     override_cfg = pcie_svt_link_override_cfg::type_id::create(
       "unknown_factory_override");
@@ -532,6 +608,32 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
     require(error_contains(errors, "duplicate primary slot 0") &&
             peer_topology == null && peer_policy == null,
             "duplicate primary slot was not rejected atomically");
+
+    invalid_primary_ports.delete();
+    $cast(invalid_width_port, ports[0].clone());
+    invalid_width_port.link_width = 3;
+    invalid_primary_ports.push_back(invalid_width_port);
+    peer_topology = pcie_topology_cfg::type_id::create(
+      "stale_illegal_width_topology");
+    peer_policy = pcie_svt_topology_policy_cfg::type_id::create(
+      "stale_illegal_width_policy");
+    pcie_svt_peer_fixture_builder::build(
+      invalid_primary_ports, peer_topology, peer_policy, errors);
+    require(error_contains(errors, "has illegal active width x3") &&
+            peer_topology == null && peer_policy == null,
+            "illegal primary active width was not rejected atomically");
+
+    invalid_width_port.link_width = 16;
+    peer_topology = pcie_topology_cfg::type_id::create(
+      "stale_excess_width_topology");
+    peer_policy = pcie_svt_topology_policy_cfg::type_id::create(
+      "stale_excess_width_policy");
+    pcie_svt_peer_fixture_builder::build(
+      invalid_primary_ports, peer_topology, peer_policy, errors);
+    require(error_contains(errors,
+                           "active width x16 exceeds physical width x8") &&
+            peer_topology == null && peer_policy == null,
+            "excess primary active width was not rejected atomically");
 
     phase.drop_objection(this);
   endtask
