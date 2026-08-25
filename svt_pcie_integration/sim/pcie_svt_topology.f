@@ -4,6 +4,7 @@
 +incdir+../uvm/tests
 +incdir+../../pcie_tl_vip/src/topology
 +incdir+$PCIE_SVT_ROOT/sverilog/include
++incdir+$PCIE_SVT_ROOT/examples/sverilog/tb_pcie_svt_uvm_unified_vip_sys/env
 +incdir+$DESIGNWARE_HOME/vip/svt/common/R-2020.12/sverilog/include
 +define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME
 +define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
@@ -22,4 +23,5 @@
 ../uvm/tests/pcie_svt_topology_model_unit_test.sv
 ../uvm/tests/pcie_svt_topology_adapter_unit_test.sv
 ../uvm/tests/pcie_svt_cli_parser_unit_test.sv
+../uvm/tests/pcie_svt_device_cfg_unit_test.sv
 ../rtl/pcie_svt_topology_top.sv
