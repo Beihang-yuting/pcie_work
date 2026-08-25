@@ -46,6 +46,30 @@ class pcie_svt_topology_virtual_sequencer extends
         "duplicate link registration '%s'", descriptor.link_id))
       return;
     end
+    foreach (cfg_by_link[owner_link_id]) begin
+      if (cfg_by_link[owner_link_id] == cfg) begin
+        `uvm_fatal("SVT_VSEQR_REGISTER", $sformatf(
+          "%s: configuration handle is already registered to link '%s'",
+          descriptor.link_id, owner_link_id))
+        return;
+      end
+    end
+    foreach (status_by_link[owner_link_id]) begin
+      if (status_by_link[owner_link_id] == status) begin
+        `uvm_fatal("SVT_VSEQR_REGISTER", $sformatf(
+          "%s: status handle is already registered to link '%s'",
+          descriptor.link_id, owner_link_id))
+        return;
+      end
+    end
+    foreach (agent_by_link[owner_link_id]) begin
+      if (agent_by_link[owner_link_id] == agent) begin
+        `uvm_fatal("SVT_VSEQR_REGISTER", $sformatf(
+          "%s: agent handle is already registered to link '%s'",
+          descriptor.link_id, owner_link_id))
+        return;
+      end
+    end
 
     descriptor_by_link[descriptor.link_id] = descriptor;
     cfg_by_link[descriptor.link_id] = cfg;
@@ -77,6 +101,20 @@ class pcie_svt_topology_virtual_sequencer extends
     if (seqr_by_link.exists(link_id)) begin
       `uvm_fatal("SVT_VSEQR_CONNECT", $sformatf(
         "duplicate sequencer connection '%s'", link_id))
+      return;
+    end
+    foreach (seqr_by_link[owner_link_id]) begin
+      if (seqr_by_link[owner_link_id] == seqr) begin
+        `uvm_fatal("SVT_VSEQR_CONNECT", $sformatf(
+          "%s: sequencer handle is already connected to link '%s'",
+          link_id, owner_link_id))
+        return;
+      end
+    end
+    if (seqr != agent_by_link[link_id].virt_seqr) begin
+      `uvm_fatal("SVT_VSEQR_CONNECT", $sformatf(
+        "link '%s' sequencer does not belong to its registered agent",
+        link_id))
       return;
     end
     seqr_by_link[link_id] = seqr;
