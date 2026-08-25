@@ -63,7 +63,7 @@ class pcie_svt_counting_device_configuration extends
       `SVT_PCIE_SPEED_2_5G,
       `SVT_PCIE_SPEED_2_5G,
       `SVT_PCIE_SPEED_2_5G);
-    pcie_cfg.enable_multi_endpoint_mode = 1'b1;
+    pcie_cfg.enable_multi_endpoint_mode = device_is_root;
     sentinel_target_present = target_cfg.exists(0) &&
                               (target_cfg[0] != null);
     if (sentinel_target_present)
@@ -151,7 +151,7 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
             cfg.pcie_cfg.pl_cfg.get_expected_link_speed_value() ==
               `SVT_PCIE_SPEED_2_5G,
             {label, ": link-speed sentinel changed"});
-    require(cfg.pcie_cfg.enable_multi_endpoint_mode == 1'b1,
+    require(cfg.pcie_cfg.enable_multi_endpoint_mode == cfg.device_is_root,
             {label, ": Multi-Endpoint sentinel changed"});
     if (cfg.sentinel_target_present)
       require(cfg.target_cfg[0].default_bar_ro_map == 32'hdead_beef,
@@ -492,6 +492,10 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
 
     builder = pcie_svt_cfg_space_builder::type_id::create(
       "cfg_space_builder");
+    require(builder.bar_ro_map(64'd33554432, 1'b0) == 32'h01ff_ffff,
+            "32 MiB BAR low RO map is wrong");
+    require(builder.bar_ro_map(64'd33554432, 1'b1) == 32'h0000_0000,
+            "32 MiB BAR high RO map is wrong");
     require(builder.bar_ro_map(64'd65536, 1'b0) == 32'h0000_ffff,
             "64 KiB BAR low RO map is wrong");
     require(builder.bar_ro_map(64'd65536, 1'b1) == 32'h0000_0000,
