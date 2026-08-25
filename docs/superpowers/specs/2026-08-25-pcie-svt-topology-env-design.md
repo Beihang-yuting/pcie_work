@@ -139,6 +139,8 @@ The backend policy contains:
 - default and per-link link-training timeout values;
 - default fast-link-training policy;
 - per-link overrides keyed by `link_id`; and
+- an optional `link_id`-to-HDL-slot binding used by synthetic peer fixtures;
+  normal real-DUT profiles derive this binding from the static topology; and
 - the default Endpoint BAR template.
 
 The standard bindings are:
@@ -166,10 +168,14 @@ boundary. A descriptor contains:
 - reset and link-training timeouts; and
 - the Endpoint BAR policy when the SVT role is Endpoint.
 
-Descriptors are ordered deterministically by `link_id`. The same order is used
-by the UVM component names, the topology virtual sequencer, and the HDL Serial
-interface registry. Functional code still looks up a descriptor by `link_id`
-instead of depending on the numeric order.
+Descriptors are ordered deterministically by `link_id`. A descriptor's
+physical slot is assigned from the sorted complete compile topology before
+effectively disabled links are omitted, so disabling an earlier link cannot
+remap a later agent onto the wrong HDL VIF. Synthetic peer descriptors inherit
+the primary descriptor's slot through the explicit binding above. The same
+stable slot is used by UVM component names and the HDL Serial interface
+registry. Functional code still looks up a descriptor by `link_id` instead of
+depending on the numeric order.
 
 The common `link.enabled` field describes the physical profile. An SVT policy
 override may make that link effectively disabled for one run without modifying
