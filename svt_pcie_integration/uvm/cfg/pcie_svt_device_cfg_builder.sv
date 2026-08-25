@@ -5,34 +5,47 @@ class pcie_svt_device_cfg_builder extends uvm_object;
     super.new(name);
   endfunction
 
-  function void validate_descriptor(pcie_svt_port_descriptor descriptor);
+  function bit validate_descriptor(pcie_svt_port_descriptor descriptor);
     if (!((descriptor.role == PCIE_SVT_ROLE_RC) ||
-          (descriptor.role == PCIE_SVT_ROLE_EP)))
+          (descriptor.role == PCIE_SVT_ROLE_EP))) begin
       `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
         "%s: role must be RC or EP", descriptor.link_id))
+      return 0;
+    end
     if (!((descriptor.physical_width == 4) ||
           (descriptor.physical_width == 8) ||
-          (descriptor.physical_width == 16)))
+          (descriptor.physical_width == 16))) begin
       `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
         "%s: physical width must be x4, x8, or x16",
         descriptor.link_id))
+      return 0;
+    end
     if (!((descriptor.link_width == 4) ||
           (descriptor.link_width == 8) ||
-          (descriptor.link_width == 16)))
+          (descriptor.link_width == 16))) begin
       `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
         "%s: active width must be x4, x8, or x16",
         descriptor.link_id))
-    if (descriptor.link_width > descriptor.physical_width)
+      return 0;
+    end
+    if (descriptor.link_width > descriptor.physical_width) begin
       `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
         "%s: active width x%0d exceeds physical width x%0d",
         descriptor.link_id, descriptor.link_width,
         descriptor.physical_width))
-    if (!((descriptor.max_gen == 4) || (descriptor.max_gen == 5)))
+      return 0;
+    end
+    if (!((descriptor.max_gen == 4) || (descriptor.max_gen == 5))) begin
       `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
         "%s: max_gen must be Gen4 or Gen5", descriptor.link_id))
-    if (descriptor.transport != PCIE_SVT_TRANSPORT_SERIAL)
+      return 0;
+    end
+    if (descriptor.transport != PCIE_SVT_TRANSPORT_SERIAL) begin
       `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
         "%s: only Serial transport is implemented", descriptor.link_id))
+      return 0;
+    end
+    return 1;
   endfunction
 
   function void apply(pcie_svt_port_descriptor descriptor,
@@ -42,24 +55,48 @@ class pcie_svt_device_cfg_builder extends uvm_object;
     bit [31:0] supported_speeds;
     bit [31:0] supported_widths;
 
-    if (descriptor == null)
+    if (descriptor == null) begin
       `uvm_fatal("SVT_DEVICE_CFG", "cannot apply a null descriptor")
-    if (vif == null)
+      return;
+    end
+    if (vif == null) begin
       `uvm_fatal("SVT_DEVICE_CFG", "cannot apply a null Unified VIF")
-    if (cfg == null)
+      return;
+    end
+    if (cfg == null) begin
       `uvm_fatal("SVT_DEVICE_CFG", "cannot apply to a null configuration")
-    validate_descriptor(descriptor);
+      return;
+    end
+    if (!validate_descriptor(descriptor))
+      return;
 
     cfg.set_initial_values_via_unified_vif(1, vif);
-    if (cfg.device_is_root != (descriptor.role == PCIE_SVT_ROLE_RC))
+    if (cfg.device_is_root != (descriptor.role == PCIE_SVT_ROLE_RC)) begin
       `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
         "%s: descriptor role disagrees with Unified VIF device_is_root=%0d",
         descriptor.link_id, cfg.device_is_root))
-    if (vif.num_physical_lanes != descriptor.physical_width)
+      return;
+    end
+    if (vif.num_physical_lanes != descriptor.physical_width) begin
       `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
         "%s: descriptor physical width x%0d disagrees with Unified VIF lane count x%0d",
         descriptor.link_id, descriptor.physical_width,
         vif.num_physical_lanes))
+      return;
+    end
+    if (descriptor.role == PCIE_SVT_ROLE_EP) begin
+      if (!cfg.target_cfg.exists(0)) begin
+        `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
+          "%s: Endpoint configuration has no target_cfg[0]",
+          descriptor.link_id))
+        return;
+      end
+      if (cfg.target_cfg[0] == null) begin
+        `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
+          "%s: Endpoint target_cfg[0] is null", descriptor.link_id))
+        return;
+      end
+    end
 
     cfg.pcie_spec_ver = svt_pcie_device_configuration::PCIE_SPEC_VER_5_0;
     cfg.pcie_cfg.pl_cfg.disable_ext_bit_clock_mode = 1'b1;
@@ -97,13 +134,6 @@ class pcie_svt_device_cfg_builder extends uvm_object;
     end
 
     if (descriptor.role == PCIE_SVT_ROLE_EP) begin
-      if (!cfg.target_cfg.exists(0))
-        `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
-          "%s: Endpoint configuration has no target_cfg[0]",
-          descriptor.link_id))
-      if (cfg.target_cfg[0] == null)
-        `uvm_fatal("SVT_DEVICE_CFG", $sformatf(
-          "%s: Endpoint target_cfg[0] is null", descriptor.link_id))
       cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b1;
       cfg.target_cfg[0].default_bar_ro_map = 32'h0000_ffff;
     end else begin

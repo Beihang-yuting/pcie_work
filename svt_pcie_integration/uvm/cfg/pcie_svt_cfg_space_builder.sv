@@ -1,8 +1,15 @@
 class pcie_svt_cfg_space_builder extends uvm_object;
   `uvm_object_utils(pcie_svt_cfg_space_builder)
 
+  localparam longint unsigned BAR32_LIMIT =
+    64'h0000_0001_0000_0000;
+
   function new(string name = "pcie_svt_cfg_space_builder");
     super.new(name);
+  endfunction
+
+  function automatic bit bar_aperture_is_valid(longint unsigned aperture);
+    return (aperture >= 16) && ((aperture & (aperture - 1)) == 0);
   endfunction
 
   function automatic bit [31:0] bar_ro_map(
@@ -10,7 +17,7 @@ class pcie_svt_cfg_space_builder extends uvm_object;
       bit high_dword);
     bit [63:0] ro_map;
 
-    if ((aperture < 16) || ((aperture & (aperture - 1)) != 0)) begin
+    if (!bar_aperture_is_valid(aperture)) begin
       `uvm_fatal("SVT_BAR",
         "BAR aperture must be a power of two and at least 16 bytes")
       return 0;
@@ -34,39 +41,76 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     return value;
   endfunction
 
-  function void validate_ep_descriptor(
+  function bit validate_ep_descriptor(
       pcie_svt_port_descriptor descriptor);
-    if (descriptor.role != PCIE_SVT_ROLE_EP)
+    if (descriptor == null) begin
+      `uvm_fatal("SVT_CFG_SPACE",
+                 "cannot validate a null PF0 descriptor")
+      return 0;
+    end
+    if (descriptor.role != PCIE_SVT_ROLE_EP) begin
       `uvm_fatal("SVT_CFG_SPACE", $sformatf(
         "%s: PF0 image requires an Endpoint descriptor",
         descriptor.link_id))
-    if (descriptor.slot_index > 16'hafee)
+      return 0;
+    end
+    if (descriptor.slot_index > 16'hafee) begin
       `uvm_fatal("SVT_CFG_SPACE", $sformatf(
         "%s: slot index does not fit the PF0 device ID",
         descriptor.link_id))
+      return 0;
+    end
     foreach (descriptor.ep_bars[i]) begin
-      if (descriptor.ep_bars[i] == null)
+      if (descriptor.ep_bars[i] == null) begin
         `uvm_fatal("SVT_CFG_SPACE", $sformatf(
           "%s: BAR%0d descriptor is null", descriptor.link_id, i))
+        return 0;
+      end
       if ((i > 0) && descriptor.ep_bars[i-1].implemented &&
           descriptor.ep_bars[i-1].is_64bit &&
-          descriptor.ep_bars[i].implemented)
+          descriptor.ep_bars[i].implemented) begin
         `uvm_fatal("SVT_CFG_SPACE", $sformatf(
           "%s: BAR%0d is the upper DWORD of BAR%0d",
           descriptor.link_id, i, i - 1))
+        return 0;
+      end
       if (descriptor.ep_bars[i].implemented) begin
-        void'(bar_ro_map(descriptor.ep_bars[i].aperture, 1'b0));
-        if (descriptor.ep_bars[i].is_64bit && (i == 5))
+        if (!bar_aperture_is_valid(descriptor.ep_bars[i].aperture)) begin
+          `uvm_fatal("SVT_BAR",
+            "BAR aperture must be a power of two and at least 16 bytes")
+          return 0;
+        end
+        if (descriptor.ep_bars[i].is_64bit && (i == 5)) begin
           `uvm_fatal("SVT_CFG_SPACE", $sformatf(
             "%s: BAR5 cannot be the low DWORD of a 64-bit BAR",
             descriptor.link_id))
+          return 0;
+        end
+        if (!descriptor.ep_bars[i].is_64bit &&
+            (descriptor.ep_bars[i].aperture > BAR32_LIMIT)) begin
+          `uvm_fatal("SVT_CFG_SPACE", $sformatf(
+            "%s: BAR%0d 32-bit BAR aperture exceeds 4 GiB",
+            descriptor.link_id, i))
+          return 0;
+        end
+        if (!descriptor.ep_bars[i].is_64bit &&
+            (descriptor.ep_bars[i].initial_base >
+             (BAR32_LIMIT - descriptor.ep_bars[i].aperture))) begin
+          `uvm_fatal("SVT_CFG_SPACE", $sformatf(
+            "%s: BAR%0d 32-bit BAR range exceeds 4 GiB",
+            descriptor.link_id, i))
+          return 0;
+        end
         if ((descriptor.ep_bars[i].initial_base &
-             (descriptor.ep_bars[i].aperture - 1)) != 0)
+             (descriptor.ep_bars[i].aperture - 1)) != 0) begin
           `uvm_fatal("SVT_CFG_SPACE", $sformatf(
             "%s: BAR%0d initial base is not aperture-aligned",
             descriptor.link_id, i))
+          return 0;
+        end
       end
     end
+    return 1;
   endfunction
 
   function void build_ep_pf0(
@@ -74,12 +118,15 @@ class pcie_svt_cfg_space_builder extends uvm_object;
       ref bit [31:0] image[1024]);
     bit [15:0] device_id;
 
-    foreach (image[i])
-      image[i] = 0;
-    if (descriptor == null)
+    if (descriptor == null) begin
       `uvm_fatal("SVT_CFG_SPACE",
                  "cannot build PF0 from a null descriptor")
-    validate_ep_descriptor(descriptor);
+      return;
+    end
+    if (!validate_ep_descriptor(descriptor))
+      return;
+    foreach (image[i])
+      image[i] = 0;
 
     device_id = 16'h5011 + descriptor.slot_index;
     image[0] = {device_id, 16'h20f9};
