@@ -44,7 +44,8 @@ state, timeout, or acceleration policy without changing the environment.
 The environment must retain the complete real-DUT workflow:
 
 - publish and refresh SVT configuration while reset is asserted;
-- configure Endpoint SVT configuration space and BAR sizing behavior;
+- release reset without enabling DL or PHY, then configure Endpoint SVT
+  configuration space and BAR sizing behavior while links remain down;
 - bring up all enabled Serial links;
 - enumerate a direct Endpoint or a real Switch hierarchy from an SVT RC;
 - allocate and verify BAR and bridge-window state; and
@@ -273,18 +274,24 @@ Every Endpoint SVT has one function and three 64-bit Prefetchable BAR pairs:
 | BAR2/3 | 64 KB | `0000_ffff` | `0000_0000` | bits `[3:0] = 4'hc` |
 | BAR4/5 | 64 KB | `0000_ffff` | `0000_0000` | bits `[3:0] = 4'hc` |
 
-Initial BAR bases are zero. Enumeration assigns operational addresses. While
-reset is asserted, the initialization sequence uses the public Target App
-service sequences `SET_BAR_RO_MAP`, `WRITE_ADDR`, `READ_ADDR`, and
-`GET_BAR_RO_MAP` on `target_seqr[0]`. It checks both the programmed attributes
-and the RO maps. RC agents do not run an Endpoint BAR operation and do not emit
-a synthetic BAR-skip result.
+Initial BAR bases are zero. Enumeration assigns operational addresses. After
+Endpoint refreshes complete, the initialization sequence releases reset
+without enabling DL or PHY, confirms that every link remains down, and uses the
+public Target App service sequences `SET_BAR_RO_MAP`, `WRITE_ADDR`,
+`READ_ADDR`, and `GET_BAR_RO_MAP` on `target_seqr[0]`. It checks both the
+programmed attributes and the RO maps. RC agents do not run an Endpoint BAR
+operation, and the flow neither expects nor emits a synthetic RC-skip record.
 
 R-2020.12 `REFRESH_CFG` is always issued for Endpoint agents after final
 configuration publication and before reset release so the HDL Target App sees
-`enable_multi_endpoint_mode == 1`. The exact per-agent config object is
-republished immediately before the refresh to prevent a broader stale
-`uvm_config_db` entry from being selected.
+`enable_multi_endpoint_mode == 1`. The sequence obtains the normalized
+agent-current configuration with `agent.get_cfg()`, clones it, validates the
+Endpoint role, Multi-Endpoint Mode, and `target_cfg[0]`, and republishes that
+clone immediately before refresh. The topology registry retains its original
+configuration handle. Configuration-database requests after reset release are
+bound to the same runtime clone. No warning catcher or severity demotion is
+part of this flow; the runtime clone must validate without an `is_valid`
+warning.
 
 ## 7. Environment and Sequencer Structure
 
@@ -314,15 +321,21 @@ new sequence that uses it for a multi-port operation is an integration error.
 ### 8.1 Configuration and reset
 
 All active link resets begin asserted. The configuration stage waits the
-R-2020.12 initialization hold time, refreshes Endpoint configurations, writes
-the local SVT configuration databases, programs Endpoint Target App BAR
-behavior, and reads back important configuration DWORDs. Work runs in parallel
-across links with a per-link watchdog.
+R-2020.12 initialization hold time and refreshes Endpoint configurations. After
+all refreshes return, it releases reset once without starting DL-link-enable or
+PL-PHY-enable, checks that all links remain down, then writes the local SVT
+configuration databases, programs Endpoint Target App BAR behavior, and reads
+back important configuration DWORDs. Work runs in parallel across links. Each
+Endpoint has one `cfg_timeout` watchdog budget from child start through final
+completion; the reset barrier does not restart that budget. Completion exactly
+at the deadline is accepted after one `#1step` settle, while a later or absent
+completion is fatal and reports start, deadline, and completion times.
 
 ### 8.2 Link training
 
-After configuration completes, the environment releases reset and starts the
-public DL-link-enable and PL-PHY-enable sequences for all active ports in
+After configuration completes, reset is already released and every link is
+still down because no enable sequence has run. The link-training stage starts
+the public DL-link-enable and PL-PHY-enable sequences for all active ports in
 parallel. Each link independently waits for Physical Link Up and Data Link Up.
 The result is PASS only when the observed generation and width match that
 link's policy. Timeout reports include profile, link ID, role, LTSSM status,

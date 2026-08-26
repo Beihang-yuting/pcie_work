@@ -751,6 +751,16 @@ class pcie_svt_topology_base_test extends uvm_test;
       `uvm_info("PCIE_SVT_COMPILE_ONLY",
                 "component construction complete; no sequence started",
                 UVM_NONE)
+    end else if (run_mode == PCIE_SVT_RUN_CFG) begin
+      pcie_svt_cfg_init_vseq cfg_init;
+      phase.raise_objection(this);
+      cfg_init = pcie_svt_cfg_init_vseq::type_id::create("cfg_init");
+      if (cfg_init == null)
+        `uvm_fatal("SVT_CFG_HANDLE", "cfg-init sequence factory returned null")
+      cfg_init.program_target_bars = 1'b1;
+      cfg_init.start(env.vseqr);
+      env.vseqr.report_stage_table();
+      phase.drop_objection(this);
     end
   endtask
 endclass

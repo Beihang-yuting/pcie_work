@@ -14,6 +14,7 @@ package pcie_svt_topology_pkg;
   `include "adapter/pcie_svt_peer_fixture_builder.sv"
   `include "env/pcie_svt_topology_virtual_sequencer.sv"
   `include "env/pcie_svt_topology_env.sv"
+  `include "sequences/pcie_svt_cfg_init_vseq.sv"
 
   function automatic string pcie_svt_compiled_profile_name();
 `ifdef PCIE_TOPO_EP_X16
