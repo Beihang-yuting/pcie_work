@@ -105,6 +105,11 @@ class pcie_svt_cfg_init_port_sequence extends
     `uvm_fatal(id, message)
   endfunction
 
+  protected function bit expects_multi_endpoint();
+    return (descriptor != null) &&
+           (descriptor.endpoint_model == PCIE_SVT_EP_MULTI_BDF);
+  endfunction
+
   protected function bit handles_are_valid();
     if ((descriptor == null) || (cfg == null) || (status == null) ||
         (agent == null) || (port_seqr == null) ||
@@ -137,9 +142,10 @@ class pcie_svt_cfg_init_port_sequence extends
       return 1'b0;
     end
     if ((cfg.pcie_cfg == null) ||
-        (cfg.pcie_cfg.enable_multi_endpoint_mode != 1'b1)) begin
+        (cfg.pcie_cfg.enable_multi_endpoint_mode !=
+          expects_multi_endpoint())) begin
       fail("SVT_CFG_HANDLE", {operation_context("validate"),
-        " Endpoint cfg does not enable Multi-Endpoint Mode"});
+        " Endpoint cfg Multi-Endpoint Mode disagrees with descriptor"});
       return 1'b0;
     end
     return 1'b1;
@@ -217,7 +223,8 @@ class pcie_svt_cfg_init_port_sequence extends
     end
     if ((runtime_cfg.device_is_root != 1'b0) ||
         (runtime_cfg.pcie_cfg == null) ||
-        (runtime_cfg.pcie_cfg.enable_multi_endpoint_mode != 1'b1) ||
+        (runtime_cfg.pcie_cfg.enable_multi_endpoint_mode !=
+          expects_multi_endpoint()) ||
         !runtime_cfg.target_cfg.exists(0) ||
         (runtime_cfg.target_cfg[0] == null)) begin
       fail("SVT_CFG_REFRESH", {operation_context("REFRESH_CFG"),
@@ -339,14 +346,18 @@ class pcie_svt_cfg_init_port_sequence extends
   protected task preload_pf0(
       pcie_svt_cfg_space_builder builder,
       ref bit [31:0] image[1024]);
-    int unsigned checked_dwords[12] =
-      '{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 15};
+    int unsigned checked_dwords[16] =
+      '{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 16, 19, 27};
 
     builder.build_ep_pf0(descriptor, image);
     for (int unsigned dword_addr = 0; dword_addr < 1024; dword_addr++)
       cfg_write(dword_addr, image[dword_addr]);
     foreach (checked_dwords[i])
       cfg_read_check(checked_dwords[i], image[checked_dwords[i]]);
+    `uvm_info("PCIE_SVT_CFG_SPACE_CHECK", $sformatf(
+      "link=%s model=%s writes=1024 checked=%0d",
+      descriptor.link_id, descriptor.endpoint_model.name(),
+      $size(checked_dwords)), UVM_NONE)
   endtask
 
   protected task program_one_bar(
@@ -516,7 +527,7 @@ class pcie_svt_cfg_init_port_sequence extends
     // cfg and preloads/read-checks PF0.  This is the peer-safe boundary: it
     // suppresses Target-App BAR/completer operations without weakening the
     // configuration database contract.
-    if (program_target_bars) begin
+    if (program_target_bars && expects_multi_endpoint()) begin
       for (int unsigned bar_num = 0; bar_num < 6; bar_num++)
         program_one_bar(builder, bar_num);
       enable_completer_memory_space();

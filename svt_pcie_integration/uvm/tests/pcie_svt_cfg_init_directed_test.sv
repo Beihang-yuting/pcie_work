@@ -35,6 +35,7 @@ class pcie_svt_cfg_init_recording_adapter extends
   static bit [31:0] cfg_data[string];
   static int unsigned cfg_write_hits[string];
   static int unsigned cfg_read_hits[string];
+  static pcie_svt_port_descriptor descriptor_by_link[string];
   static svt_pcie_device_configuration published_cfg_by_link[string];
   static svt_pcie_device_configuration registry_cfg_by_link[string];
   static bit [31:0] bar_data[string];
@@ -62,6 +63,7 @@ class pcie_svt_cfg_init_recording_adapter extends
     cfg_data.delete();
     cfg_write_hits.delete();
     cfg_read_hits.delete();
+    descriptor_by_link.delete();
     published_cfg_by_link.delete();
     registry_cfg_by_link.delete();
     bar_data.delete();
@@ -178,6 +180,7 @@ class pcie_svt_cfg_init_recording_adapter extends
     svt_pcie_device_configuration published_cfg;
     int before_warnings;
     int after_warnings;
+    bit expected_multi_endpoint;
     bit valid;
 
     published_cfg = null;
@@ -190,10 +193,24 @@ class pcie_svt_cfg_init_recording_adapter extends
     valid = published_cfg.is_valid(0);
     after_warnings = uvm_report_server::get_server().
       get_severity_count(UVM_WARNING);
+    if (!descriptor_by_link.exists(link_id) ||
+        (descriptor_by_link[link_id] == null))
+      `uvm_fatal("CFG_INIT_DIRECTED", {link_id,
+        ": descriptor registry entry is missing"})
+    if (published_cfg.pcie_cfg == null)
+      `uvm_fatal("CFG_INIT_DIRECTED", {link_id,
+        ": published PCIe configuration is null"})
+    expected_multi_endpoint =
+      descriptor_by_link[link_id].endpoint_model == PCIE_SVT_EP_MULTI_BDF;
+    if (published_cfg.pcie_cfg.enable_multi_endpoint_mode !=
+        expected_multi_endpoint)
+      `uvm_fatal("CFG_INIT_DIRECTED", $sformatf(
+        "%s published multi_endpoint=%0d expected=%0d",
+        link_id, published_cfg.pcie_cfg.enable_multi_endpoint_mode,
+        expected_multi_endpoint))
     if ((published_cfg == registry_cfg) ||
         (published_cfg.device_is_root != 1'b0) ||
         (published_cfg.pcie_cfg == null) ||
-        (published_cfg.pcie_cfg.enable_multi_endpoint_mode != 1'b1) ||
         !published_cfg.target_cfg.exists(0) ||
         (published_cfg.target_cfg[0] == null) ||
         !valid || (after_warnings != before_warnings))
@@ -363,7 +380,8 @@ class pcie_svt_cfg_init_directed_test extends pcie_svt_topology_base_test;
   endfunction
 
   protected function bit dword_requires_readback(int unsigned dword_addr);
-    return (dword_addr inside {0, 1, 2, 3, [4:9], 11, 15});
+    return (dword_addr inside {
+      0, 1, 2, 3, [4:9], 11, 13, 15, 16, 19, 27});
   endfunction
 
   protected function void check_cfg_database(
@@ -502,8 +520,8 @@ class pcie_svt_cfg_init_directed_test extends pcie_svt_topology_base_test;
     topology_check(sequence_item.cfg_write_count == 4096,
       $sformatf("cfg write count expected=4096 actual=%0d",
                 sequence_item.cfg_write_count));
-    topology_check(sequence_item.cfg_read_count == 48,
-      $sformatf("cfg read count expected=48 actual=%0d",
+    topology_check(sequence_item.cfg_read_count == 64,
+      $sformatf("cfg read count expected=64 actual=%0d",
                 sequence_item.cfg_read_count));
     topology_check(
       pcie_svt_cfg_init_recording_adapter::refresh_count == 4,
@@ -593,7 +611,7 @@ class pcie_svt_cfg_init_directed_test extends pcie_svt_topology_base_test;
 
   virtual task run_phase(uvm_phase phase);
     pcie_svt_cfg_init_vseq cfg_init;
-    pcie_svt_cfg_init_vseq refresh_only;
+    pcie_svt_cfg_init_vseq multi_bdf_cfg;
 
     phase.raise_objection(this);
     if (profile_name != "SWITCH_1X16_4X4")
@@ -603,25 +621,51 @@ class pcie_svt_cfg_init_directed_test extends pcie_svt_topology_base_test;
     pcie_svt_cfg_init_recording_adapter::clear_records();
     pcie_svt_cfg_init_recording_adapter::observed_reset_vif =
       env.vseqr.reset_vif;
+    foreach (env.vseqr.descriptor_by_link[link_id])
+      pcie_svt_cfg_init_recording_adapter::descriptor_by_link[link_id] =
+        env.vseqr.descriptor_by_link[link_id];
     cfg_init = pcie_svt_cfg_init_vseq::type_id::create("cfg_init");
     cfg_init.program_target_bars = 1'b1;
     start_with_reset_release_monitor(cfg_init);
-    check_run(cfg_init, 1'b1);
+    check_run(cfg_init, 1'b0);
 
     foreach (env.vseqr.cfg_state[link_id])
       env.vseqr.cfg_state[link_id] = PCIE_SVT_STAGE_NOT_RUN;
+    foreach (env.vseqr.descriptor_by_link[link_id]) begin
+      pcie_svt_port_descriptor selected_descriptor;
+      selected_descriptor = env.vseqr.descriptor_by_link[link_id];
+      if (selected_descriptor.role == PCIE_SVT_ROLE_EP) begin
+        svt_configuration generic_cfg;
+        svt_pcie_device_configuration current_cfg;
+        selected_descriptor.endpoint_model = PCIE_SVT_EP_MULTI_BDF;
+        env.vseqr.cfg_by_link[link_id].pcie_cfg.
+          enable_multi_endpoint_mode = 1'b1;
+        generic_cfg = null;
+        current_cfg = null;
+        env.vseqr.agent_by_link[link_id].get_cfg(generic_cfg);
+        if ((generic_cfg == null) || !$cast(current_cfg, generic_cfg) ||
+            (current_cfg.pcie_cfg == null))
+          `uvm_fatal("CFG_INIT_DIRECTED", {link_id,
+            ": cannot select Multiple-BDF on agent-current cfg"})
+        current_cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b1;
+        env.vseqr.agent_by_link[link_id].reconfigure(current_cfg);
+      end
+    end
     env.vseqr.reset_vif.hold_all();
     #0;
     topology_check(env.vseqr.reset_vif.asserted === '1,
-      $sformatf("refresh-only setup expected reset asserted, got 0x%0h",
+      $sformatf("Multiple-BDF setup expected reset asserted, got 0x%0h",
                 env.vseqr.reset_vif.asserted));
     pcie_svt_cfg_init_recording_adapter::clear_records();
     pcie_svt_cfg_init_recording_adapter::observed_reset_vif =
       env.vseqr.reset_vif;
-    refresh_only = pcie_svt_cfg_init_vseq::type_id::create("refresh_only");
-    refresh_only.program_target_bars = 1'b0;
-    start_with_reset_release_monitor(refresh_only);
-    check_run(refresh_only, 1'b0);
+    foreach (env.vseqr.descriptor_by_link[link_id])
+      pcie_svt_cfg_init_recording_adapter::descriptor_by_link[link_id] =
+        env.vseqr.descriptor_by_link[link_id];
+    multi_bdf_cfg = pcie_svt_cfg_init_vseq::type_id::create("multi_bdf_cfg");
+    multi_bdf_cfg.program_target_bars = 1'b1;
+    start_with_reset_release_monitor(multi_bdf_cfg);
+    check_run(multi_bdf_cfg, 1'b1);
 
     env.vseqr.report_stage_table();
     phase.drop_objection(this);
