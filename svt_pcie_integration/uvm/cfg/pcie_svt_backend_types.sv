@@ -1,6 +1,8 @@
 typedef enum {PCIE_SVT_ROLE_RC, PCIE_SVT_ROLE_EP} pcie_svt_role_e;
 typedef enum {PCIE_SVT_TRANSPORT_SERIAL, PCIE_SVT_TRANSPORT_PIPE}
   pcie_svt_transport_e;
+typedef enum {PCIE_SVT_EP_SINGLE, PCIE_SVT_EP_MULTI_BDF}
+  pcie_svt_endpoint_model_e;
 typedef enum {PCIE_SVT_STAGE_NOT_RUN, PCIE_SVT_STAGE_PASS,
               PCIE_SVT_STAGE_FAIL} pcie_svt_stage_state_e;
 typedef enum {PCIE_SVT_RUN_COMPILE, PCIE_SVT_RUN_CFG,
@@ -50,6 +52,8 @@ class pcie_svt_link_override_cfg extends uvm_object;
   int unsigned max_gen;
   bit has_width;
   int unsigned link_width;
+  bit has_endpoint_model;
+  pcie_svt_endpoint_model_e endpoint_model;
   bit has_fast_link_training, fast_link_training;
   bit has_link_timeout;
   time link_timeout;
@@ -75,6 +79,8 @@ class pcie_svt_link_override_cfg extends uvm_object;
     max_gen = source.max_gen;
     has_width = source.has_width;
     link_width = source.link_width;
+    has_endpoint_model = source.has_endpoint_model;
+    endpoint_model = source.endpoint_model;
     has_fast_link_training = source.has_fast_link_training;
     fast_link_training = source.fast_link_training;
     has_link_timeout = source.has_link_timeout;
@@ -89,6 +95,7 @@ class pcie_svt_port_descriptor extends uvm_object;
   int unsigned slot_index;
   int unsigned root_hierarchy;
   pcie_svt_role_e role;
+  pcie_svt_endpoint_model_e endpoint_model;
   int unsigned physical_width;
   int unsigned link_width;
   int unsigned max_gen;
@@ -123,6 +130,7 @@ class pcie_svt_port_descriptor extends uvm_object;
     slot_index = source.slot_index;
     root_hierarchy = source.root_hierarchy;
     role = source.role;
+    endpoint_model = source.endpoint_model;
     physical_width = source.physical_width;
     link_width = source.link_width;
     max_gen = source.max_gen;

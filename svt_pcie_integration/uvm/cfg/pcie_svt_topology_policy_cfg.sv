@@ -3,6 +3,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
   string vif_prefix;
   string reset_vif_key;
   pcie_svt_transport_e transport;
+  pcie_svt_endpoint_model_e default_endpoint_model;
   bit default_fast_link_training;
   time cfg_timeout;
   time link_timeout;
@@ -26,6 +27,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     link_overrides.delete();
     hdl_slot_by_link.delete();
     transport = PCIE_SVT_TRANSPORT_SERIAL;
+    default_endpoint_model = PCIE_SVT_EP_SINGLE;
     vif_prefix = "primary_vif_";
     reset_vif_key = "primary_reset_vif";
     default_fast_link_training = 1'b0;
@@ -72,6 +74,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     vif_prefix = source.vif_prefix;
     reset_vif_key = source.reset_vif_key;
     transport = source.transport;
+    default_endpoint_model = source.default_endpoint_model;
     default_fast_link_training = source.default_fast_link_training;
     cfg_timeout = source.cfg_timeout;
     link_timeout = source.link_timeout;
@@ -130,6 +133,10 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
 
     if (transport != PCIE_SVT_TRANSPORT_SERIAL)
       errors.push_back("PIPE transport is not implemented");
+    if (!((default_endpoint_model == PCIE_SVT_EP_SINGLE) ||
+          (default_endpoint_model == PCIE_SVT_EP_MULTI_BDF))) begin
+      errors.push_back("default Endpoint model must be Single or Multiple-BDF");
+    end
 
     if ($isunknown(cfg_timeout) || cfg_timeout == 0)
       errors.push_back("cfg_timeout must be positive");
@@ -198,6 +205,14 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
             (link_overrides[i].link_width != 16)) begin
           errors.push_back($sformatf(
             "link override '%s' width must be 4, 8, or 16",
+            link_overrides[i].link_id));
+        end
+        if (link_overrides[i].has_endpoint_model &&
+            !((link_overrides[i].endpoint_model == PCIE_SVT_EP_SINGLE) ||
+              (link_overrides[i].endpoint_model ==
+                 PCIE_SVT_EP_MULTI_BDF))) begin
+          errors.push_back($sformatf(
+            "link override '%s' Endpoint model must be Single or Multiple-BDF",
             link_overrides[i].link_id));
         end
         if (link_overrides[i].has_link_timeout &&

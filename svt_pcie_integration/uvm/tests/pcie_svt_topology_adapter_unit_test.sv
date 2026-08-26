@@ -156,6 +156,22 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
       end
     end
 
+    require(policy.default_endpoint_model == PCIE_SVT_EP_SINGLE,
+            "default Endpoint model is not Single Endpoint");
+    $cast(propagation_policy, policy.clone());
+    override_cfg = pcie_svt_link_override_cfg::type_id::create(
+      "endpoint_model_override");
+    override_cfg.link_id = "RC0_EP0";
+    override_cfg.has_endpoint_model = 1'b1;
+    override_cfg.endpoint_model = PCIE_SVT_EP_MULTI_BDF;
+    propagation_policy.link_overrides.push_back(override_cfg);
+    adapter.translate(topology, propagation_policy, ports, errors);
+    require(errors.size() == 0, "Endpoint model override was rejected");
+    require(ports[0].endpoint_model == PCIE_SVT_EP_MULTI_BDF,
+            "per-link Multiple-BDF model did not propagate");
+    require(ports[1].endpoint_model == PCIE_SVT_EP_SINGLE,
+            "Single-Endpoint default did not remain on the other link");
+
     $cast(mapped_policy, policy.clone());
     mapped_policy.hdl_slot_by_link["RC0_EP0"] = 1;
     mapped_policy.hdl_slot_by_link["RC1_EP1"] = 0;

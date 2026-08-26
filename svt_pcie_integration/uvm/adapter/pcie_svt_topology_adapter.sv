@@ -95,6 +95,7 @@ class pcie_svt_topology_adapter extends uvm_object;
       if (!effective_enabled) begin
         if ((override_cfg != null) &&
             (override_cfg.has_gen || override_cfg.has_width ||
+             override_cfg.has_endpoint_model ||
              override_cfg.has_fast_link_training ||
              override_cfg.has_link_timeout)) begin
           errors.push_back($sformatf(
@@ -169,6 +170,8 @@ class pcie_svt_topology_adapter extends uvm_object;
                             $sformatf("%0d", descriptor.slot_index)};
       descriptor.role = (svt_node.kind == PCIE_TOPO_NODE_RC) ?
                         PCIE_SVT_ROLE_RC : PCIE_SVT_ROLE_EP;
+      descriptor.endpoint_model = effective_endpoint_model(
+        policy, override_cfg);
       descriptor.physical_width = link.link_width;
       descriptor.link_width = active_width;
       descriptor.max_gen = active_gen;
@@ -246,6 +249,14 @@ class pcie_svt_topology_adapter extends uvm_object;
     if ((override_cfg != null) && override_cfg.has_fast_link_training)
       return override_cfg.fast_link_training;
     return policy.default_fast_link_training;
+  endfunction
+
+  protected function pcie_svt_endpoint_model_e effective_endpoint_model(
+      pcie_svt_topology_policy_cfg policy,
+      pcie_svt_link_override_cfg override_cfg);
+    if ((override_cfg != null) && override_cfg.has_endpoint_model)
+      return override_cfg.endpoint_model;
+    return policy.default_endpoint_model;
   endfunction
 
   protected function time effective_link_timeout(

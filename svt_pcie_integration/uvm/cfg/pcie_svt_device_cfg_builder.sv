@@ -134,8 +134,10 @@ class pcie_svt_device_cfg_builder extends uvm_object;
     end
 
     if (descriptor.role == PCIE_SVT_ROLE_EP) begin
-      cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b1;
-      cfg.target_cfg[0].default_bar_ro_map = 32'h0000_ffff;
+      cfg.pcie_cfg.enable_multi_endpoint_mode =
+        descriptor.endpoint_model == PCIE_SVT_EP_MULTI_BDF;
+      if (descriptor.endpoint_model == PCIE_SVT_EP_MULTI_BDF)
+        cfg.target_cfg[0].default_bar_ro_map = 32'h0000_ffff;
     end else begin
       cfg.pcie_cfg.enable_multi_endpoint_mode = 1'b0;
     end

@@ -315,7 +315,8 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
   function void check_endpoint_apply(
       pcie_svt_device_cfg_builder builder,
       int unsigned max_gen,
-      bit fast_link_training);
+      bit fast_link_training,
+      pcie_svt_endpoint_model_e selected_model);
     pcie_svt_port_descriptor descriptor;
     pcie_svt_counting_device_configuration cfg;
     svt_pcie_device_configuration normal_cfg;
@@ -323,12 +324,17 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
     svt_pcie_pl_configuration::link_eq_mode_enum eq_mode;
     svt_pcie_pl_configuration::link_eq_mode_enum normal_eq_mode;
     bit normal_direct_speed_up;
+    int unsigned ep_width;
     string case_name;
 
-    case_name = $sformatf("ep_x4_gen%0d_fast%0d",
-                          max_gen, fast_link_training);
+    ep_width = ep_vif.num_physical_lanes;
+    case_name = $sformatf("ep_x%0d_gen%0d_fast%0d_%s",
+                          ep_width, max_gen, fast_link_training,
+                          selected_model.name());
     descriptor = make_descriptor(case_name, PCIE_SVT_ROLE_EP,
-                                 4, 4, max_gen, fast_link_training, 3);
+                                 ep_width, ep_width, max_gen,
+                                 fast_link_training, 3);
+    descriptor.endpoint_model = selected_model;
     configure_ep_bars(descriptor);
     cfg = pcie_svt_counting_device_configuration::type_id::create(
       {case_name, "_cfg"});
@@ -354,10 +360,10 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
             {case_name, ": PCIe 5.0 configuration was not selected"});
     require(cfg.pcie_cfg.pl_cfg.disable_ext_bit_clock_mode == 1'b1,
             {case_name, ": internal bit clock mode was not selected"});
-    require(cfg.pcie_cfg.pl_cfg.get_link_width_value() == 4 &&
+    require(cfg.pcie_cfg.pl_cfg.get_link_width_value() == ep_width &&
             cfg.pcie_cfg.pl_cfg.get_supported_link_width_vector_value() ==
-              32'h0000_0007 &&
-            cfg.pcie_cfg.pl_cfg.get_expected_link_width_value() == 4,
+              expected_width_vector(ep_width) &&
+            cfg.pcie_cfg.pl_cfg.get_expected_link_width_value() == ep_width,
             {case_name, ": Endpoint width policy is wrong"});
     require(cfg.pcie_cfg.pl_cfg.get_supported_link_speeds_value() ==
               expected_speed_vector(max_gen) &&
@@ -366,16 +372,24 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
             cfg.pcie_cfg.pl_cfg.get_expected_link_speed_value() ==
               selected_speed,
             {case_name, ": Endpoint speed policy is wrong"});
-    require(cfg.pcie_cfg.enable_multi_endpoint_mode == 1'b1,
-            {case_name, ": EP did not enable Multi-Endpoint Mode"});
+    require(cfg.pcie_cfg.enable_multi_endpoint_mode ==
+              (selected_model == PCIE_SVT_EP_MULTI_BDF),
+            {case_name,
+             ": Multi-Endpoint enable disagrees with descriptor"});
     require(cfg.target_cfg.exists(0),
             {case_name, ": EP target_cfg[0] does not exist"});
     if (cfg.target_cfg.exists(0)) begin
       require(cfg.target_cfg[0] != null,
               {case_name, ": EP target_cfg[0] is null"});
-      if (cfg.target_cfg[0] != null)
-        require(cfg.target_cfg[0].default_bar_ro_map == 32'h0000_ffff,
-                {case_name, ": EP target_cfg[0] BAR RO map is wrong"});
+      if (cfg.target_cfg[0] != null) begin
+        if (selected_model == PCIE_SVT_EP_MULTI_BDF)
+          require(cfg.target_cfg[0].default_bar_ro_map == 32'h0000_ffff,
+                  {case_name, ": EP target_cfg[0] BAR RO map is wrong"});
+        else
+          require(cfg.target_cfg[0].default_bar_ro_map == 32'hdead_beef,
+                  {case_name,
+                   ": Single-Endpoint mode changed target BAR RO map"});
+      end
     end
 
     eq_mode = cfg.pcie_cfg.pl_cfg.get_link_eq_attribute_values();
@@ -699,11 +713,19 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
   virtual function void build_phase(uvm_phase phase);
     super.build_phase(phase);
     if (!uvm_config_db#(svt_pcie_vif)::get(
-          this, "", "primary_rc0_vif", rc_vif) || (rc_vif == null))
-      `uvm_fatal("SVT_DEVICE_CFG", "missing primary_rc0_vif")
+          this, "", "primary_rc0_vif", rc_vif) || (rc_vif == null)) begin
+      if (!uvm_config_db#(svt_pcie_vif)::get(
+            this, "", "primary_vif_0", rc_vif) || (rc_vif == null))
+        `uvm_fatal("SVT_DEVICE_CFG",
+                   "missing primary_rc0_vif and primary_vif_0")
+    end
     if (!uvm_config_db#(svt_pcie_vif)::get(
-          this, "", "primary_ep0_vif", ep_vif) || (ep_vif == null))
-      `uvm_fatal("SVT_DEVICE_CFG", "missing primary_ep0_vif")
+          this, "", "primary_ep0_vif", ep_vif) || (ep_vif == null)) begin
+      if (!uvm_config_db#(svt_pcie_vif)::get(
+            this, "", "peer_vif_0", ep_vif) || (ep_vif == null))
+        `uvm_fatal("SVT_DEVICE_CFG",
+                   "missing primary_ep0_vif and peer_vif_0")
+    end
   endfunction
 
   task run_phase(uvm_phase phase);
@@ -720,8 +742,14 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
         check_apply_case(builder, widths[w], generations[g], 1'b1);
       end
     foreach (generations[g]) begin
-      check_endpoint_apply(builder, generations[g], 1'b0);
-      check_endpoint_apply(builder, generations[g], 1'b1);
+      check_endpoint_apply(builder, generations[g], 1'b0,
+                           PCIE_SVT_EP_SINGLE);
+      check_endpoint_apply(builder, generations[g], 1'b1,
+                           PCIE_SVT_EP_SINGLE);
+      check_endpoint_apply(builder, generations[g], 1'b0,
+                           PCIE_SVT_EP_MULTI_BDF);
+      check_endpoint_apply(builder, generations[g], 1'b1,
+                           PCIE_SVT_EP_MULTI_BDF);
     end
     check_device_mismatch_guards(builder);
     check_device_null_guards(builder);
