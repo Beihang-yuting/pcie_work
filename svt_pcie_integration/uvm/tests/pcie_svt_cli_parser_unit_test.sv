@@ -409,6 +409,10 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
     override_cfg.link_width = 4;
     override_cfg.has_gen = 1'b1;
     override_cfg.max_gen = 4;
+    override_cfg.has_fast_link_training = 1'b1;
+    override_cfg.fast_link_training = 1'b1;
+    override_cfg.has_link_timeout = 1'b1;
+    override_cfg.link_timeout = 2ms;
     overrides.delete();
     overrides.push_back(override_cfg);
     pcie_svt_profile_factory::apply_overrides(topology, overrides, policy,
@@ -419,11 +423,14 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
     override_cfg.link_width = 8;
     override_cfg.max_gen = 5;
     require(policy.link_overrides[0].link_width == 4 &&
-            policy.link_overrides[0].max_gen == 4,
+            policy.link_overrides[0].max_gen == 4 &&
+            policy.link_overrides[0].fast_link_training &&
+            policy.link_overrides[0].link_timeout == 2ms,
             "source override mutation changed policy clone");
     adapter.translate(topology, policy, ports, errors);
     require(errors.size() == 0 && ports.size() == 2 &&
-            ports[1].link_width == 4 && ports[1].max_gen == 4,
+            ports[1].link_width == 4 && ports[1].max_gen == 4 &&
+            ports[1].fast_link_training && ports[1].link_timeout == 2ms,
             "factory override did not reach adapter descriptor");
 
     pcie_svt_peer_fixture_builder::build(
@@ -445,13 +452,21 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
     if (peer_width_override != null) begin
       require(peer_width_override.has_width &&
               peer_width_override.link_width == 4 &&
+              peer_width_override.has_fast_link_training &&
+              peer_width_override.fast_link_training &&
+              peer_width_override.has_link_timeout &&
+              peer_width_override.link_timeout == 2ms &&
               peer_width_override != policy.link_overrides[0],
-              "peer PEER_LINK_1 width override is wrong or aliased");
+              "peer PEER_LINK_1 pair override is incomplete or aliased");
     end
     ports[1].link_width = 8;
+    ports[1].fast_link_training = 1'b0;
+    ports[1].link_timeout = 1ms;
     if (peer_width_override != null)
-      require(peer_width_override.link_width == 4,
-              "peer width override aliases the primary descriptor");
+      require(peer_width_override.link_width == 4 &&
+              peer_width_override.fast_link_training &&
+              peer_width_override.link_timeout == 2ms,
+              "peer pair override aliases the primary descriptor");
     adapter.translate(peer_topology, peer_policy, peer_ports, errors);
     require(errors.size() == 0 && peer_ports.size() == 2,
             {"active-width peer adapter failed: ",
@@ -459,8 +474,10 @@ class pcie_svt_cli_parser_unit_test extends uvm_test;
     if (peer_ports.size() == 2) begin
       require(peer_ports[1].slot_index == 1 &&
               peer_ports[1].physical_width == 8 &&
-              peer_ports[1].link_width == 4,
-              "peer descriptor lost active x4 on physical x8");
+              peer_ports[1].link_width == 4 &&
+              peer_ports[1].fast_link_training &&
+              peer_ports[1].link_timeout == 2ms,
+              "peer descriptor lost an effective pair parameter");
     end
 
     invalid_overrides.delete();

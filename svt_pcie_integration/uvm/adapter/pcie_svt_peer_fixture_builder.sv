@@ -95,7 +95,7 @@ class pcie_svt_peer_fixture_builder extends uvm_object;
       string rc_node_id;
       string ep_node_id;
       string peer_link_id;
-      pcie_svt_link_override_cfg width_override;
+      pcie_svt_link_override_cfg pair_override;
 
       rc_node_id = $sformatf("RC_%0d", i);
       ep_node_id = $sformatf("EP_%0d", i);
@@ -114,12 +114,17 @@ class pcie_svt_peer_fixture_builder extends uvm_object;
         candidate_policy.dut_node_ids.push_back(ep_node_id);
       candidate_policy.hdl_slot_by_link[peer_link_id] =
         primary_ports[i].slot_index;
-      width_override = pcie_svt_link_override_cfg::type_id::create(
-        $sformatf("peer_width_override_%0d", i));
-      width_override.link_id = peer_link_id;
-      width_override.has_width = 1'b1;
-      width_override.link_width = primary_ports[i].link_width;
-      candidate_policy.link_overrides.push_back(width_override);
+      pair_override = pcie_svt_link_override_cfg::type_id::create(
+        $sformatf("peer_pair_override_%0d", i));
+      pair_override.link_id = peer_link_id;
+      pair_override.has_width = 1'b1;
+      pair_override.link_width = primary_ports[i].link_width;
+      pair_override.has_fast_link_training = 1'b1;
+      pair_override.fast_link_training =
+        primary_ports[i].fast_link_training;
+      pair_override.has_link_timeout = 1'b1;
+      pair_override.link_timeout = primary_ports[i].link_timeout;
+      candidate_policy.link_overrides.push_back(pair_override);
     end
     candidate_topology = builder.finish();
     candidate_topology.validate(validation_errors);

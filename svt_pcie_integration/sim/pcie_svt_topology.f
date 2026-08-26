@@ -25,4 +25,5 @@
 ../uvm/tests/pcie_svt_device_cfg_unit_test.sv
 ../uvm/tests/pcie_svt_topology_base_test.sv
 ../uvm/tests/pcie_svt_cfg_init_directed_test.sv
+../uvm/tests/pcie_svt_peer_test.sv
 ../rtl/pcie_svt_topology_env_top.sv

@@ -8,9 +8,6 @@
   `ifdef PCIE_USE_SVT_SWITCH_PROXY
     `error "PCIe topology environment does not support an SVT Switch Proxy"
   `endif
-  `ifdef PCIE_USE_SVT_PEER
-    `error "PCIe topology environment does not create peer agents"
-  `endif
 `else
   // Preserve the legacy top's independent connection contract until cut-over.
   `ifdef PCIE_USE_REAL_SWITCH_DUT
