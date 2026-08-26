@@ -500,6 +500,7 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
   function void check_cfg_space_builder();
     pcie_svt_cfg_space_builder builder;
     pcie_svt_port_descriptor descriptor;
+    pcie_svt_port_descriptor single_descriptor;
     pcie_svt_bar_cfg null_bar;
     bit [31:0] image[1024];
     bit [15:0] device_id;
@@ -523,8 +524,42 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
     require(builder.bar_initial_value(null_bar, 1'b0) == 32'h0000_0000,
             "null BAR initial value is not zero");
 
+    single_descriptor = make_descriptor(
+      "single_ep_pf0", PCIE_SVT_ROLE_EP, 16, 16, 5, 1'b0, 0);
+    single_descriptor.endpoint_model = PCIE_SVT_EP_SINGLE;
+    configure_ep_bars(single_descriptor);
+    builder.build_ep_pf0(single_descriptor, image);
+    require(builder.bar_sizing_value(
+              single_descriptor.ep_bars[0], 1'b0) == 32'hfe00_000c,
+            "32 MiB BAR sizing low DWORD is wrong");
+    require(builder.bar_sizing_value(
+              single_descriptor.ep_bars[0], 1'b1) == 32'hffff_ffff,
+            "32 MiB BAR sizing high DWORD is wrong");
+    require(builder.bar_sizing_value(
+              single_descriptor.ep_bars[2], 1'b0) == 32'hffff_000c,
+            "64 KiB BAR sizing low DWORD is wrong");
+    require(image['h010/4] == 32'hfe00_000c &&
+            image['h014/4] == 32'hffff_ffff,
+            "PF0 BAR0/1 sizing pair is wrong");
+    require(image['h018/4] == 32'hffff_000c &&
+            image['h01c/4] == 32'hffff_ffff,
+            "PF0 BAR2/3 sizing pair is wrong");
+    require(image['h020/4] == 32'hffff_000c &&
+            image['h024/4] == 32'hffff_ffff,
+            "PF0 BAR4/5 sizing pair is wrong");
+    require(image['h034/4] == 32'h0000_0040,
+            "PF0 Capability Pointer is wrong");
+    require(image['h040/4] == 32'h0002_0010,
+            "PF0 PCI Express Capability header is wrong");
+    require(image['h04c/4][9:4] == single_descriptor.link_width &&
+            image['h04c/4][3:0] == single_descriptor.max_gen,
+            "PF0 Link Capabilities width/generation is wrong");
+    require(image['h100/4] == 32'h0000_0000,
+            "PF0 extended capability chain is not terminated");
+
     descriptor = make_descriptor("ep_pf0", PCIE_SVT_ROLE_EP,
                                  4, 4, 5, 1'b0, 3);
+    descriptor.endpoint_model = PCIE_SVT_EP_MULTI_BDF;
     descriptor.ep_bars[0].implemented = 1'b1;
     descriptor.ep_bars[0].is_64bit = 1'b1;
     descriptor.ep_bars[0].prefetchable = 1'b1;
