@@ -125,7 +125,8 @@ class pcie_tl_codec extends uvm_object;
         // Payload
         payload_start = offset + hdr_len;
         if (fmt == FMT_3DW_WITH_DATA || fmt == FMT_4DW_WITH_DATA) begin
-            bit [9:0] len_dw = (tlp.length == 0) ? 10'd1024 : tlp.length;
+            int unsigned len_dw;
+            len_dw = (tlp.length == 0) ? 1024 : tlp.length;
             payload_len = len_dw * 4;
             // Account for ECRC at end
             if (tlp.td && (bytes.size() >= payload_start + payload_len + 4))
