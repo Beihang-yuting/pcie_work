@@ -92,6 +92,7 @@ class pcie_svt_enumeration_registry_unit_test extends uvm_test;
     pcie_svt_bridge_record bridge;
     svt_pcie_ep_enumeration_seq_status status0;
     svt_pcie_ep_enumeration_seq_status status1;
+    string direct_links[$];
     string diagnostic;
     string errors[$];
 
@@ -115,6 +116,26 @@ class pcie_svt_enumeration_registry_unit_test extends uvm_test;
               "RC0_EP0", diagnostic) &&
             uvm_is_match("*Multiple-BDF*", diagnostic),
             "Multiple-BDF peer was accepted or poorly diagnosed");
+
+    direct_links.push_back("RC0_EP0");
+    direct_links.push_back("RC1_EP1");
+    enumeration.peer_endpoint_model_by_link["RC0_EP0"] =
+      PCIE_SVT_EP_SINGLE;
+    require(!enumeration.all_peer_models_allow_official_enum(
+              direct_links, diagnostic) &&
+            uvm_is_match("*RC1_EP1*missing*", diagnostic),
+            "two-root preflight accepted a missing peer mapping");
+    enumeration.peer_endpoint_model_by_link["RC1_EP1"] =
+      PCIE_SVT_EP_MULTI_BDF;
+    require(!enumeration.all_peer_models_allow_official_enum(
+              direct_links, diagnostic) &&
+            uvm_is_match("*RC1_EP1*Multiple-BDF*", diagnostic),
+            "two-root preflight accepted a Multiple-BDF peer");
+    enumeration.peer_endpoint_model_by_link["RC1_EP1"] =
+      PCIE_SVT_EP_SINGLE;
+    require(enumeration.all_peer_models_allow_official_enum(
+              direct_links, diagnostic),
+            "two-root preflight rejected all-Single peers");
 
     // The two RCs are independent roots.  Reusing 01:00.0 and the same
     // allocation coordinates across the two hierarchies is intentional.

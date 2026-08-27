@@ -28,6 +28,16 @@ class pcie_svt_enumeration_vseq extends
     return 1'b1;
   endfunction
 
+  function bit all_peer_models_allow_official_enum(
+      input string link_ids[$], output string diagnostic);
+    diagnostic = "";
+    foreach (link_ids[i]) begin
+      if (!peer_model_allows_official_enum(link_ids[i], diagnostic))
+        return 1'b0;
+    end
+    return 1'b1;
+  endfunction
+
   protected function bit [63:0] expected_aperture(
       int unsigned pair);
     case (pair)
@@ -270,6 +280,7 @@ class pcie_svt_enumeration_vseq extends
   virtual task body();
     string direct_links[$];
     string errors[$];
+    string model_diagnostic;
 
     if (p_sequencer == null)
       `uvm_fatal("SVT_ENUM_HANDLE",
@@ -281,6 +292,9 @@ class pcie_svt_enumeration_vseq extends
     if (direct_links.size() == 0)
       `uvm_fatal("SVT_ENUM_TOPOLOGY",
         "direct Endpoint enumeration found no RC links")
+    if (!all_peer_models_allow_official_enum(
+          direct_links, model_diagnostic))
+      `uvm_fatal("SVT_ENUM_ENDPOINT_MODEL", model_diagnostic)
 
     foreach (direct_links[i]) begin
       fork
