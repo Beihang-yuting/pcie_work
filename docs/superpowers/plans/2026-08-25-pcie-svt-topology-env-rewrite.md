@@ -27,7 +27,7 @@
 | `svt_pcie_integration/uvm/cfg/pcie_svt_cfg_space_builder.sv` | Create | Minimal PF0 image and documented BAR RO-map calculations |
 | `svt_pcie_integration/uvm/env/pcie_svt_topology_virtual_sequencer.sv` | Create | Link-ID registry and per-stage state |
 | `svt_pcie_integration/uvm/env/pcie_svt_topology_env.sv` | Create | One-sided SVT agent construction; official compatibility aliases |
-| `svt_pcie_integration/uvm/sequences/pcie_svt_cfg_init_vseq.sv` | Create | Refresh and Target App configuration while reset is asserted |
+| `svt_pcie_integration/uvm/sequences/pcie_svt_cfg_init_vseq.sv` | Create | Refresh under reset, then reset release and Target App configuration with links disabled |
 | `svt_pcie_integration/uvm/sequences/pcie_svt_link_vseq.sv` | Create | Parallel DL/PHY enable and negotiated link checks |
 | `svt_pcie_integration/uvm/sequences/pcie_svt_enumeration_registry.sv` | Create | Direct and Switch enumeration results keyed by hierarchy/link |
 | `svt_pcie_integration/uvm/sequences/pcie_svt_enumeration_vseq.sv` | Create | Official EP/Switch enumeration and configuration readback |
@@ -1352,33 +1352,40 @@ BAR5 GET_MAP
 SET_COMPLETER_SPACE_ENABLE memory=1
 ~~~
 
-Require exactly 24 BAR checks for the four downstream Endpoint agents in the Switch profile and zero BAR operations for the upstream RC. Do not expect or emit an RC-skip record.
+Require exactly 24 BAR checks for the four downstream Endpoint agents in the
+Switch profile and zero BAR operations for the upstream RC. Do not expect or
+emit a synthetic RC-skip record.
 
 - [ ] **Step 2: Prove the directed test is red**
 
 Expected compile failure names `pcie_svt_cfg_init_vseq`.
 
-- [ ] **Step 3: Implement exact R-2020.12 warning handling**
+- [ ] **Step 3: Publish a normalized R-2020.12 runtime configuration**
 
-Create a report catcher that catches only severity `UVM_WARNING`, ID `is_valid`, and the full known R-2020.12 message:
-
-~~~text
-Both enable_multi_endpoint_mode and device_is_root are set.  Multi-Endpoint Mode is only valid when the vip is configured as an endpoint.  Ignoring the value of enable_multi_endpoint_mode.
-~~~
-
-Install one catcher around the complete parallel group of Endpoint-only
-`REFRESH_CFG` calls, count one match per refreshed Endpoint, wait for every
-refresh child to return, remove the catcher immediately, and fatal if the count
-differs. Do not install one global catcher per concurrent Endpoint. Every other
-report is rethrown.
+For each Endpoint, call `agent.get_cfg()` to obtain the normalized current
+configuration, clone it into a per-Endpoint runtime object, and require
+Endpoint role, Multi-Endpoint Mode, and a non-null `target_cfg[0]`. Publish the
+clone at the agent's exact config-DB scope immediately before `REFRESH_CFG`.
+The topology registry retains its original configuration handle. Do not catch,
+demote, or otherwise suppress an `is_valid` warning; the published clone must
+pass `is_valid(0)` without adding a warning.
 
 - [ ] **Step 4: Implement per-Endpoint refresh and BAR service**
 
-Before `REFRESH_CFG`:
+Before `REFRESH_CFG`, fetch, clone, validate, and publish the agent-current
+configuration:
 
 ~~~systemverilog
+agent.get_cfg(generic_cfg);
+if (!$cast(current_cfg, generic_cfg) ||
+    !$cast(runtime_cfg, current_cfg.clone()))
+  `uvm_fatal("SVT_CFG_REFRESH", descriptor.link_id)
+if (runtime_cfg.device_is_root ||
+    !runtime_cfg.pcie_cfg.enable_multi_endpoint_mode ||
+    !runtime_cfg.target_cfg.exists(0) || runtime_cfg.target_cfg[0] == null)
+  `uvm_fatal("SVT_CFG_REFRESH", descriptor.link_id)
 uvm_config_db#(svt_pcie_device_configuration)::set(
-  agent, "", "cfg", cfg);
+  agent, "", "cfg", runtime_cfg);
 refresh_seq = svt_pcie_device_agent_service_sequence::type_id::create(
   {descriptor.link_id, "_refresh"});
 if (!refresh_seq.randomize() with {
@@ -1388,6 +1395,11 @@ if (!refresh_seq.randomize() with {
 refresh_seq.start(seqr.device_agent_service_seqr);
 ~~~
 
+After every Endpoint refresh returns, release reset once, confirm that all
+effective links remain down, and do not start either the DL-link-enable or
+PL-PHY-enable sequence. Only then allow the per-Endpoint PF0 and Target App
+work to proceed.
+
 For BAR0 through BAR5, derive the low/upper source BAR and expected values from the descriptor. Start `svt_pcie_target_app_service_set_bar_ro_map_sequence`, `write_addr_sequence`, `read_addr_sequence`, and `get_bar_ro_map_sequence` on `seqr.target_seqr[0]`. Use ECAM `{16'h0000, 12'(12'h010 + 4*bar)}`. Fatal on read or map mismatch.
 
 For the same PF0, call `pcie_svt_cfg_space_builder::build_ep_pf0` and preload
@@ -1395,8 +1407,14 @@ all 1024 DWORDs through `svt_pcie_cfg_database_service::WRITE_CFG_DWORD` on
 `seqr.cfg_database_seqr`; zero DWORDs are intentional reset data. Read back
 DWORDs `000`, `004`, `008`, `00c`, `010` through `024`, `02c`, and `03c`
 with `READ_CFG_DWORD` and compare the complete 32-bit values. All database and
-Target App work remains inside the per-Endpoint `cfg_timeout` and occurs before
-reset release.
+Target App work occurs after reset release while links remain disabled. Bind
+each configuration-database request to that Endpoint's published runtime clone,
+not the topology registry object. One per-Endpoint `cfg_timeout` is a total
+budget from child-sequence start through refresh, reset barrier, PF0 work, BAR
+work, completer enable, and completion; do not restart the timeout at the reset
+barrier. A completion scheduled exactly at the deadline is accepted after one
+`#1step` settle; a later or absent completion is fatal, with start, deadline,
+and completion times in the diagnostic.
 
 Finally start:
 
@@ -1406,9 +1424,19 @@ svt_pcie_target_app_service_set_completer_space_enable_sequence
 
 with `io_select=0` and `data=1`.
 
-- [ ] **Step 5: Run configuration while reset remains asserted**
+- [ ] **Step 5: Run staged configuration without enabling links**
 
-`pcie_svt_cfg_init_vseq` waits 205 ns, asserts every effective link remains down, refreshes/configures all Endpoint agents in parallel with each descriptor's `cfg_timeout`, and sets their CFG stage to PASS. RC agents receive CFG PASS after cfg/status/sequencer handle validation but no BAR service. The sequence has a `bit program_target_bars=1` control: primary environments keep it enabled; a peer environment enables it only for direct EP profiles where the peer Endpoint will be enumerated. Switch point-to-point peers set it to zero, so the Switch peer run still checks exactly the four primary downstream Endpoint BAR sets.
+`pcie_svt_cfg_init_vseq` waits 205 ns with reset asserted, confirms every
+effective link remains down, refreshes every Endpoint, releases reset without
+enabling DL or PHY, and then performs the PF0/BAR/completer work. Endpoint work
+runs in parallel, and each Endpoint receives one whole-sequence
+`descriptor.cfg_timeout` budget before its CFG stage becomes PASS. RC agents
+receive CFG PASS after cfg/status/sequencer handle validation but no BAR
+service. The sequence has a `bit program_target_bars=1` control: primary
+environments keep it enabled; a peer environment enables it only for direct EP
+profiles where the peer Endpoint will be enumerated. Switch point-to-point
+peers set it to zero, so the Switch peer run still checks exactly the four
+primary downstream Endpoint BAR sets.
 
 Run the idle Switch DUT wrapper at Gen4 and Gen5:
 

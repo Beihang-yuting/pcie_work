@@ -48,32 +48,38 @@ referenced integration sources are supplied by later integration tasks.
 
 ## Configuration-space initialization regression
 
-Compile exactly one topology macro and select Gen4 or Gen5 at run time. For
-example, the switch-facing topology is compiled with:
+Compile exactly one topology macro and select Gen4 or Gen5 at run time. The
+verified Switch directed-CFG image is compiled with:
 
 ```sh
-mkdir -p build_switch
+mkdir -p build_dut_enum_switch
 vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
   +define+SVT_PCIE_ENABLE_GEN5 +define+SVT_PCIE_ENABLE_SERDES_ARCH \
-  +define+PCIE_TOPO_SWITCH_1X16_4X4 \
-  -f pcie_svt.f -top pcie_svt_topology_top \
-  -Mdir=build_switch/csrc -P pli.tab msglog.o \
-  -o build_switch/simv -l build_switch/compile.log
+  +define+PCIE_TOPO_SWITCH_1X16_4X4 +define+PCIE_USE_SVT_PEER \
+  -f pcie_svt_topology.f -top pcie_svt_topology_top \
+  -Mdir=build_dut_enum_switch/csrc -P pli.tab msglog.o \
+  -o build_dut_enum_switch/simv -l build_dut_enum_switch/compile.log
 ```
 
-Run the configuration-only flow with a bare `+PCIE_CFG_INIT_ONLY` argument:
+Run the directed configuration-only regression with all three mandatory
+runtime selectors: topology, generation, and run mode.
 
 ```sh
-./build_switch/simv -no_save \
-  +UVM_TESTNAME=pcie_svt_base_test +PCIE_GEN=4 \
-  +PCIE_CFG_INIT_ONLY +UVM_NO_RELNOTES \
-  -l build_switch/run_cfg_init.log
+./build_dut_enum_switch/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_cfg_init_directed_test \
+  +PCIE_TOPOLOGY=SWITCH_1X16_4X4 +PCIE_CFG_INIT_ONLY \
+  +PCIE_GEN=4 +UVM_NO_RELNOTES \
+  -l build_dut_enum_switch/cfg_directed.log
 ```
 
-For every Endpoint, the flow enables R-2020.12 Multi-Endpoint Mode, sets
-`target_cfg[0].default_bar_ro_map` to `0000_ffff`, refreshes the agent while
-the link is down, and programs then reads back BAR0 through BAR5 through the
-Target App service sequencer. The expected maps for the three 64-bit
+The first phase keeps all four downstream ports at their default
+`PCIE_SVT_EP_SINGLE` model with `enable_multi_endpoint_mode=0`. It loads the
+ordinary PF0 image and emits one `REFRESH_CFG` per Endpoint without invoking
+Target App BAR services. The test then explicitly changes those four ports to
+`PCIE_SVT_EP_MULTI_BDF` with Multi-Endpoint Mode enabled. Only that
+Multiple-BDF phase programs and reads back BAR0 through BAR5 through the
+Target App service sequencer. The expected maps for its three 64-bit
 Prefetchable BAR pairs are:
 
 ```text
@@ -82,17 +88,75 @@ BAR2/3: 0000_ffff / 0000_0000  (64 KiB)
 BAR4/5: 0000_ffff / 0000_0000  (64 KiB)
 ```
 
-R-2020.12 emits one incorrect `is_valid` role warning per Endpoint during
-`REFRESH_CFG`, even though the Endpoint role is zero and the Target App accepts
-the Multi-Endpoint requests. The integration catches only that exact message,
-only during the refresh window, checks its expected count, and records
-`MULTI_EP_REFRESH_VENDOR_WORKAROUND`. Other warnings are not caught.
+The directed test requires four Single-Endpoint and four Multiple-BDF
+`PCIE_SVT_CFG_SPACE_CHECK` records, exactly 24 `PCIE_SVT_BAR_CHECK` records,
+96 ordered BAR service operations, and five final
+`CFG=PASS LINK=NOT_RUN ENUM=NOT_RUN TRAFFIC=NOT_RUN` stage rows. It finishes
+with zero `UVM_WARNING`, `UVM_ERROR`, and `UVM_FATAL` counts. This regression
+does not start Switch link, enumeration, or traffic stages and does not claim
+Switch enumeration support.
 
-The switch topology must report 24 `MULTI_EP_BAR_CHECK` operations, one RC
-`MULTI_EP_BAR_SKIP`, five `CFG_INIT_DONE` operations, and zero final
-`UVM_WARNING`, `UVM_ERROR`, and `UVM_FATAL` counts. The x16 and 2x8 DUT-Endpoint
-topologies contain only primary RC VIPs, so their Target App BAR initialization
-is intentionally skipped once and twice, respectively.
+## Active Endpoint enumeration
+
+Current Endpoint peers default to `PCIE_SVT_EP_SINGLE` with
+`enable_multi_endpoint_mode=0`. CFG initialization loads ordinary PF0 BAR
+bases and attributes. During official enumeration, the wrapper selects DUT
+semantics (`is_ep_device_vip=0`), and one active Target App callback per
+Single-Endpoint port returns the descriptor-derived write-all-ones sizing
+response. The callback does not drop TLPs and does not intercept ordinary
+Configuration or Memory traffic.
+
+The proven BAR contract is BAR0/1=32 MiB, BAR2/3=64 KiB, and BAR4/5=64 KiB;
+all three are 64-bit Prefetchable Memory BARs. Multiple-BDF ports retain the
+documented Target App BAR services and are excluded from full official
+Endpoint enumeration.
+
+The current command-line contract requires the compiled profile to be selected
+again with exactly one `+PCIE_TOPOLOGY=<profile>` argument, exactly one
+`+PCIE_GEN=<4|5>` argument, and exactly one run-mode argument. The following
+commands are the verified x16 and 2x8 enumeration invocations:
+
+```sh
+./build_dut_enum_semantics_green/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_peer_test +PCIE_TOPOLOGY=EP_X16 \
+  +PCIE_ENUM_ONLY +PCIE_GEN=4 +UVM_NO_RELNOTES \
+  -l build_dut_enum_semantics_green/enum_gen4_x16.log
+
+./build_dut_enum_semantics_green/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_peer_test +PCIE_TOPOLOGY=EP_X16 \
+  +PCIE_ENUM_ONLY +PCIE_GEN=5 +UVM_NO_RELNOTES \
+  -l build_dut_enum_semantics_green/enum_gen5_x16.log
+
+./build_dut_enum_2x8_gen4/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_peer_test +PCIE_TOPOLOGY=EP_2X8 \
+  +PCIE_ENUM_ONLY +PCIE_GEN=4 +UVM_NO_RELNOTES \
+  -l build_dut_enum_2x8_gen4/enum_gen4.log
+
+./build_dut_enum_2x8_gen5/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_peer_test +PCIE_TOPOLOGY=EP_2X8 \
+  +PCIE_ENUM_ONLY +PCIE_GEN=5 +UVM_NO_RELNOTES \
+  -l build_dut_enum_2x8_gen5/enum_gen5.log
+```
+
+The x16 runs each produce exactly one `PCIE_SVT_LINK_PASS`, one root-0
+`PCIE_SVT_ENUM_PASS` for BDF `01:00.0` with three BAR pairs, and one final
+`CFG=PASS LINK=PASS ENUM=PASS TRAFFIC=NOT_RUN` stage row. The 2x8 runs each
+produce exactly two link passes, root-0 and root-1 enumeration passes (each
+independent hierarchy may allocate BDF `01:00.0`) with three BAR pairs per
+root, and two final PASS stage rows. The assigned apertures are:
+
+| Root hierarchy | BAR0/1 | BAR2/3 | BAR4/5 |
+| --- | --- | --- | --- |
+| 0 | `0x100000000-0x101ffffff` | `0x102000000-0x10200ffff` | `0x102010000-0x10201ffff` |
+| 1 (2x8 only) | `0x110000000-0x111ffffff` | `0x112000000-0x11200ffff` | `0x112010000-0x11201ffff` |
+
+All four runs finish with idle BAR-sizing callbacks and final
+`UVM_WARNING/UVM_ERROR/UVM_FATAL=0/0/0`. The x16 links negotiate x16 and the
+2x8 links negotiate x8 at 16 GT/s for Gen4 or 32 GT/s for Gen5.
+
+`SWITCH_1X16_4X4` remains callback-registration and link-only coverage. Its
+five links train, but enumeration is not supported until a real Switch DUT
+supplies Type-1 configuration spaces and forwarding.
 
 ## Real-Switch staged environment
 
