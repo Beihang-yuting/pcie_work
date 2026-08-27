@@ -48,32 +48,38 @@ referenced integration sources are supplied by later integration tasks.
 
 ## Configuration-space initialization regression
 
-Compile exactly one topology macro and select Gen4 or Gen5 at run time. For
-example, the switch-facing topology is compiled with:
+Compile exactly one topology macro and select Gen4 or Gen5 at run time. The
+verified Switch directed-CFG image is compiled with:
 
 ```sh
-mkdir -p build_switch
+mkdir -p build_dut_enum_switch
 vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
   +define+SVT_PCIE_ENABLE_GEN5 +define+SVT_PCIE_ENABLE_SERDES_ARCH \
-  +define+PCIE_TOPO_SWITCH_1X16_4X4 \
-  -f pcie_svt.f -top pcie_svt_topology_top \
-  -Mdir=build_switch/csrc -P pli.tab msglog.o \
-  -o build_switch/simv -l build_switch/compile.log
+  +define+PCIE_TOPO_SWITCH_1X16_4X4 +define+PCIE_USE_SVT_PEER \
+  -f pcie_svt_topology.f -top pcie_svt_topology_top \
+  -Mdir=build_dut_enum_switch/csrc -P pli.tab msglog.o \
+  -o build_dut_enum_switch/simv -l build_dut_enum_switch/compile.log
 ```
 
-Run the configuration-only flow with a bare `+PCIE_CFG_INIT_ONLY` argument:
+Run the directed configuration-only regression with all three mandatory
+runtime selectors: topology, generation, and run mode.
 
 ```sh
-./build_switch/simv -no_save \
-  +UVM_TESTNAME=pcie_svt_base_test +PCIE_GEN=4 \
-  +PCIE_CFG_INIT_ONLY +UVM_NO_RELNOTES \
-  -l build_switch/run_cfg_init.log
+./build_dut_enum_switch/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_cfg_init_directed_test \
+  +PCIE_TOPOLOGY=SWITCH_1X16_4X4 +PCIE_CFG_INIT_ONLY \
+  +PCIE_GEN=4 +UVM_NO_RELNOTES \
+  -l build_dut_enum_switch/cfg_directed.log
 ```
 
-For every Endpoint, the flow enables R-2020.12 Multi-Endpoint Mode, sets
-`target_cfg[0].default_bar_ro_map` to `0000_ffff`, refreshes the agent while
-the link is down, and programs then reads back BAR0 through BAR5 through the
-Target App service sequencer. The expected maps for the three 64-bit
+The first phase keeps all four downstream ports at their default
+`PCIE_SVT_EP_SINGLE` model with `enable_multi_endpoint_mode=0`. It loads the
+ordinary PF0 image and emits one `REFRESH_CFG` per Endpoint without invoking
+Target App BAR services. The test then explicitly changes those four ports to
+`PCIE_SVT_EP_MULTI_BDF` with Multi-Endpoint Mode enabled. Only that
+Multiple-BDF phase programs and reads back BAR0 through BAR5 through the
+Target App service sequencer. The expected maps for its three 64-bit
 Prefetchable BAR pairs are:
 
 ```text
@@ -82,17 +88,13 @@ BAR2/3: 0000_ffff / 0000_0000  (64 KiB)
 BAR4/5: 0000_ffff / 0000_0000  (64 KiB)
 ```
 
-R-2020.12 emits one incorrect `is_valid` role warning per Endpoint during
-`REFRESH_CFG`, even though the Endpoint role is zero and the Target App accepts
-the Multi-Endpoint requests. The integration catches only that exact message,
-only during the refresh window, checks its expected count, and records
-`MULTI_EP_REFRESH_VENDOR_WORKAROUND`. Other warnings are not caught.
-
-The switch topology must report 24 `MULTI_EP_BAR_CHECK` operations, one RC
-`MULTI_EP_BAR_SKIP`, five `CFG_INIT_DONE` operations, and zero final
-`UVM_WARNING`, `UVM_ERROR`, and `UVM_FATAL` counts. The x16 and 2x8 DUT-Endpoint
-topologies contain only primary RC VIPs, so their Target App BAR initialization
-is intentionally skipped once and twice, respectively.
+The directed test requires four Single-Endpoint and four Multiple-BDF
+`PCIE_SVT_CFG_SPACE_CHECK` records, exactly 24 `PCIE_SVT_BAR_CHECK` records,
+96 ordered BAR service operations, and five final
+`CFG=PASS LINK=NOT_RUN ENUM=NOT_RUN TRAFFIC=NOT_RUN` stage rows. It finishes
+with zero `UVM_WARNING`, `UVM_ERROR`, and `UVM_FATAL` counts. This regression
+does not start Switch link, enumeration, or traffic stages and does not claim
+Switch enumeration support.
 
 ## Active Endpoint enumeration
 
