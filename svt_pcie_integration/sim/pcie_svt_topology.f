@@ -25,6 +25,7 @@
 ../uvm/tests/pcie_svt_topology_adapter_unit_test.sv
 ../uvm/tests/pcie_svt_cli_parser_unit_test.sv
 ../uvm/tests/pcie_svt_device_cfg_unit_test.sv
+../uvm/tests/pcie_svt_enumeration_registry_unit_test.sv
 ../uvm/tests/pcie_svt_topology_base_test.sv
 ../uvm/tests/pcie_svt_cfg_init_directed_test.sv
 ../uvm/tests/pcie_svt_peer_test.sv

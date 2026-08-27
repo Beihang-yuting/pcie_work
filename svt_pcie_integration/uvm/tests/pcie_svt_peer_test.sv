@@ -11,6 +11,7 @@ class pcie_svt_peer_test extends pcie_svt_topology_base_test;
   pcie_topology_cfg peer_topology_cfg;
   pcie_svt_topology_policy_cfg peer_policy_cfg;
   pcie_svt_topology_env peer_env;
+  pcie_svt_enumeration_registry enumeration_registry;
 
   function new(string name = "pcie_svt_peer_test",
                uvm_component parent = null);
@@ -155,6 +156,53 @@ class pcie_svt_peer_test extends pcie_svt_topology_base_test;
         env.vseqr.reset_vif.asserted, peer_env.vseqr.reset_vif.asserted))
   endtask
 
+  protected task run_direct_enumeration();
+    pcie_svt_enumeration_vseq enumeration;
+
+    enumeration_registry = pcie_svt_enumeration_registry::type_id::create(
+      "enumeration_registry");
+    enumeration = pcie_svt_enumeration_vseq::type_id::create(
+      "enumeration");
+    if ((enumeration_registry == null) || (enumeration == null))
+      `uvm_fatal("SVT_PEER_ENUM",
+        "direct enumeration registry/sequence creation failed")
+    enumeration.registry = enumeration_registry;
+    foreach (env.descriptors[i]) begin
+      int unsigned match_count;
+
+      match_count = 0;
+      foreach (peer_env.descriptors[j]) begin
+        if ((peer_env.descriptors[j] != null) &&
+            (env.descriptors[i] != null) &&
+            (peer_env.descriptors[j].slot_index ==
+             env.descriptors[i].slot_index)) begin
+          enumeration.peer_endpoint_model_by_link[
+            env.descriptors[i].link_id] =
+              peer_env.descriptors[j].endpoint_model;
+          match_count++;
+        end
+      end
+      if ((env.descriptors[i] == null) || (match_count != 1))
+        `uvm_fatal("SVT_PEER_ENUM", $sformatf(
+          "%s peer slot match count=%0d expected=1",
+          (env.descriptors[i] == null) ? "<null>" :
+            env.descriptors[i].link_id, match_count))
+    end
+    enumeration.start(env.vseqr);
+    if (!enumeration_registry.is_finalized() ||
+        (enumeration_registry.endpoint_count() != env.port_count()))
+      `uvm_fatal("SVT_PEER_ENUM", $sformatf(
+        "profile=%s expected=%0d finalized=%0d endpoints=%0d",
+        profile_name, env.port_count(),
+        enumeration_registry.is_finalized(),
+        enumeration_registry.endpoint_count()))
+    foreach (env.vseqr.descriptor_by_link[link_id]) begin
+      if (env.vseqr.enum_state[link_id] != PCIE_SVT_STAGE_PASS)
+        `uvm_fatal("SVT_PEER_ENUM", $sformatf(
+          "%s ENUM stage did not pass", link_id))
+    end
+  endtask
+
   virtual task run_phase(uvm_phase phase);
     pcie_svt_link_vseq link_sequence;
 
@@ -172,6 +220,9 @@ class pcie_svt_peer_test extends pcie_svt_topology_base_test;
       link_sequence.peer_seqr = peer_env.vseqr;
       link_sequence.start(null);
     end
+    if ((run_mode >= PCIE_SVT_RUN_ENUM) &&
+        (profile_name != "SWITCH_1X16_4X4"))
+      run_direct_enumeration();
     env.vseqr.report_stage_table();
     if (!env.bar_sizing_callbacks_are_idle() ||
         !peer_env.bar_sizing_callbacks_are_idle())
