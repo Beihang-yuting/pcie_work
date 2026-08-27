@@ -172,11 +172,25 @@ module pcie_svt_topology_ep_bar_sizing_callback_unit_test;
             callback.sizing_completion_count == 6,
             "callback counters are unbalanced");
 
+    callback.configure(make_descriptor());
+    transaction = make_cfg("invalid_cfg_write_bar0", 0, 1,
+                           32'hffff_ffff, 10'h190);
+    callback.post_rx_tlp_get(null, transaction, drop);
+    sizing_read[0] = make_cfg("invalid_cfg_read_bar0", 0, 0, 0, 10'h191);
+    callback.post_rx_tlp_get(null, sizing_read[0], drop);
+    transaction = make_cfg("invalid_cfg_write_bar2", 2, 1,
+                           32'hffff_ffff, 10'h192);
+    callback.post_rx_tlp_get(null, transaction, drop);
+    require(!callback.is_idle(),
+            "invalid-configure test did not create transient probe state");
     descriptor.endpoint_model = PCIE_SVT_EP_MULTI_BDF;
     catcher.arm("TOPO_BAR_CB_CFG");
     callback.configure(descriptor);
-    require(catcher.catch_count == 1,
-            "Multiple-BDF descriptor was not rejected");
+    require(catcher.catch_count == 1 && callback.is_idle() &&
+            callback.sizing_write_count == 0 &&
+            callback.sizing_read_count == 0 &&
+            callback.sizing_completion_count == 0,
+            "rejected descriptor did not immediately abort probe state");
 
     callback.configure(make_descriptor());
     transaction = make_cfg("dup_write_bar0", 0, 1,
@@ -190,11 +204,11 @@ module pcie_svt_topology_ep_bar_sizing_callback_unit_test;
     transaction = make_cfg("dup_read_bar2", 2, 0, 0, 10'h1a1);
     catcher.arm("TOPO_BAR_CB_DUP");
     callback.post_rx_tlp_get(null, transaction, drop);
-    require(catcher.catch_count == 2,
-            "duplicate requester/tag was not rejected");
-    transaction = make_completion("dup_cleanup", sizing_read[0], 0);
-    callback.pre_tx_tlp_put(null, transaction, drop);
-    require(callback.is_idle(), "duplicate-key test retained callback state");
+    require(catcher.catch_count == 2 && callback.is_idle() &&
+            callback.sizing_write_count == 0 &&
+            callback.sizing_read_count == 0 &&
+            callback.sizing_completion_count == 0,
+            "duplicate requester/tag did not immediately abort probe state");
 
     callback.configure(make_descriptor());
     transaction = make_cfg("bad_size_write", 0, 1, 32'hffff_ffff, 10'h1a0);
@@ -205,8 +219,11 @@ module pcie_svt_topology_ep_bar_sizing_callback_unit_test;
     transaction.completion_status = svt_pcie_tlp::UNSUPPORTED_REQ;
     catcher.arm("TOPO_BAR_CB_CPL");
     callback.pre_tx_tlp_put(null, transaction, drop);
-    require(catcher.catch_count == 3 && callback.is_idle(),
-            "malformed Completion was not rejected and cleared");
+    require(catcher.catch_count == 3 && callback.is_idle() &&
+            callback.sizing_write_count == 0 &&
+            callback.sizing_read_count == 0 &&
+            callback.sizing_completion_count == 0,
+            "malformed Completion did not immediately abort probe state");
     uvm_report_cb::delete(null, catcher);
     $display("TOPOLOGY_EP_BAR_SIZING_CALLBACK_PASS bars=6 ordinary=5 memory=1");
     $finish;

@@ -27,9 +27,19 @@ class pcie_svt_topology_ep_bar_sizing_callback extends
     return {tlp.requester_id, tlp.tag};
   endfunction
 
+  protected function void reset_probe_state();
+    sizing_write_count = 0;
+    sizing_read_count = 0;
+    sizing_completion_count = 0;
+    pending_bar.delete();
+    foreach (armed[i])
+      armed[i] = 0;
+  endfunction
+
   function void configure(pcie_svt_port_descriptor descriptor);
     pcie_svt_cfg_space_builder builder;
 
+    reset_probe_state();
     if ((descriptor == null) ||
         (descriptor.role != PCIE_SVT_ROLE_EP) ||
         (descriptor.endpoint_model != PCIE_SVT_EP_SINGLE)) begin
@@ -42,15 +52,10 @@ class pcie_svt_topology_ep_bar_sizing_callback extends
     if ((builder == null) || !builder.validate_ep_descriptor(descriptor))
       return;
     link_id = descriptor.link_id;
-    sizing_write_count = 0;
-    sizing_read_count = 0;
-    sizing_completion_count = 0;
-    pending_bar.delete();
     foreach (valid[i]) begin
       valid[i] = 0;
       is_lower[i] = 0;
       fixed_attributes[i] = 0;
-      armed[i] = 0;
       raw_mask[i] = 0;
     end
     foreach (descriptor.ep_bars[i]) begin
@@ -113,7 +118,7 @@ class pcie_svt_topology_ep_bar_sizing_callback extends
       return;
     request_key = key(transaction);
     if (pending_bar.exists(request_key)) begin
-      armed[bar] = 0;
+      reset_probe_state();
       `uvm_fatal("TOPO_BAR_CB_DUP", $sformatf(
         "%s duplicate requester=%04h tag=%03h",
         link_id, transaction.requester_id, transaction.tag))
@@ -141,6 +146,7 @@ class pcie_svt_topology_ep_bar_sizing_callback extends
     if ((transaction.fmt != svt_pcie_tlp::WITH_DATA_3_DWORD) ||
         (transaction.completion_status != svt_pcie_tlp::SUCCESSFUL) ||
         (transaction.length != 1) || (transaction.payload.size() != 1)) begin
+      reset_probe_state();
       `uvm_fatal("TOPO_BAR_CB_CPL", $sformatf(
         "%s malformed sizing Completion requester=%04h tag=%03h",
         link_id, transaction.requester_id, transaction.tag))
