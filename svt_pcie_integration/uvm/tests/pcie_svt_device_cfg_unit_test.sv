@@ -538,15 +538,15 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
     require(builder.bar_sizing_value(
               single_descriptor.ep_bars[2], 1'b0) == 32'hffff_000c,
             "64 KiB BAR sizing low DWORD is wrong");
-    require(image['h010/4] == 32'hfe00_000c &&
-            image['h014/4] == 32'hffff_ffff,
-            "PF0 BAR0/1 sizing pair is wrong");
-    require(image['h018/4] == 32'hffff_000c &&
-            image['h01c/4] == 32'hffff_ffff,
-            "PF0 BAR2/3 sizing pair is wrong");
-    require(image['h020/4] == 32'hffff_000c &&
-            image['h024/4] == 32'hffff_ffff,
-            "PF0 BAR4/5 sizing pair is wrong");
+    require(image['h010/4] == 32'h0000_000c &&
+            image['h014/4] == 32'h0000_0000,
+            "PF0 BAR0/1 initial pair is wrong");
+    require(image['h018/4] == 32'h0000_000c &&
+            image['h01c/4] == 32'h0000_0000,
+            "PF0 BAR2/3 initial pair is wrong");
+    require(image['h020/4] == 32'h0000_000c &&
+            image['h024/4] == 32'h0000_0000,
+            "PF0 BAR4/5 initial pair is wrong");
     require(image['h034/4] == 32'h0000_0040,
             "PF0 Capability Pointer is wrong");
     require(image['h040/4] == 32'h0002_0010,

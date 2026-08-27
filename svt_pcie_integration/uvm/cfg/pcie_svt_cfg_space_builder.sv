@@ -158,15 +158,10 @@ class pcie_svt_cfg_space_builder extends uvm_object;
     image[3] = 32'h0000_0000;
     for (int unsigned i = 0; i < 6; i++) begin
       if ((i > 0) && descriptor.ep_bars[i-1].implemented &&
-          descriptor.ep_bars[i-1].is_64bit) begin
-        image[4+i] = descriptor.endpoint_model == PCIE_SVT_EP_SINGLE ?
-          bar_sizing_value(descriptor.ep_bars[i-1], 1'b1) :
-          bar_initial_value(descriptor.ep_bars[i-1], 1'b1);
-      end else begin
-        image[4+i] = descriptor.endpoint_model == PCIE_SVT_EP_SINGLE ?
-          bar_sizing_value(descriptor.ep_bars[i], 1'b0) :
-          bar_initial_value(descriptor.ep_bars[i], 1'b0);
-      end
+          descriptor.ep_bars[i-1].is_64bit)
+        image[4+i] = bar_initial_value(descriptor.ep_bars[i-1], 1'b1);
+      else
+        image[4+i] = bar_initial_value(descriptor.ep_bars[i], 1'b0);
     end
     image[11] = {device_id, 16'h20f9};
     image[15] = 32'h0000_0100;
