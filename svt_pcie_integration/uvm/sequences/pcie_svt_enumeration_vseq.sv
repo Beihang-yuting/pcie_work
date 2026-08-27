@@ -155,7 +155,7 @@ class pcie_svt_enumeration_vseq extends
         link_id, command_status[15:0]))
   endtask
 
-  protected task enumerate_link(string link_id);
+  protected virtual task enumerate_link(string link_id);
     pcie_svt_port_descriptor descriptor;
     svt_pcie_device_status status;
     svt_pcie_device_virtual_sequencer rc_seqr;
@@ -293,8 +293,10 @@ class pcie_svt_enumeration_vseq extends
       `uvm_fatal("SVT_ENUM_TOPOLOGY",
         "direct Endpoint enumeration found no RC links")
     if (!all_peer_models_allow_official_enum(
-          direct_links, model_diagnostic))
+          direct_links, model_diagnostic)) begin
       `uvm_fatal("SVT_ENUM_ENDPOINT_MODEL", model_diagnostic)
+      return;
+    end
 
     foreach (direct_links[i]) begin
       fork
