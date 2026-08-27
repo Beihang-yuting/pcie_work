@@ -23,6 +23,29 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
     return descriptors.size();
   endfunction
 
+  static function string sanitize_link_id(string link_id);
+    string sanitized;
+
+    sanitized = link_id;
+    for (int unsigned i = 0; i < sanitized.len(); i++) begin
+      byte unsigned character;
+
+      character = sanitized.getc(i);
+      if (!(((character >= 8'h30) && (character <= 8'h39)) ||
+            ((character >= 8'h41) && (character <= 8'h5a)) ||
+            ((character >= 8'h61) && (character <= 8'h7a)) ||
+            (character == 8'h5f)))
+        sanitized.putc(i, 8'h5f);
+    end
+    return sanitized;
+  endfunction
+
+  static function string port_owned_name(
+      string prefix, pcie_svt_port_descriptor descriptor);
+    return $sformatf("%s_s%0d_%s", prefix, descriptor.slot_index,
+                     sanitize_link_id(descriptor.link_id));
+  endfunction
+
   static function bit requires_bar_sizing_callback(
       pcie_svt_port_descriptor descriptor);
     return (descriptor != null) &&
@@ -95,7 +118,7 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
       string child_name;
       svt_pcie_vif vif;
 
-      child_name = $sformatf("port_%0d", i);
+      child_name = port_owned_name("port", descriptors[i]);
       vif = null;
       if (!uvm_config_db#(svt_pcie_vif)::get(
             get_parent(), "", descriptors[i].vif_key, vif) ||
@@ -107,9 +130,9 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
       end
 
       port_cfg[i] = svt_pcie_device_configuration::type_id::create(
-        $sformatf("port_cfg_%0d", i));
+        port_owned_name("port_cfg", descriptors[i]));
       port_status[i] = svt_pcie_device_status::type_id::create(
-        $sformatf("port_status_%0d", i));
+        port_owned_name("port_status", descriptors[i]));
       cfg_builder.apply(descriptors[i], vif, port_cfg[i]);
 
       uvm_config_db#(svt_pcie_device_configuration)::set(
@@ -121,7 +144,7 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
       if (requires_bar_sizing_callback(descriptors[i])) begin
         bar_sizing_callback_by_link[descriptors[i].link_id] =
           pcie_svt_topology_ep_bar_sizing_callback::type_id::create(
-            $sformatf("bar_sizing_callback_%0d", i));
+            port_owned_name("bar_sizing_callback", descriptors[i]));
         if (bar_sizing_callback_by_link[descriptors[i].link_id] == null)
           `uvm_fatal("SVT_ENV_BAR_CB", $sformatf(
             "%s callback creation failed", descriptors[i].link_id))

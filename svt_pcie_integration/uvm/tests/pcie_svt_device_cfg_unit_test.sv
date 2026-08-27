@@ -756,6 +756,29 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
                      "BAR0 descriptor is null", image);
   endfunction
 
+  function void check_stable_port_owned_names();
+    pcie_svt_port_descriptor descriptor;
+
+    descriptor = make_descriptor("RC1-EP/1", PCIE_SVT_ROLE_RC,
+                                 8, 8, 5, 1'b0, 7);
+    require(pcie_svt_topology_env::sanitize_link_id(descriptor.link_id) ==
+              "RC1_EP_1",
+            "link ID sanitization is not hierarchy-safe");
+    require(pcie_svt_topology_env::port_owned_name(
+              "port", descriptor) == "port_s7_RC1_EP_1",
+            "agent name is not derived from physical slot and link ID");
+    require(pcie_svt_topology_env::port_owned_name(
+              "port_cfg", descriptor) == "port_cfg_s7_RC1_EP_1",
+            "configuration name is not stable across compacted arrays");
+    require(pcie_svt_topology_env::port_owned_name(
+              "port_status", descriptor) == "port_status_s7_RC1_EP_1",
+            "status name is not stable across compacted arrays");
+    require(pcie_svt_topology_env::port_owned_name(
+              "bar_sizing_callback", descriptor) ==
+                "bar_sizing_callback_s7_RC1_EP_1",
+            "callback name is not stable across compacted arrays");
+  endfunction
+
   virtual function void build_phase(uvm_phase phase);
     super.build_phase(phase);
     if (!uvm_config_db#(svt_pcie_vif)::get(
@@ -801,6 +824,7 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
     check_device_null_guards(builder);
     check_cfg_space_builder();
     check_cfg_space_rejections();
+    check_stable_port_owned_names();
     phase.drop_objection(this);
   endtask
 endclass
