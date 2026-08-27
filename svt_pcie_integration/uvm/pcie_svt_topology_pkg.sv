@@ -7,6 +7,7 @@ package pcie_svt_topology_pkg;
   `include "cfg/pcie_svt_backend_types.sv"
   `include "cfg/pcie_svt_device_cfg_builder.sv"
   `include "cfg/pcie_svt_cfg_space_builder.sv"
+  `include "callbacks/pcie_svt_topology_ep_bar_sizing_callback.sv"
   `include "cfg/pcie_svt_topology_policy_cfg.sv"
   `include "adapter/pcie_svt_topology_adapter.sv"
   `include "cfg/pcie_svt_cli_parser.sv"

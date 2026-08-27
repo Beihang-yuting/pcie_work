@@ -1,6 +1,7 @@
 +incdir+../rtl
 +incdir+../uvm
 +incdir+../uvm/cfg
++incdir+../uvm/callbacks
 +incdir+../uvm/env
 +incdir+../uvm/tests
 +incdir+../../pcie_tl_vip/src/topology
@@ -19,6 +20,7 @@
 ../rtl/pcie_svt_dut_wrapper.sv
 ../../pcie_tl_vip/src/topology/pcie_topology_pkg.sv
 ../uvm/pcie_svt_topology_pkg.sv
+../sim/pcie_svt_topology_ep_bar_sizing_callback_unit_test.sv
 ../uvm/tests/pcie_svt_topology_model_unit_test.sv
 ../uvm/tests/pcie_svt_topology_adapter_unit_test.sv
 ../uvm/tests/pcie_svt_cli_parser_unit_test.sv
