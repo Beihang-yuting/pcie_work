@@ -49,6 +49,30 @@ class pcie_svt_peer_test extends pcie_svt_topology_base_test;
     peer_env = pcie_svt_topology_env::type_id::create("peer_env", this);
   endfunction
 
+  function void check_callback_registration(
+      string label, pcie_svt_topology_env selected_env);
+    foreach (selected_env.descriptors[i]) begin
+      pcie_svt_port_descriptor descriptor = selected_env.descriptors[i];
+      bit expected =
+        pcie_svt_topology_env::requires_bar_sizing_callback(descriptor);
+      if ((descriptor.role == PCIE_SVT_ROLE_EP) &&
+          (selected_env.port_cfg[i].pcie_cfg.enable_multi_endpoint_mode !=
+            (descriptor.endpoint_model == PCIE_SVT_EP_MULTI_BDF)))
+        `uvm_fatal("SVT_PEER_BAR_CB", $sformatf(
+          "%s link=%s enable_multi_endpoint_mode disagrees with model",
+          label, descriptor.link_id))
+      if ((selected_env.has_bar_sizing_callback(descriptor.link_id) !=
+            expected) ||
+          (selected_env.bar_sizing_callback_is_registered(
+            descriptor.link_id) != expected))
+        `uvm_fatal("SVT_PEER_BAR_CB", $sformatf(
+          "%s link=%s expected=%0d owned=%0d registered=%0d",
+          label, descriptor.link_id, expected,
+          selected_env.has_bar_sizing_callback(descriptor.link_id),
+          selected_env.bar_sizing_callback_is_registered(descriptor.link_id)))
+    end
+  endfunction
+
   virtual function void end_of_elaboration_phase(uvm_phase phase);
     super.end_of_elaboration_phase(phase);
     if ((peer_env == null) || (env == null)) begin
@@ -89,6 +113,8 @@ class pcie_svt_peer_test extends pcie_svt_topology_base_test;
           (peer == null) ? 0 : peer.fast_link_training))
       end
     end
+    check_callback_registration("primary", env);
+    check_callback_registration("peer", peer_env);
     `uvm_info("PCIE_SVT_PEER_ENV_READY", $sformatf(
       "profile=%s agents=%0d", profile_name, peer_env.port_count()),
       UVM_NONE)
@@ -147,6 +173,10 @@ class pcie_svt_peer_test extends pcie_svt_topology_base_test;
       link_sequence.start(null);
     end
     env.vseqr.report_stage_table();
+    if (!env.bar_sizing_callbacks_are_idle() ||
+        !peer_env.bar_sizing_callbacks_are_idle())
+      `uvm_fatal("SVT_PEER_BAR_CB",
+        "primary or peer BAR sizing callback retained pending state")
     phase.drop_objection(this);
   endtask
 endclass

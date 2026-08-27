@@ -507,6 +507,17 @@ class pcie_svt_device_cfg_unit_test extends uvm_test;
 
     builder = pcie_svt_cfg_space_builder::type_id::create(
       "cfg_space_builder");
+    descriptor = make_descriptor("single_ep_callback", PCIE_SVT_ROLE_RC,
+                                 16, 16, 5, 1'b0);
+    descriptor.endpoint_model = PCIE_SVT_EP_SINGLE;
+    require(!pcie_svt_topology_env::requires_bar_sizing_callback(descriptor),
+            "RC requested an Endpoint BAR callback");
+    descriptor.role = PCIE_SVT_ROLE_EP;
+    require(pcie_svt_topology_env::requires_bar_sizing_callback(descriptor),
+            "Single Endpoint did not request a BAR callback");
+    descriptor.endpoint_model = PCIE_SVT_EP_MULTI_BDF;
+    require(!pcie_svt_topology_env::requires_bar_sizing_callback(descriptor),
+            "Multiple-BDF Endpoint requested a Single-Endpoint callback");
     require(builder.bar_ro_map(64'd33554432, 1'b0) == 32'h01ff_ffff,
             "32 MiB BAR low RO map is wrong");
     require(builder.bar_ro_map(64'd33554432, 1'b1) == 32'h0000_0000,

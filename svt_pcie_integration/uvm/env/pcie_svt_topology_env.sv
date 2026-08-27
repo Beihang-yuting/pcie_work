@@ -7,6 +7,9 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
   svt_pcie_device_configuration port_cfg[];
   svt_pcie_device_status port_status[];
   svt_pcie_device_agent port_agent[];
+  pcie_svt_topology_ep_bar_sizing_callback
+    bar_sizing_callback_by_link[string];
+  bit bar_sizing_callback_registered_by_link[string];
   pcie_svt_topology_virtual_sequencer vseqr;
   pcie_svt_topology_adapter adapter;
   string errors[$];
@@ -18,6 +21,31 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
 
   function int unsigned port_count();
     return descriptors.size();
+  endfunction
+
+  static function bit requires_bar_sizing_callback(
+      pcie_svt_port_descriptor descriptor);
+    return (descriptor != null) &&
+           (descriptor.role == PCIE_SVT_ROLE_EP) &&
+           (descriptor.endpoint_model == PCIE_SVT_EP_SINGLE);
+  endfunction
+
+  function bit has_bar_sizing_callback(string link_id);
+    return bar_sizing_callback_by_link.exists(link_id) &&
+           (bar_sizing_callback_by_link[link_id] != null);
+  endfunction
+
+  function bit bar_sizing_callback_is_registered(string link_id);
+    return bar_sizing_callback_registered_by_link.exists(link_id) &&
+           bar_sizing_callback_registered_by_link[link_id];
+  endfunction
+
+  function bit bar_sizing_callbacks_are_idle();
+    foreach (bar_sizing_callback_by_link[link_id])
+      if ((bar_sizing_callback_by_link[link_id] == null) ||
+          !bar_sizing_callback_by_link[link_id].is_idle())
+        return 0;
+    return 1;
   endfunction
 
   virtual function void build_phase(uvm_phase phase);
@@ -90,6 +118,16 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         this, child_name, "shared_status", port_status[i]);
       port_agent[i] = svt_pcie_device_agent::type_id::create(
         child_name, this);
+      if (requires_bar_sizing_callback(descriptors[i])) begin
+        bar_sizing_callback_by_link[descriptors[i].link_id] =
+          pcie_svt_topology_ep_bar_sizing_callback::type_id::create(
+            $sformatf("bar_sizing_callback_%0d", i));
+        if (bar_sizing_callback_by_link[descriptors[i].link_id] == null)
+          `uvm_fatal("SVT_ENV_BAR_CB", $sformatf(
+            "%s callback creation failed", descriptors[i].link_id))
+        bar_sizing_callback_by_link[descriptors[i].link_id].configure(
+          descriptors[i]);
+      end
       vseqr.register_port(descriptors[i], port_cfg[i], port_status[i],
                           port_agent[i]);
     end
@@ -125,6 +163,22 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         return;
       end
       vseqr.connect_port(descriptors[i].link_id, port_agent[i].virt_seqr);
+      if (requires_bar_sizing_callback(descriptors[i])) begin
+        string link_id = descriptors[i].link_id;
+        if ((port_agent[i] == null) || !port_agent[i].target.exists(0) ||
+            (port_agent[i].target[0] == null))
+          `uvm_fatal("SVT_ENV_BAR_CB", $sformatf(
+            "%s active Target App target[0] is missing", link_id))
+        if (!has_bar_sizing_callback(link_id) ||
+            bar_sizing_callback_is_registered(link_id))
+          `uvm_fatal("SVT_ENV_BAR_CB", $sformatf(
+            "%s callback ownership/registration state is invalid", link_id))
+        uvm_callbacks#(
+          svt_pcie_target_app,
+          svt_pcie_target_app_callback
+        )::add(port_agent[i].target[0], bar_sizing_callback_by_link[link_id]);
+        bar_sizing_callback_registered_by_link[link_id] = 1'b1;
+      end
     end
     if (root != null)
       sys_virt_seqr.root_virt_seqr = root.virt_seqr;
