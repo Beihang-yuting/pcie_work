@@ -3,7 +3,8 @@
 **Date:** 2026-08-26
 
 **Revised:** 2026-08-27
-**Status:** Approved approach; written specification awaiting review
+
+**Status:** Approved for implementation
 
 **Scope:** Make the R-2020.12 standard Endpoint Target App respond to real
 PCIe BAR sizing probes during official Endpoint enumeration, without enabling
