@@ -17,6 +17,14 @@ class pcie_tl_prefix extends uvm_object;
         super.new(name);
     endfunction
 
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_prefix rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.prefix_type = rhs_.prefix_type;
+        this.raw_dw = rhs_.raw_dw;
+    endfunction : do_copy
+
     //--- Type query ---
     function bit is_local();
         return raw_dw[28] == 0;  // Type[4] == 0

@@ -243,6 +243,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
         this.td                  = rhs_.td;
         this.ep_bit              = rhs_.ep_bit;
         this.attr                = rhs_.attr;
+        this.at                  = rhs_.at;
         this.length              = rhs_.length;
         this.requester_id        = rhs_.requester_id;
         this.tag                 = rhs_.tag;
@@ -257,8 +258,14 @@ class pcie_tl_tlp extends uvm_sequence_item;
         this.field_bitmask       = rhs_.field_bitmask;
         this.constraint_mode_sel = rhs_.constraint_mode_sel;
         this.wire_error_materialized = rhs_.wire_error_materialized;
-        // 拷贝 TLP Prefix 队列
-        this.prefixes            = rhs_.prefixes;
+        // Deep-copy TLP Prefix objects so clone mutations remain isolated.
+        this.prefixes.delete();
+        foreach (rhs_.prefixes[i]) begin
+            pcie_tl_prefix prefix_copy;
+            prefix_copy = new($sformatf("prefix_copy_%0d", i));
+            prefix_copy.copy(rhs_.prefixes[i]);
+            this.prefixes.push_back(prefix_copy);
+        end
         this.has_prefix          = rhs_.has_prefix;
         this.cq_route            = rhs_.cq_route;
     endfunction : do_copy
@@ -441,6 +448,14 @@ class pcie_tl_io_tlp extends pcie_tl_tlp;
     function new(string name = "pcie_tl_io_tlp");
         super.new(name);
     endfunction
+
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_io_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.addr = rhs_.addr;
+        this.first_be = rhs_.first_be;
+    endfunction : do_copy
 endclass
 
 //=============================================================================
@@ -481,6 +496,15 @@ class pcie_tl_cfg_tlp extends pcie_tl_tlp;
     function bit [11:0] get_cfg_addr();
         return {reg_num, 2'b00};
     endfunction
+
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_cfg_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.completer_id = rhs_.completer_id;
+        this.reg_num = rhs_.reg_num;
+        this.first_be = rhs_.first_be;
+    endfunction : do_copy
 endclass
 
 //=============================================================================
@@ -557,6 +581,15 @@ class pcie_tl_msg_tlp extends pcie_tl_tlp;
     function new(string name = "pcie_tl_msg_tlp");
         super.new(name);
     endfunction
+
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_msg_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.msg_code = rhs_.msg_code;
+        this.msg_addr = rhs_.msg_addr;
+        this.target_id = rhs_.target_id;
+    endfunction : do_copy
 endclass
 
 //=============================================================================
@@ -628,6 +661,14 @@ class pcie_tl_vendor_tlp extends pcie_tl_tlp;
     function new(string name = "pcie_tl_vendor_tlp");
         super.new(name);
     endfunction
+
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_vendor_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.vendor_id = rhs_.vendor_id;
+        this.vendor_data = new[rhs_.vendor_data.size()](rhs_.vendor_data);
+    endfunction : do_copy
 endclass
 
 //=============================================================================
@@ -658,6 +699,18 @@ class pcie_tl_ltr_tlp extends pcie_tl_tlp;
     function new(string name = "pcie_tl_ltr_tlp");
         super.new(name);
     endfunction
+
+    virtual function void do_copy(uvm_object rhs);
+        pcie_tl_ltr_tlp rhs_;
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs)) return;
+        this.snoop_latency_value = rhs_.snoop_latency_value;
+        this.snoop_latency_scale = rhs_.snoop_latency_scale;
+        this.snoop_requirement = rhs_.snoop_requirement;
+        this.no_snoop_latency_value = rhs_.no_snoop_latency_value;
+        this.no_snoop_latency_scale = rhs_.no_snoop_latency_scale;
+        this.no_snoop_requirement = rhs_.no_snoop_requirement;
+    endfunction : do_copy
 endclass
 
 //-----------------------------------------------------------------------------

@@ -121,6 +121,7 @@ class pcie_tl_codec extends uvm_object;
         tlp.at           = dw0[11:10];   // Address Type (ATS)
         tlp.length       = dw0[9:0];
         tlp.requester_id = dw1[31:16];
+        tlp.tag[9:8]     = {dw0[23], dw0[19]};
         tlp.tag[7:0]     = dw1[15:8];
 
         // Payload
@@ -190,8 +191,9 @@ class pcie_tl_codec extends uvm_object;
         num_dw = tlp.is_4dw() ? 4 : 3;
         hdr = new[num_dw];
 
-        // DW0: Fmt[2:0] | Type[4:0] | R | TC[2:0] | R | Attr[2] | R | TH | TD | EP | Attr[1:0] | AT[1:0] | Length[9:0]
-        dw0 = {tlp.fmt, tlp.type_f, 1'b0, tlp.tc, 1'b0, tlp.attr[2], 1'b0,
+        // DW0: Fmt[2:0] | Type[4:0] | T9 | TC[2:0] | T8 | Attr[2] | R | TH | TD | EP | Attr[1:0] | AT[1:0] | Length[9:0]
+        dw0 = {tlp.fmt, tlp.type_f, tlp.tag[9], tlp.tc, tlp.tag[8],
+                tlp.attr[2], 1'b0,
                 tlp.th, tlp.td, tlp.ep_bit, tlp.attr[1:0], tlp.at, tlp.length};
         hdr[0] = dw0;
 
@@ -391,6 +393,8 @@ class pcie_tl_codec extends uvm_object;
                 cpl.cpl_status   = cpl_status_e'(dw1[15:13]);
                 cpl.bcm          = dw1[12];
                 cpl.byte_count   = dw1[11:0];
+                cpl.requester_id = dw2[31:16];
+                cpl.tag[7:0]     = dw2[15:8];
                 cpl.lower_addr   = dw2[6:0];
             end
             TLP_MSG, TLP_MSGD: begin

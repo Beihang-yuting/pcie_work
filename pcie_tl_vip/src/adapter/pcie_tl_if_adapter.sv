@@ -80,9 +80,7 @@ class pcie_tl_if_adapter extends uvm_component;
             return tlp;
         end
 
-        // The current byte codec carries the legacy 8-bit Tag field. Preserve
-        // the upper Extended Tag bits and non-wire test contracts explicitly.
-        wire_tlp.tag[9:8]             = tlp.tag[9:8];
+        // Preserve non-wire test contracts explicitly.
         wire_tlp.inject_ecrc_err      = tlp.inject_ecrc_err;
         wire_tlp.inject_lcrc_err      = tlp.inject_lcrc_err;
         wire_tlp.inject_poisoned      = tlp.inject_poisoned;
