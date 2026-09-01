@@ -1,4 +1,9 @@
-interface pcie_svt_reset_if #(int MAX_LINKS = 5);
+`include "pcie_svt_hdl_slot_cfg.svh"
+
+// Keep reset vector sizing aligned with the statically generated HDL slots.
+interface pcie_svt_reset_if #(
+  int MAX_LINKS = `PCIE_SVT_ENV_MAX_HDL_AGENTS
+);
   logic [MAX_LINKS-1:0] asserted = '1;
 
   task automatic hold_all();

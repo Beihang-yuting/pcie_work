@@ -1,6 +1,8 @@
 `ifndef PCIE_SVT_HDL_AGENT_MACROS_SVH
 `define PCIE_SVT_HDL_AGENT_MACROS_SVH
 
+`include "pcie_svt_hdl_slot_cfg.svh"
+
 `define PCIE_SVT_DECLARE_HDL_AGENT_X4(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy) \
   svt_pcie_if instance_name``_if(clkreq_signal, wake_signal);              \
   svt_pcie_single_port_device_agent_hdl #(                                \

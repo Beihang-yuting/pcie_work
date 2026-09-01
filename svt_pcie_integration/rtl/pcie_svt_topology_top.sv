@@ -1,3 +1,4 @@
+`include "pcie_svt_hdl_slot_cfg.svh"
 `include "pcie_svt_topology_checks.svh"
 `include "pcie_svt_serial_adapter.sv"
 `include "pcie_svt_peer_harness.sv"
@@ -16,6 +17,16 @@ module pcie_svt_topology_top;
   tri1 wake_n;
 
   pcie_svt_reset_if reset_vif();
+
+  // Reject an undersized compile-time slot budget before UVM starts.  This
+  // avoids silently dropping a link when a user overrides the project macro.
+  initial begin
+    if (`PCIE_SVT_ENV_MAX_HDL_AGENTS <
+        `PCIE_SVT_ENV_REQUIRED_HDL_AGENTS)
+      $fatal(1, "PCIE_SVT_ENV_MAX_HDL_AGENTS=%0d below required slots=%0d",
+             `PCIE_SVT_ENV_MAX_HDL_AGENTS,
+             `PCIE_SVT_ENV_REQUIRED_HDL_AGENTS);
+  end
 
 `ifdef PCIE_TOPO_EP_X16
   svt_pcie_if primary_rc0_if(clkreq_n[0], wake_n);

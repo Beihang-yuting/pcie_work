@@ -1,4 +1,5 @@
 `define PCIE_SVT_TOPOLOGY_ENV_PATH
+`include "pcie_svt_hdl_slot_cfg.svh"
 `include "pcie_svt_topology_checks.svh"
 `include "pcie_svt_serial_adapter.sv"
 `include "pcie_svt_hdl_agent_macros.svh"
@@ -16,6 +17,15 @@ module pcie_svt_topology_top;
   tri1 [4:0] clkreq_n;
   tri1 wake_n;
   pcie_svt_reset_if reset_vif();
+
+  // See pcie_svt_topology_top: static slot limits are checked before UVM.
+  initial begin
+    if (`PCIE_SVT_ENV_MAX_HDL_AGENTS <
+        `PCIE_SVT_ENV_REQUIRED_HDL_AGENTS)
+      $fatal(1, "PCIE_SVT_ENV_MAX_HDL_AGENTS=%0d below required slots=%0d",
+             `PCIE_SVT_ENV_MAX_HDL_AGENTS,
+             `PCIE_SVT_ENV_REQUIRED_HDL_AGENTS);
+  end
 `ifdef PCIE_USE_SVT_PEER
   pcie_svt_reset_if peer_reset_vif();
 `endif
