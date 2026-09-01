@@ -41,7 +41,7 @@
 - `pcie_device_cfg` fields: `device_id`, `role`, `bdf`, `header_type`, `bars[6]`, and `cfg_space_enable`.
 - `pcie_link_cfg` fields: `link_id`, `enabled`, `use_svt`, `role`, `link_width`, `max_gen`, `vif_key`, and `hdl_slot`.
 - `pcie_global_cfg::validate(output string errors[$])` checks topology, compile limits, link uniqueness, slot ownership, roles, width/Gen, and backend-specific requirements.
-- `pcie_global_cfg::build_default_for_topology(pcie_topology_cfg topology, pcie_global_cfg cfg)` creates one device record per graph node/port and copies the existing six BAR defaults without duplicating topology connectivity.
+- `pcie_global_cfg::build_default_for_topology(pcie_topology_cfg topology)` initializes the instance with one device record per graph node/port and copies the existing six BAR defaults without duplicating topology connectivity.
 
   These backend-neutral classes live in `pcie_topology_pkg`, not in the SVT package, so the independent TL build can consume them without creating a TL→SVT package dependency cycle.
 
