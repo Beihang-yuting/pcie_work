@@ -4,6 +4,9 @@ package pcie_svt_topology_pkg;
   `include "import_pcie_svt_uvm_pkgs.svi"
   `include "uvm_macros.svh"
   `include "pcie_device_unified_vip_env.sv"
+  `include "backend/pcie_backend_base.sv"
+  `include "backend/pcie_svt_backend.sv"
+  `include "backend/pcie_tl_backend.sv"
   `include "cfg/pcie_svt_backend_types.sv"
   `include "cfg/pcie_svt_device_cfg_builder.sv"
   `include "cfg/pcie_svt_cfg_space_builder.sv"
@@ -15,10 +18,12 @@ package pcie_svt_topology_pkg;
   `include "adapter/pcie_svt_peer_fixture_builder.sv"
   `include "env/pcie_svt_topology_virtual_sequencer.sv"
   `include "env/pcie_svt_topology_env.sv"
+  `include "env/pcie_unified_env.sv"
   `include "sequences/pcie_svt_cfg_init_vseq.sv"
   `include "sequences/pcie_svt_link_vseq.sv"
   `include "sequences/pcie_svt_enumeration_registry.sv"
   `include "sequences/pcie_svt_enumeration_vseq.sv"
+  `include "tests/pcie_device_base_test.sv"
 
   function automatic string pcie_svt_compiled_profile_name();
 `ifdef PCIE_TOPO_EP_X16
