@@ -200,6 +200,14 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
     propagation_policy.enum_timeout = 14us;
     propagation_policy.traffic_timeout = 15us;
     propagation_policy.ep_bars[0].initial_base = 64'd33554432;
+    propagation_policy.enum_cfg.pref_mem_base_addr =
+      64'h0000_0002_0000_0000;
+    propagation_policy.enum_cfg.pref_mem_limit_addr =
+      64'h0000_0002_0fff_ffff;
+    propagation_policy.enum_cfg.pref_mem_window_stride =
+      64'h0000_0000_2000_0000;
+    propagation_policy.enum_cfg.bus_number = 8'h20;
+    propagation_policy.enum_cfg.device_number = 5'h03;
     override_cfg = pcie_svt_link_override_cfg::type_id::create(
       "combined_override");
     override_cfg.link_id = "RC0_EP0";
@@ -236,6 +244,24 @@ class pcie_svt_topology_adapter_unit_test extends uvm_test;
               ports[1].enum_timeout == 14us &&
               ports[1].traffic_timeout == 15us,
               "default descriptor timeouts are wrong");
+      require(ports[0].enum_cfg != null && ports[1].enum_cfg != null,
+              "enumeration configuration was not copied to descriptors");
+      if ((ports[0].enum_cfg != null) && (ports[1].enum_cfg != null)) begin
+        require(ports[0].enum_cfg != propagation_policy.enum_cfg &&
+                ports[1].enum_cfg != propagation_policy.enum_cfg &&
+                ports[0].enum_cfg != ports[1].enum_cfg,
+                "descriptor enumeration configurations alias policy or peer");
+        require(ports[0].enum_cfg.pref_mem_base_addr ==
+                  64'h0000_0002_0000_0000 &&
+                ports[0].enum_cfg.pref_mem_limit_addr ==
+                  64'h0000_0002_0fff_ffff &&
+                ports[0].enum_cfg.pref_mem_window_stride ==
+                  64'h0000_0000_2000_0000,
+                "enumeration memory window override did not propagate");
+        require(ports[0].enum_cfg.bus_number == 8'h20 &&
+                ports[0].enum_cfg.device_number == 5'h03,
+                "enumeration BDF override did not propagate");
+      end
       require(ports[0].ep_bars[0] != propagation_policy.ep_bars[0] &&
               ports[1].ep_bars[0] != propagation_policy.ep_bars[0] &&
               ports[0].ep_bars[0] != ports[1].ep_bars[0],

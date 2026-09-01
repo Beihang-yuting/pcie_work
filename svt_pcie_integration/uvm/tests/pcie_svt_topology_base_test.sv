@@ -68,6 +68,7 @@ class pcie_svt_topology_base_test extends uvm_test;
 
   virtual function void build_phase(uvm_phase phase);
     pcie_svt_cli_parser parser;
+    pcie_svt_enum_cfg external_enum_cfg;
     string errors[$];
 
     super.build_phase(phase);
@@ -103,6 +104,16 @@ class pcie_svt_topology_base_test extends uvm_test;
     if (errors.size() != 0) begin
       `uvm_fatal("SVT_ENV_PROFILE", pcie_svt_join_errors(errors))
       return;
+    end
+
+    // A caller may provide a complete enumeration policy through config_db.
+    // Copy it after profile construction so command-line topology selection
+    // remains authoritative while BAR/window/BDF details stay externally
+    // configurable.
+    if (uvm_config_db#(pcie_svt_enum_cfg)::get(
+          this, "", "enum_cfg", external_enum_cfg) &&
+        (external_enum_cfg != null)) begin
+      policy_cfg.enum_cfg.copy(external_enum_cfg);
     end
     policy_cfg.default_fast_link_training = fast_link_training;
     policy_cfg.transport = transport;

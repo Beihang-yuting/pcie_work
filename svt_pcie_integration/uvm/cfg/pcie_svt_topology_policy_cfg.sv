@@ -17,6 +17,10 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
   time enum_timeout;
   time traffic_timeout;
 
+  // Shared enumeration/BAR allocation policy.  Tests may replace or edit
+  // this object before the environment is built.
+  pcie_svt_enum_cfg enum_cfg;
+
   // --------------------------------------------------------------------------
   // Endpoint image and explicit link overrides.
   // --------------------------------------------------------------------------
@@ -31,6 +35,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     foreach (ep_bars[i])
       ep_bars[i] = pcie_svt_bar_cfg::type_id::create(
         $sformatf("bar%0d", i));
+    enum_cfg = pcie_svt_enum_cfg::type_id::create("enum_cfg");
   endfunction
 
   function void init_defaults();
@@ -47,6 +52,10 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     link_timeout = 3ms;
     enum_timeout = 3ms;
     traffic_timeout = 1ms;
+    if (enum_cfg == null)
+      enum_cfg = pcie_svt_enum_cfg::type_id::create("enum_cfg");
+    else
+      enum_cfg.init_defaults();
 
     // Start with no BARs implemented, then install the project profile below.
     foreach (ep_bars[i]) begin
@@ -98,6 +107,13 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     link_timeout = source.link_timeout;
     enum_timeout = source.enum_timeout;
     traffic_timeout = source.traffic_timeout;
+    if (source.enum_cfg == null) begin
+      enum_cfg = null;
+    end else begin
+      if (enum_cfg == null)
+        enum_cfg = pcie_svt_enum_cfg::type_id::create("enum_cfg");
+      enum_cfg.copy(source.enum_cfg);
+    end
 
     // Deep-copy the endpoint BAR image.
     foreach (ep_bars[i]) begin
@@ -138,6 +154,15 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     int unsigned non_null_bar_count;
 
     errors.delete();
+
+    if (enum_cfg == null) begin
+      errors.push_back("enumeration configuration handle is null");
+    end else begin
+      string enum_errors[$];
+      enum_cfg.validate(enum_errors);
+      foreach (enum_errors[i])
+        errors.push_back(enum_errors[i]);
+    end
 
     // Validate DUT selection and reject duplicates before checking policy.
 

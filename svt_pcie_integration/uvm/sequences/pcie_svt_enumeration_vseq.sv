@@ -39,12 +39,16 @@ class pcie_svt_enumeration_vseq extends
   endfunction
 
   protected function bit [63:0] expected_aperture(
+      pcie_svt_port_descriptor descriptor,
       int unsigned pair);
-    case (pair)
-      0: return 64'd33554432;
-      1, 2: return 64'd65536;
-      default: return '0;
-    endcase
+    int unsigned low_bar;
+    if ((descriptor == null) || (pair >= 3))
+      return '0;
+    low_bar = pair * 2;
+    if ((descriptor.ep_bars[low_bar] == null) ||
+        !descriptor.ep_bars[low_bar].implemented)
+      return '0;
+    return descriptor.ep_bars[low_bar].aperture;
   endfunction
 
   protected function void collect_direct_links(output string link_ids[$]);
@@ -114,10 +118,12 @@ class pcie_svt_enumeration_vseq extends
       observed_aperture =
         status.max_per_bar_address_range[0][low_bar] -
         status.min_per_bar_address_range[0][low_bar] + 1;
-      if (observed_aperture != expected_aperture(pair))
+      if (observed_aperture != expected_aperture(
+            p_sequencer.get_port_descriptor(link_id), pair))
         `uvm_fatal("SVT_ENUM_BAR_SIZE", $sformatf(
           "%s PF0 BAR%0d/%0d aperture expected=0x%0h actual=0x%0h",
-          link_id, low_bar, low_bar + 1, expected_aperture(pair),
+          link_id, low_bar, low_bar + 1,
+          expected_aperture(p_sequencer.get_port_descriptor(link_id), pair),
           observed_aperture))
 
       read_config(link_id, enum_seq,
@@ -161,6 +167,8 @@ class pcie_svt_enumeration_vseq extends
     svt_pcie_device_virtual_sequencer rc_seqr;
     svt_pcie_device_virtual_ep_enumeration_sequence enum_seq;
     bit enumeration_done;
+    longint unsigned pref_mem_base_addr;
+    longint unsigned pref_mem_limit_addr;
     realtime start_time;
     realtime deadline;
     realtime completion_time;
@@ -186,6 +194,14 @@ class pcie_svt_enumeration_vseq extends
     if (!peer_model_allows_official_enum(link_id, model_diagnostic))
       `uvm_fatal("SVT_ENUM_ENDPOINT_MODEL", model_diagnostic)
 
+    if (descriptor.enum_cfg == null)
+      `uvm_fatal("SVT_ENUM_CFG", $sformatf(
+        "%s has no enumeration configuration", link_id))
+    pref_mem_base_addr = descriptor.enum_cfg.pref_mem_base_for(
+      descriptor.root_hierarchy);
+    pref_mem_limit_addr = descriptor.enum_cfg.pref_mem_limit_for(
+      descriptor.root_hierarchy);
+
     enumeration_done = 1'b0;
     start_time = $realtime;
     deadline = start_time + descriptor.enum_timeout;
@@ -208,25 +224,26 @@ class pcie_svt_enumeration_vseq extends
         enum_seq.set_sequencer(rc_seqr);
         if (!enum_seq.randomize() with {
               device_parms.root_hierarchy == descriptor.root_hierarchy;
-              device_parms.bus_number == 8'h01;
-              device_parms.device_number == 5'h00;
-              device_parms.max_num_functions_supported == 1;
-              device_parms.enable_sriov == 1'b0;
-              device_parms.enable_vf_memory_space == 1'b0;
-              device_parms.get_atomic_op_cap == 1'b0;
-              device_parms.enable_atomic_op_as_requester_support == 1'b0;
-              device_parms.find_all_base_capabilities == 1'b0;
-              device_parms.find_all_extended_capabilities == 1'b0;
-              device_parms.enable_incremental_bar_allocation == 1'b1;
-              device_parms.is_ep_device_vip == 1'b0;
-              device_parms.min_pref_mem_base_addr ==
-                (64'h0000_0001_0000_0000 +
-                 (64'h0000_0000_1000_0000 *
-                  descriptor.root_hierarchy));
-              device_parms.max_pref_mem_base_addr ==
-                (64'h0000_0001_0fff_ffff +
-                 (64'h0000_0000_1000_0000 *
-                  descriptor.root_hierarchy));
+              device_parms.bus_number == descriptor.enum_cfg.bus_number;
+              device_parms.device_number == descriptor.enum_cfg.device_number;
+              device_parms.max_num_functions_supported ==
+                descriptor.enum_cfg.max_num_functions_supported;
+              device_parms.enable_sriov == descriptor.enum_cfg.enable_sriov;
+              device_parms.enable_vf_memory_space ==
+                descriptor.enum_cfg.enable_vf_memory_space;
+              device_parms.get_atomic_op_cap ==
+                descriptor.enum_cfg.get_atomic_op_cap;
+              device_parms.enable_atomic_op_as_requester_support ==
+                descriptor.enum_cfg.enable_atomic_op_as_requester_support;
+              device_parms.find_all_base_capabilities ==
+                descriptor.enum_cfg.find_all_base_capabilities;
+              device_parms.find_all_extended_capabilities ==
+                descriptor.enum_cfg.find_all_extended_capabilities;
+              device_parms.enable_incremental_bar_allocation ==
+                descriptor.enum_cfg.enable_incremental_bar_allocation;
+              device_parms.is_ep_device_vip == descriptor.enum_cfg.is_ep_device_vip;
+              device_parms.min_pref_mem_base_addr == pref_mem_base_addr;
+              device_parms.max_pref_mem_base_addr == pref_mem_limit_addr;
             })
           `uvm_fatal("SVT_ENUM_RANDOMIZE", $sformatf(
             "%s official Endpoint enumeration randomization failed",

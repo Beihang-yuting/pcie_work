@@ -181,6 +181,12 @@ class pcie_svt_topology_adapter extends uvm_object;
       descriptor.link_timeout = effective_link_timeout(policy, override_cfg);
       descriptor.enum_timeout = policy.enum_timeout;
       descriptor.traffic_timeout = policy.traffic_timeout;
+      if (policy.enum_cfg == null) begin
+        errors.push_back($sformatf(
+          "link '%s': enumeration configuration is null", link.link_id));
+        continue;
+      end
+      descriptor.enum_cfg.copy(policy.enum_cfg);
       foreach (descriptor.ep_bars[bar])
         descriptor.ep_bars[bar].copy(policy.ep_bars[bar]);
       ports.push_back(descriptor);

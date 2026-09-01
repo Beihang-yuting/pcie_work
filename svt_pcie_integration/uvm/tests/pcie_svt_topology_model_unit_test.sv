@@ -84,12 +84,29 @@ class pcie_svt_topology_model_unit_test extends uvm_test;
     require(policy.cfg_timeout == 1ms && policy.link_timeout == 3ms &&
             policy.enum_timeout == 3ms && policy.traffic_timeout == 1ms,
             "policy timeout defaults are wrong");
+    require(policy.enum_cfg != null,
+            "enumeration configuration handle is null");
+    if (policy.enum_cfg != null) begin
+      require(policy.enum_cfg.pref_mem_base_addr ==
+                64'h0000_0001_0000_0000,
+              "enumeration Prefetchable base default is wrong");
+      require(policy.enum_cfg.pref_mem_limit_addr ==
+                64'h0000_0001_0fff_ffff,
+              "enumeration Prefetchable limit default is wrong");
+      require(policy.enum_cfg.pref_mem_window_stride ==
+                64'h0000_0000_1000_0000,
+              "enumeration Prefetchable stride default is wrong");
+      require(policy.enum_cfg.bus_number == 8'h01 &&
+              policy.enum_cfg.device_number == 0,
+              "enumeration BDF defaults are wrong");
+    end
 
     $cast(copy, policy.clone());
     copy.dut_node_ids[0] = "CHANGED";
     copy.ep_bars[0].aperture = 64'd4096;
     copy.link_overrides[0].max_gen = 4;
     copy.hdl_slot_by_link["RC0_SW0_USP0"] = 4;
+    copy.enum_cfg.pref_mem_base_addr = 64'h0000_0002_0000_0000;
     require(policy.dut_node_ids[0] == "SW0",
             "DUT-node list clone aliases the source");
     require(policy.ep_bars[0].aperture == 64'd33554432,
@@ -98,6 +115,9 @@ class pcie_svt_topology_model_unit_test extends uvm_test;
             "override clone aliases the source");
     require(policy.hdl_slot_by_link["RC0_SW0_USP0"] == 0,
             "HDL-slot map clone aliases the source");
+    require(policy.enum_cfg.pref_mem_base_addr ==
+              64'h0000_0001_0000_0000,
+            "enumeration configuration clone aliases the source");
 
     descriptor = pcie_svt_port_descriptor::type_id::create("descriptor");
     descriptor.ep_bars[0].aperture = 64'd8192;
@@ -136,7 +156,22 @@ class pcie_svt_topology_model_unit_test extends uvm_test;
     invalid_policy.cfg_timeout = 'x;
     invalid_policy.validate(errors);
     require(error_contains(errors, "cfg_timeout must be positive"),
-            "unknown cfg_timeout was accepted");
+              "unknown cfg_timeout was accepted");
+
+    $cast(invalid_policy, policy.clone());
+    invalid_policy.enum_cfg.pref_mem_limit_addr =
+      invalid_policy.enum_cfg.pref_mem_base_addr - 1;
+    invalid_policy.validate(errors);
+    require(error_contains(errors,
+              "Prefetchable memory limit precedes base"),
+            "reversed enumeration memory window was accepted");
+
+    $cast(invalid_policy, policy.clone());
+    invalid_policy.enum_cfg.pref_mem_window_stride = 64'd4096;
+    invalid_policy.validate(errors);
+    require(error_contains(errors,
+              "window stride is smaller than its window"),
+            "overlapping enumeration windows were accepted");
 
     $cast(invalid_policy, policy.clone());
     invalid_policy.link_timeout = 'x;

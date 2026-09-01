@@ -49,6 +49,35 @@ The current topology test entry points are listed in `pcie_svt_topology.f`.
 Scenario tests can override `build_global_cfg()` to select backend, enable
 links, assign BDFs, and customize BAR descriptors.
 
+Enumeration and BAR allocation are also data-driven.  The profile creates
+`pcie_svt_topology_policy_cfg.enum_cfg` with these defaults:
+
+```text
+pref_mem_base_addr       = 0x0000_0001_0000_0000
+pref_mem_limit_addr      = 0x0000_0001_0fff_ffff
+pref_mem_window_stride   = 0x0000_0000_1000_0000 (256 MiB per root)
+bus_number/device_number = 1/0
+```
+
+The six `policy_cfg.ep_bars[]` descriptors remain the source of BAR aperture,
+type, Prefetchable bit, and initial BAR address.  A test can override the
+enumeration object before the base test builds `env`, for example:
+
+```systemverilog
+pcie_svt_enum_cfg enum_override;
+enum_override = pcie_svt_enum_cfg::type_id::create("enum_override");
+enum_override.pref_mem_base_addr = 64'h0000_0002_0000_0000;
+enum_override.pref_mem_limit_addr = 64'h0000_0002_0fff_ffff;
+enum_override.pref_mem_window_stride = 64'h0000_0000_2000_0000;
+uvm_config_db#(pcie_svt_enum_cfg)::set(this, "", "enum_cfg", enum_override);
+```
+
+The adapter deep-copies this object into each active link descriptor.  The
+enumeration sequence then derives the per-root window from
+`pref_mem_*_for(root_hierarchy)`, so no address constant is embedded in the
+sequence.  `pcie_svt_enum_cfg.validate()` rejects reversed windows, a stride
+smaller than the window, and invalid function-count limits before elaboration.
+
 The default transport is Serial.  PIPE support remains a future transport
 extension and is not enabled by the current topology policy.
 
