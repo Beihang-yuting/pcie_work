@@ -26,7 +26,7 @@ PCIE_BACKEND_TL_ONLY
   仅创建 TL 环境，不实例化 SVT HDL agent。
 
 PCIE_BACKEND_SVT_REAL_DUT
-  SVT active VIP 连接真实 RTL；TL proxy/sidecar 不进入真实数据路径。
+  SVT active VIP 连接真实 RTL。
 
 PCIE_BACKEND_SVT_TL_FORWARD
   只有显式选择时才启用 SVT-TL adapter，用于混合验证。

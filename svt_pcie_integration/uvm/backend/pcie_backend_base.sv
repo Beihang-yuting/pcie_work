@@ -11,7 +11,11 @@ virtual class pcie_backend_base extends uvm_object;
   // environment selected by the concrete backend.
   pcie_global_cfg global_cfg;
 
-  `uvm_object_utils(pcie_backend_base)
+  // This is an abstract policy interface, not a constructible factory type.
+  // Do not register it with `uvm_object_utils`: UVM's default object proxy
+  // calls new() during factory setup, which VCS correctly rejects for a
+  // class containing the pure-virtual backend_name() method.  Concrete
+  // adapters below retain their own factory registration.
 
   function new(string name = "pcie_backend_base");
     super.new(name);
