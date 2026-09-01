@@ -7,12 +7,22 @@
 //------------------------------------------------------------------------------
 
 class pcie_device_cfg extends uvm_object;
+  // Stable project identifier used to match a graph node or Switch port.
   string device_id;
+
+  // Generic role is translated into Type-0/Type-1 behavior by each backend.
   pcie_device_role_e role;
+
+  // Runtime BDF and header format used for enumeration and routing checks.
   bit [15:0] bdf;
   bit [7:0] header_type;
+
+  // Command-space policy.  The backend may update the live enable state after
+  // an enumeration sequence writes the Command register.
   bit cfg_space_enable;
   bit bus_master_enable;
+
+  // Six fixed BAR descriptors are used because PCIe Type-0 has six BAR slots.
   pcie_unified_bar_cfg bars[6];
 
   `uvm_object_utils(pcie_device_cfg)

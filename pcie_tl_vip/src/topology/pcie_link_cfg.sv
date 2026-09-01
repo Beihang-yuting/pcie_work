@@ -7,17 +7,27 @@
 //------------------------------------------------------------------------------
 
 class pcie_link_cfg extends uvm_object;
+  // Link identity and graph endpoints.  Connectivity remains owned by the
+  // corresponding pcie_topology_link_cfg record.
   string link_id;
   string upstream_node_id;
   string downstream_node_id;
+
   pcie_topology_port_role_e upstream_role;
   pcie_topology_port_role_e downstream_role;
   int unsigned upstream_port_index;
   int unsigned downstream_port_index;
+
+  // Runtime selection: disabled links do not create UVM backend children.
   bit enabled;
   bit use_svt;
+
+  // Physical policy copied from the topology graph.  Width is still a static
+  // HDL property for SVT and is validated before backend construction.
   int unsigned link_width;
   int unsigned max_gen;
+
+  // SVT-only binding information.  TL_ONLY links may leave these unbound.
   string vif_key;
   bit has_hdl_slot;
   int unsigned hdl_slot;

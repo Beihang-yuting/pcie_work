@@ -25,9 +25,14 @@ typedef enum {
 // A BAR descriptor contains policy, not a live decoder.  Each backend translates
 // it into its own BAR/configuration implementation during build/connect.
 class pcie_unified_bar_cfg extends uvm_object;
+  // Whether this BAR consumes an address range in the device image.
   bit implemented;
+
+  // BAR format and memory attribute advertised in configuration space.
   bit is_64bit;
   bit prefetchable;
+
+  // Aperture and initial assignment are expressed in bytes/byte addresses.
   longint unsigned aperture;
   longint unsigned initial_base;
 

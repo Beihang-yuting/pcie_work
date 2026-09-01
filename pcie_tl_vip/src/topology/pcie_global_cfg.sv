@@ -7,9 +7,16 @@
 //------------------------------------------------------------------------------
 
 class pcie_global_cfg extends uvm_object;
+  // The graph is authoritative for node/link connectivity and ownership.
   pcie_topology_cfg topology;
+
+  // Backend selection controls which child environment is constructed.
   pcie_backend_e backend = PCIE_BACKEND_TL_ONLY;
+
+  // Runtime link count is bounded by compile-time project macros.
   int unsigned runtime_num_links;
+
+  // Dynamic policy records are sized from the selected topology at build time.
   pcie_link_cfg links[$];
   pcie_device_cfg devices[$];
 
