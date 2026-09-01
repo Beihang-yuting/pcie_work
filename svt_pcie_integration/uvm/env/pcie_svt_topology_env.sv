@@ -1,3 +1,5 @@
+`include "pcie_svt_hdl_slot_cfg.svh"
+
 class pcie_svt_topology_env extends pcie_device_unified_vip_env;
   `uvm_component_utils(pcie_svt_topology_env)
 
@@ -93,6 +95,16 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
     adapter.translate(topology_cfg, policy_cfg, descriptors, errors);
     if (errors.size() != 0) begin
       `uvm_fatal("SVT_ENV_CFG", pcie_svt_join_errors(errors))
+      return;
+    end
+
+    // The UVM descriptor array is dynamic, but its SVT VIF handles still map to
+    // statically elaborated HDL slots.  Reject an oversized policy here rather
+    // than allowing a later config_db lookup to fail with an opaque VIF error.
+    if (descriptors.size() > `PCIE_SVT_ENV_MAX_NUM_LINKS) begin
+      `uvm_fatal("SVT_ENV_LIMIT", $sformatf(
+        "descriptor count=%0d exceeds PCIE_SVT_ENV_MAX_NUM_LINKS=%0d",
+        descriptors.size(), `PCIE_SVT_ENV_MAX_NUM_LINKS))
       return;
     end
 
