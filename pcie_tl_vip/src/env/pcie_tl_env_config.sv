@@ -20,6 +20,10 @@ class pcie_tl_env_config extends uvm_object;
     int                       num_rc           = 1;
     int                       num_ep           = 1;
 
+    // Optional backend-neutral device images.  Empty preserves all legacy
+    // behavior; populated arrays are translated into independent TL contexts.
+    pcie_device_cfg            device_cfgs[$];
+
     //--- Interface mode ---
     pcie_tl_if_mode_e         if_mode          = TLM_MODE;
 

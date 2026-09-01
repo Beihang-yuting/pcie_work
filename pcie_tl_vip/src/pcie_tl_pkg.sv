@@ -29,6 +29,11 @@ package pcie_tl_pkg;
     `include "shared/pcie_tl_bar_decoder.sv"
     `include "shared/pcie_tl_config_proxy.sv"
 
+    //--- Backend-neutral device translation ---
+    // Included after pcie_tl_func_manager because the adapter targets its
+    // independent per-device function context.
+    `include "topology/pcie_tl_device_cfg_adapter.sv"
+
     //--- Adapter ---
     `include "adapter/pcie_tl_if_adapter.sv"
 

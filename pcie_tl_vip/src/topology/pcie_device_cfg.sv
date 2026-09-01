@@ -10,6 +10,11 @@ class pcie_device_cfg extends uvm_object;
   // Stable project identifier used to match a graph node or Switch port.
   string device_id;
 
+  // Numeric PCI identity is kept separate from the string project identifier.
+  // Zero means "use backend default" when a caller does not care about IDs.
+  bit [15:0] vendor_id;
+  bit [15:0] pci_device_id;
+
   // Generic role is translated into Type-0/Type-1 behavior by each backend.
   pcie_device_role_e role;
 
@@ -70,6 +75,8 @@ class pcie_device_cfg extends uvm_object;
       return;
     end
     device_id          = source.device_id;
+    vendor_id          = source.vendor_id;
+    pci_device_id      = source.pci_device_id;
     role               = source.role;
     bdf                = source.bdf;
     header_type        = source.header_type;

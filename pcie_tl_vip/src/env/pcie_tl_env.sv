@@ -56,11 +56,38 @@ class pcie_tl_env extends uvm_env;
     host_mem_api    host_mem;
     host_mem_api    dev_mem[16];
 
+    // BDF-indexed device contexts are only built when global device policy is
+    // supplied.  Existing tests that do not use global-cfg keep this map empty.
+    pcie_tl_func_context device_contexts[bit [15:0]];
+    pcie_tl_device_cfg_adapter device_cfg_adapter;
+
     //--- Legacy RC auto-response observation ---
     // Legacy CplD objects are written directly to the scoreboard rather than
     // injected back through an adapter.  This port exposes that stream to
     // verification consumers without changing the legacy transport path.
     uvm_analysis_port #(pcie_tl_tlp) legacy_rc_cpl_ap;
+
+    // Return the Nth Endpoint policy context in declaration order.  The graph
+    // remains authoritative; this helper only provides a stable mapping from
+    // dynamically created EP agents to their independent config image.
+    function pcie_tl_func_context configured_ep_context(int ep_index);
+        int ordinal;
+
+        ordinal = 0;
+        configured_ep_context = null;
+        foreach (cfg.device_cfgs[i]) begin
+            if ((cfg.device_cfgs[i] != null) &&
+                (cfg.device_cfgs[i].role == PCIE_DEVICE_EP)) begin
+                if (ordinal == ep_index) begin
+                    if (device_contexts.exists(cfg.device_cfgs[i].bdf))
+                        configured_ep_context =
+                            device_contexts[cfg.device_cfgs[i].bdf];
+                    return;
+                end
+                ordinal++;
+            end
+        end
+    endfunction
 
     function new(string name = "pcie_tl_env", uvm_component parent = null);
         super.new(name, parent);
@@ -82,6 +109,31 @@ class pcie_tl_env extends uvm_env;
         if (!uvm_config_db#(pcie_tl_env_config)::get(this, "", "cfg", cfg)) begin
             cfg = pcie_tl_env_config::type_id::create("cfg");
             `uvm_info("ENV", "No config found in config_db, using defaults", UVM_MEDIUM)
+        end
+
+        if (cfg.device_cfgs.size() != 0) begin
+            device_cfg_adapter = pcie_tl_device_cfg_adapter::type_id::create(
+                "device_cfg_adapter");
+            foreach (cfg.device_cfgs[i]) begin
+                pcie_tl_func_context context;
+                string device_errors[$];
+                if (cfg.device_cfgs[i] == null)
+                    `uvm_fatal("DEVICE_CFG", $sformatf(
+                        "device policy %0d is null", i))
+                context = pcie_tl_func_context::type_id::create(
+                    $sformatf("device_context_%0d", i));
+                if (!device_cfg_adapter.apply_device_cfg(
+                      cfg.device_cfgs[i], context, device_errors))
+                    `uvm_fatal("DEVICE_CFG", $sformatf(
+                        "device '%s' translation failed: %s",
+                        cfg.device_cfgs[i].device_id,
+                        (device_errors.size() == 0) ?
+                          "unspecified adapter error" : device_errors[0]))
+                if (device_contexts.exists(context.bdf))
+                    `uvm_fatal("DEVICE_CFG", $sformatf(
+                        "duplicate device BDF 0x%04h", context.bdf))
+                device_contexts[context.bdf] = context;
+            end
         end
 
         // An explicit TAG_BIT overrides test defaults for the physical VIP
@@ -252,7 +304,12 @@ class pcie_tl_env extends uvm_env;
                 ep_agents[i].fc_mgr    = fc_mgrs[mi];
                 ep_agents[i].tag_mgr   = tag_mgrs[mi];
                 ep_agents[i].ord_eng   = ord_engs[mi];
-                ep_agents[i].cfg_mgr   = cfg_mgrs[mi];
+                begin
+                    pcie_tl_func_context ep_context;
+                    ep_context = configured_ep_context(i);
+                    ep_agents[i].cfg_mgr = (ep_context == null) ?
+                        cfg_mgrs[mi] : ep_context.cfg_mgr;
+                end
                 ep_agents[i].bw_shaper = bw_shaper;
                 ep_agents[i].codec     = codec;
                 ep_agents[i].adapter   = ep_adapters[i];
@@ -271,7 +328,12 @@ class pcie_tl_env extends uvm_env;
             ep_agent.fc_mgr    = fc_mgr;
             ep_agent.tag_mgr   = tag_mgr;
             ep_agent.ord_eng   = ord_eng;
-            ep_agent.cfg_mgr   = cfg_mgr;
+            begin
+                pcie_tl_func_context ep_context;
+                ep_context = configured_ep_context(0);
+                ep_agent.cfg_mgr = (ep_context == null) ?
+                    cfg_mgr : ep_context.cfg_mgr;
+            end
             ep_agent.bw_shaper = bw_shaper;
             ep_agent.codec     = codec;
             ep_agent.adapter   = ep_adapter;
@@ -352,7 +414,12 @@ class pcie_tl_env extends uvm_env;
                 ep_agents[i].fc_mgr    = sw.dsp[i].fc_mgr;
                 ep_agents[i].tag_mgr   = tag_mgrs[owner];
                 ep_agents[i].ord_eng   = ord_engs[owner];
-                ep_agents[i].cfg_mgr   = cfg_mgrs[owner];
+                begin
+                    pcie_tl_func_context ep_context;
+                    ep_context = configured_ep_context(i);
+                    ep_agents[i].cfg_mgr = (ep_context == null) ?
+                        cfg_mgrs[owner] : ep_context.cfg_mgr;
+                end
                 ep_agents[i].bw_shaper = bw_shaper;
                 ep_agents[i].codec     = codec;
                 ep_agents[i].adapter   = ep_adapters[i];

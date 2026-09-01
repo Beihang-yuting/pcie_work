@@ -62,6 +62,7 @@
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_topology_validation_unit_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_topology_adapter_unit_test.sv
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_global_cfg_unit_test.sv
+/home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_device_cfg_adapter_unit_test.sv
 
 // ---- testbench top module ----
 /home/ryan/pcie_work/pcie_tl_vip/tests/pcie_tl_tb_top.sv
