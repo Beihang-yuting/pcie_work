@@ -25,6 +25,9 @@ typedef enum {
 // A BAR descriptor contains policy, not a live decoder.  Each backend translates
 // it into its own BAR/configuration implementation during build/connect.
 class pcie_unified_bar_cfg extends uvm_object;
+  // --------------------------------------------------------------------------
+  // BAR policy fields.
+  // --------------------------------------------------------------------------
   // Whether this BAR consumes an address range in the device image.
   bit implemented;
 
@@ -46,10 +49,14 @@ class pcie_unified_bar_cfg extends uvm_object;
     pcie_unified_bar_cfg source;
 
     super.do_copy(rhs);
+
     if (!$cast(source, rhs)) begin
       `uvm_fatal("GLOBAL_CFG_COPY", "BAR source has the wrong type")
       return;
     end
+
+    // Keep the descriptor as a value object.  Live decoder state remains
+    // private to the backend-specific context created from this policy.
     implemented  = source.implemented;
     is_64bit     = source.is_64bit;
     prefetchable = source.prefetchable;

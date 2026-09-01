@@ -21,6 +21,8 @@ class pcie_tl_device_cfg_adapter extends uvm_object;
     bit [15:0] device;
 
     errors.delete();
+
+    // Reject incomplete calls before touching the destination context.
     if (src == null) begin
       errors.push_back("device policy is null");
       return 1'b0;
@@ -30,8 +32,11 @@ class pcie_tl_device_cfg_adapter extends uvm_object;
       return 1'b0;
     end
 
+    // Supply deterministic IDs only when a scenario leaves them at zero.
     vendor = (src.vendor_id == 0) ? 16'hABCD : src.vendor_id;
     device = (src.pci_device_id == 0) ? 16'h1234 : src.pci_device_id;
+
+    // Translate common identity and command policy into the TL context.
     dst.bdf     = src.bdf;
     dst.enabled = 1'b1;
     dst.is_bridge = (src.role == PCIE_DEVICE_SWITCH);
@@ -39,6 +44,8 @@ class pcie_tl_device_cfg_adapter extends uvm_object;
     dst.bus_master_en   = src.bus_master_enable;
     dst.init_cfg_space(vendor, device, .header_type(src.header_type));
 
+    // BAR state is copied per function.  This prevents multiple endpoints
+    // from sharing an owner-USP configuration manager.
     // Copy each BAR descriptor into the context.  A high DWORD of a 64-bit
     // pair points back to its low owner, matching the decoder's convention.
     foreach (src.bars[bar]) begin
@@ -49,14 +56,17 @@ class pcie_tl_device_cfg_adapter extends uvm_object;
       dst.bar_size[bar]  = 0;
       dst.bar_enable[bar] = 0;
       dst.bar_flags[bar] = 0;
+
       if (bar_cfg == null)
         continue;
+
       if (bar_cfg.implemented) begin
         dst.bar_base[bar]   = bar_cfg.initial_base;
         dst.bar_size[bar]   = bar_cfg.aperture;
         dst.bar_enable[bar] = src.cfg_space_enable;
         dst.bar_flags[bar]  = (bar_cfg.is_64bit ? 32'h4 : 32'h0) |
                               (bar_cfg.prefetchable ? 32'h8 : 32'h0);
+
         if (bar_cfg.is_64bit) begin
           if (bar == 5) begin
             errors.push_back($sformatf(

@@ -1,7 +1,14 @@
 class pcie_svt_topology_policy_cfg extends uvm_object;
+  // --------------------------------------------------------------------------
+  // Topology-to-SVT selection.
+  // --------------------------------------------------------------------------
   string dut_node_ids[$];
   string vif_prefix;
   string reset_vif_key;
+
+  // --------------------------------------------------------------------------
+  // Default transport and stage policy.
+  // --------------------------------------------------------------------------
   pcie_svt_transport_e transport;
   pcie_svt_endpoint_model_e default_endpoint_model;
   bit default_fast_link_training;
@@ -9,6 +16,10 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
   time link_timeout;
   time enum_timeout;
   time traffic_timeout;
+
+  // --------------------------------------------------------------------------
+  // Endpoint image and explicit link overrides.
+  // --------------------------------------------------------------------------
   pcie_svt_bar_cfg ep_bars[6];
   pcie_svt_link_override_cfg link_overrides[$];
   int unsigned hdl_slot_by_link[string];
@@ -23,6 +34,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
   endfunction
 
   function void init_defaults();
+    // Reset collection-valued overrides before applying deterministic defaults.
     dut_node_ids.delete();
     link_overrides.delete();
     hdl_slot_by_link.delete();
@@ -35,6 +47,8 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     link_timeout = 3ms;
     enum_timeout = 3ms;
     traffic_timeout = 1ms;
+
+    // Start with no BARs implemented, then install the project profile below.
     foreach (ep_bars[i]) begin
       if (ep_bars[i] == null)
         ep_bars[i] = pcie_svt_bar_cfg::type_id::create(
@@ -45,6 +59,8 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
       ep_bars[i].aperture = 0;
       ep_bars[i].initial_base = 0;
     end
+
+    // BAR0/1 is 32 MiB; BAR2/3 and BAR4/5 are 64 KiB, all 64-bit prefetchable.
     ep_bars[0].implemented = 1'b1;
     ep_bars[0].is_64bit = 1'b1;
     ep_bars[0].prefetchable = 1'b1;
@@ -62,12 +78,14 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
   virtual function void do_copy(uvm_object rhs);
     pcie_svt_topology_policy_cfg source;
     super.do_copy(rhs);
+
     if (!$cast(source, rhs)) begin
       `uvm_fatal("SVT_COPY",
                  "pcie_svt_topology_policy_cfg source has the wrong type")
       return;
     end
 
+    // Copy topology selection and stage defaults.
     dut_node_ids.delete();
     foreach (source.dut_node_ids[i])
       dut_node_ids.push_back(source.dut_node_ids[i]);
@@ -81,6 +99,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     enum_timeout = source.enum_timeout;
     traffic_timeout = source.traffic_timeout;
 
+    // Deep-copy the endpoint BAR image.
     foreach (ep_bars[i]) begin
       if (source.ep_bars[i] == null) begin
         ep_bars[i] = null;
@@ -92,6 +111,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
       end
     end
 
+    // Deep-copy link overrides and preserve their order for diagnostics.
     link_overrides.delete();
     foreach (source.link_overrides[i]) begin
       pcie_svt_link_override_cfg override_copy;
@@ -105,6 +125,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
       link_overrides.push_back(override_copy);
     end
 
+    // Slot ownership is a sparse map keyed by link ID.
     hdl_slot_by_link.delete();
     foreach (source.hdl_slot_by_link[link_id])
       hdl_slot_by_link[link_id] = source.hdl_slot_by_link[link_id];
@@ -117,6 +138,8 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     int unsigned non_null_bar_count;
 
     errors.delete();
+
+    // Validate DUT selection and reject duplicates before checking policy.
 
     if (dut_node_ids.size() == 0)
       errors.push_back("at least one DUT node is required");
@@ -147,6 +170,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     if ($isunknown(traffic_timeout) || traffic_timeout == 0)
       errors.push_back("traffic_timeout must be positive");
 
+    // Exactly six descriptors are kept so BAR indexing stays stable.
     non_null_bar_count = 0;
     foreach (ep_bars[i])
       if (ep_bars[i] != null)
@@ -154,6 +178,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     if (non_null_bar_count != 6)
       errors.push_back("exactly six non-null endpoint BAR handles are required");
 
+    // Validate BAR aperture, alignment, and 64-bit pair ownership.
     foreach (ep_bars[i]) begin
       if ((ep_bars[i] != null) && ep_bars[i].implemented) begin
         if ((ep_bars[i].aperture < 16) ||
@@ -179,6 +204,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     end
 
     foreach (link_overrides[i]) begin
+      // Link overrides are sparse; null entries and duplicate IDs are errors.
       if (link_overrides[i] == null) begin
         errors.push_back($sformatf("link override at index %0d is null", i));
       end else begin

@@ -1,3 +1,5 @@
+`include "pcie_unified_limits.svh"
+
 //------------------------------------------------------------------------------
 // Unified PCIe environment configuration.
 //
@@ -7,6 +9,9 @@
 //------------------------------------------------------------------------------
 
 class pcie_global_cfg extends uvm_object;
+  // --------------------------------------------------------------------------
+  // Authoritative graph and backend choice.
+  // --------------------------------------------------------------------------
   // The graph is authoritative for node/link connectivity and ownership.
   pcie_topology_cfg topology;
 
@@ -16,6 +21,9 @@ class pcie_global_cfg extends uvm_object;
   // Runtime link count is bounded by compile-time project macros.
   int unsigned runtime_num_links;
 
+  // --------------------------------------------------------------------------
+  // Derived runtime policy.
+  // --------------------------------------------------------------------------
   // Dynamic policy records are sized from the selected topology at build time.
   pcie_link_cfg links[$];
   pcie_device_cfg devices[$];
@@ -34,10 +42,14 @@ class pcie_global_cfg extends uvm_object;
     int switch_index;
     int ep_index;
 
+    // Reset all derived policy before consuming the new authoritative graph.
     topology = topology_arg;
     links.delete();
     devices.delete();
     runtime_num_links = (topology == null) ? 0 : topology.links.size();
+
+    // BDF allocation uses independent counters so each role has stable device
+    // numbering even when a topology contains several node classes.
     rc_index = 0;
     switch_index = 0;
     ep_index = 0;
@@ -45,17 +57,22 @@ class pcie_global_cfg extends uvm_object;
     if (topology == null)
       return;
 
+    // Build one backend-neutral runtime policy record for every graph link.
     foreach (topology.links[i]) begin
       pcie_link_cfg link;
       pcie_topology_link_cfg source;
 
       source = topology.links[i];
+
       if (source == null) begin
         links.push_back(null);
         continue;
       end
+
       link = pcie_link_cfg::type_id::create(
         $sformatf("link_%0d", i));
+
+      // Connectivity and physical capabilities come directly from the graph.
       link.link_id               = source.link_id;
       link.upstream_node_id      = source.upstream_node_id;
       link.downstream_node_id    = source.downstream_node_id;
@@ -67,23 +84,30 @@ class pcie_global_cfg extends uvm_object;
       link.use_svt               = 1'b0;
       link.link_width            = source.link_width;
       link.max_gen               = source.max_gen;
+
       links.push_back(link);
     end
 
+    // Build one configuration-space policy record for every enumerated node.
     foreach (topology.nodes[i]) begin
       pcie_topology_node_cfg source;
       pcie_device_cfg device;
 
       source = topology.nodes[i];
+
       if (source == null) begin
         devices.push_back(null);
         continue;
       end
+
       device = pcie_device_cfg::type_id::create(
         $sformatf("device_%s", source.node_id));
+
+      // Common command-register defaults apply before role-specific identity.
       device.device_id = source.node_id;
       device.cfg_space_enable = 1'b1;
       device.bus_master_enable = 1'b0;
+
       case (source.kind)
         PCIE_TOPO_NODE_RC: begin
           device.role = PCIE_DEVICE_RC;
@@ -108,6 +132,9 @@ class pcie_global_cfg extends uvm_object;
           device.header_type = 8'h00;
         end
       endcase
+
+      // Every device starts with the project BAR profile; scenarios may
+      // replace individual descriptors in build_global_cfg().
       device.init_default_bars();
       devices.push_back(device);
     end
@@ -122,11 +149,15 @@ class pcie_global_cfg extends uvm_object;
     bit seen_bdf[bit [15:0]];
 
     errors.delete();
+
+    // Validate the graph first; later checks assume its node/link references
+    // are internally consistent.
     if (topology == null)
       errors.push_back("topology is null");
     else
       topology.validate(errors);
 
+    // Dynamic policy is always bounded by the compile-time HDL allocation.
     if (runtime_num_links > `PCIE_SVT_ENV_MAX_NUM_LINKS)
       errors.push_back($sformatf(
         "runtime_num_links=%0d exceeds PCIE_SVT_ENV_MAX_NUM_LINKS=%0d",
@@ -136,15 +167,19 @@ class pcie_global_cfg extends uvm_object;
         "link policy count=%0d exceeds PCIE_SVT_ENV_MAX_NUM_LINKS=%0d",
         links.size(), `PCIE_SVT_ENV_MAX_NUM_LINKS));
 
+    // Link checks cover identity, physical capability, and exclusive ownership
+    // of each statically elaborated SVT HDL slot.
     foreach (links[i]) begin
       if (links[i] == null) begin
         errors.push_back($sformatf("link policy %0d is null", i));
         continue;
       end
+
       if (seen_link.exists(links[i].link_id))
         errors.push_back($sformatf("duplicate link ID '%s'", links[i].link_id));
       else
         seen_link[links[i].link_id] = 1'b1;
+
       if (!((links[i].link_width == 4) || (links[i].link_width == 8) ||
             (links[i].link_width == 16)))
         errors.push_back($sformatf("link '%s' has unsupported width x%0d",
@@ -152,6 +187,7 @@ class pcie_global_cfg extends uvm_object;
       if (!((links[i].max_gen == 4) || (links[i].max_gen == 5)))
         errors.push_back($sformatf("link '%s' has unsupported Gen%0d",
                                    links[i].link_id, links[i].max_gen));
+
       if (links[i].has_hdl_slot) begin
         if (links[i].hdl_slot >= `PCIE_SVT_ENV_MAX_HDL_AGENTS)
           errors.push_back($sformatf(
@@ -168,16 +204,19 @@ class pcie_global_cfg extends uvm_object;
       end
     end
 
+    // Device checks ensure unique enumeration identity and legal BAR sizing.
     foreach (devices[i]) begin
       if (devices[i] == null) begin
         errors.push_back($sformatf("device policy %0d is null", i));
         continue;
       end
+
       if (seen_bdf.exists(devices[i].bdf))
         errors.push_back($sformatf("duplicate device BDF 0x%04h",
                                    devices[i].bdf));
       else
         seen_bdf[devices[i].bdf] = 1'b1;
+
       foreach (devices[i].bars[bar]) begin
         if ((devices[i].bars[bar] != null) &&
             devices[i].bars[bar].implemented) begin
@@ -195,10 +234,14 @@ class pcie_global_cfg extends uvm_object;
       end
     end
 
+    // A selected SVT backend must own at least one enabled runtime link.  This
+    // catches a policy that would otherwise elaborate an idle VIP environment.
     if ((backend != PCIE_BACKEND_TL_ONLY) &&
         (runtime_num_links != 0)) begin
       bit any_svt;
+
       any_svt = 1'b0;
+
       foreach (links[i])
         if ((links[i] != null) && links[i].enabled && links[i].use_svt)
           any_svt = 1'b1;
@@ -213,13 +256,18 @@ class pcie_global_cfg extends uvm_object;
     pcie_device_cfg device_copy;
 
     super.do_copy(rhs);
+
     if (!$cast(source, rhs)) begin
       `uvm_fatal("GLOBAL_CFG_COPY", "global source has the wrong type")
       return;
     end
+
+    // The graph is immutable policy at this layer and remains shared.  Derived
+    // link/device records are deep-copied for independent scenario overrides.
     topology = source.topology;
     backend = source.backend;
     runtime_num_links = source.runtime_num_links;
+
     links.delete();
     foreach (source.links[i]) begin
       if (source.links[i] == null)
@@ -227,10 +275,12 @@ class pcie_global_cfg extends uvm_object;
       else begin
         link_copy = pcie_link_cfg::type_id::create(
           $sformatf("link_copy_%0d", i));
+
         link_copy.copy(source.links[i]);
         links.push_back(link_copy);
       end
     end
+
     devices.delete();
     foreach (source.devices[i]) begin
       if (source.devices[i] == null)
@@ -238,6 +288,7 @@ class pcie_global_cfg extends uvm_object;
       else begin
         device_copy = pcie_device_cfg::type_id::create(
           $sformatf("device_copy_%0d", i));
+
         device_copy.copy(source.devices[i]);
         devices.push_back(device_copy);
       end

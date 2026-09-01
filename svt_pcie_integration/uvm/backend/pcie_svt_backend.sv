@@ -5,6 +5,8 @@
 class pcie_svt_backend extends pcie_backend_base;
   `uvm_object_utils(pcie_svt_backend)
 
+  // SVT-specific checks are intentionally kept here rather than in the
+  // backend-neutral global configuration object.
   function new(string name = "pcie_svt_backend");
     super.new(name);
   endfunction

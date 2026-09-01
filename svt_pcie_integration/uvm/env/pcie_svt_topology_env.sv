@@ -3,15 +3,26 @@
 class pcie_svt_topology_env extends pcie_device_unified_vip_env;
   `uvm_component_utils(pcie_svt_topology_env)
 
+  // --------------------------------------------------------------------------
+  // Translated topology policy.
+  // --------------------------------------------------------------------------
   pcie_topology_cfg topology_cfg;
   pcie_svt_topology_policy_cfg policy_cfg;
   pcie_svt_port_descriptor descriptors[$];
+
+  // --------------------------------------------------------------------------
+  // One configuration/status/agent tuple per dynamic descriptor.
+  // --------------------------------------------------------------------------
   svt_pcie_device_configuration port_cfg[];
   svt_pcie_device_status port_status[];
   svt_pcie_device_agent port_agent[];
   pcie_svt_topology_ep_bar_sizing_callback
     bar_sizing_callback_by_link[string];
   bit bar_sizing_callback_registered_by_link[string];
+
+  // --------------------------------------------------------------------------
+  // Virtual sequencing and translation helpers.
+  // --------------------------------------------------------------------------
   pcie_svt_topology_virtual_sequencer vseqr;
   pcie_svt_topology_adapter adapter;
   string errors[$];
@@ -76,6 +87,7 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
   virtual function void build_phase(uvm_phase phase);
     pcie_svt_device_cfg_builder cfg_builder;
 
+    // Deliberately do not call super: the official example always creates one
     // Deliberately do not call super: the official example always creates one
     // fixed Root and one fixed Endpoint agent.
     if (!uvm_config_db#(pcie_topology_cfg)::get(

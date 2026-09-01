@@ -7,6 +7,8 @@
 //------------------------------------------------------------------------------
 
 virtual class pcie_backend_base extends uvm_object;
+  // The adapter retains policy only; protocol components belong to the child
+  // environment selected by the concrete backend.
   pcie_global_cfg global_cfg;
 
   `uvm_object_utils(pcie_backend_base)

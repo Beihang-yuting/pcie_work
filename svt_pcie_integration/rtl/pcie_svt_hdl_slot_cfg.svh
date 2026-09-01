@@ -22,10 +22,9 @@
   `endif
 `endif
 
-`ifndef PCIE_SVT_ENV_MAX_HDL_AGENTS
-  `define PCIE_SVT_ENV_MAX_HDL_AGENTS `PCIE_SVT_ENV_REQUIRED_HDL_AGENTS
-`endif
+// Pull in the shared maximums after computing the SVT-specific requirement.
+// This preserves automatic doubling when PCIE_USE_SVT_PEER is compiled.
+`include "pcie_unified_limits.svh"
 
-`ifndef PCIE_SVT_ENV_MAX_NUM_LINKS
-  `define PCIE_SVT_ENV_MAX_NUM_LINKS `PCIE_SVT_ENV_MAX_HDL_AGENTS
-`endif
+// The common header supplies the maximum-slot default.  The required count
+// remains separate because peer mode may need twice as many static agents.

@@ -7,6 +7,9 @@
 //------------------------------------------------------------------------------
 
 class pcie_link_cfg extends uvm_object;
+  // --------------------------------------------------------------------------
+  // Graph identity and endpoint ownership.
+  // --------------------------------------------------------------------------
   // Link identity and graph endpoints.  Connectivity remains owned by the
   // corresponding pcie_topology_link_cfg record.
   string link_id;
@@ -18,6 +21,9 @@ class pcie_link_cfg extends uvm_object;
   int unsigned upstream_port_index;
   int unsigned downstream_port_index;
 
+  // --------------------------------------------------------------------------
+  // Runtime protocol policy.
+  // --------------------------------------------------------------------------
   // Runtime selection: disabled links do not create UVM backend children.
   bit enabled;
   bit use_svt;
@@ -27,6 +33,9 @@ class pcie_link_cfg extends uvm_object;
   int unsigned link_width;
   int unsigned max_gen;
 
+  // --------------------------------------------------------------------------
+  // Optional static SVT binding.
+  // --------------------------------------------------------------------------
   // SVT-only binding information.  TL_ONLY links may leave these unbound.
   string vif_key;
   bit has_hdl_slot;
@@ -42,10 +51,13 @@ class pcie_link_cfg extends uvm_object;
     pcie_link_cfg source;
 
     super.do_copy(rhs);
+
     if (!$cast(source, rhs)) begin
       `uvm_fatal("GLOBAL_CFG_COPY", "link source has the wrong type")
       return;
     end
+
+    // Graph identity and endpoint ownership.
     link_id               = source.link_id;
     upstream_node_id      = source.upstream_node_id;
     downstream_node_id    = source.downstream_node_id;
@@ -53,10 +65,14 @@ class pcie_link_cfg extends uvm_object;
     downstream_role       = source.downstream_role;
     upstream_port_index   = source.upstream_port_index;
     downstream_port_index = source.downstream_port_index;
+
+    // Runtime protocol and negotiated capability policy.
     enabled               = source.enabled;
     use_svt               = source.use_svt;
     link_width            = source.link_width;
     max_gen               = source.max_gen;
+
+    // Static SVT binding metadata; TL-only links may leave it empty.
     vif_key               = source.vif_key;
     has_hdl_slot          = source.has_hdl_slot;
     hdl_slot              = source.hdl_slot;

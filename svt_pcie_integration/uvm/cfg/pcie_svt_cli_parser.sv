@@ -14,6 +14,8 @@ class pcie_svt_cli_parser extends uvm_object;
       output pcie_svt_run_mode_e run_mode,
       output pcie_svt_link_override_cfg overrides[$],
       output string errors[$]);
+    // Parsed values are kept separate from outputs so malformed arguments do
+    // not partially update the caller's configuration.
     string parsed_profile;
     int unsigned parsed_gen;
     bit parsed_fast;
@@ -26,6 +28,7 @@ class pcie_svt_cli_parser extends uvm_object;
     bit fast_seen;
     bit run_mode_seen;
 
+    // Establish output defaults before scanning user arguments.
     profile_name = "";
     max_gen = 0;
     fast_link_training = 1'b0;
@@ -45,6 +48,7 @@ class pcie_svt_cli_parser extends uvm_object;
     fast_seen = 1'b0;
     run_mode_seen = 1'b0;
 
+    // Parse each token once, preserving order for duplicate diagnostics.
     foreach (args[i]) begin
       string key;
       string value;

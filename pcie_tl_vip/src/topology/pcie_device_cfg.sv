@@ -7,6 +7,9 @@
 //------------------------------------------------------------------------------
 
 class pcie_device_cfg extends uvm_object;
+  // --------------------------------------------------------------------------
+  // Enumerated identity and role.
+  // --------------------------------------------------------------------------
   // Stable project identifier used to match a graph node or Switch port.
   string device_id;
 
@@ -27,6 +30,9 @@ class pcie_device_cfg extends uvm_object;
   bit cfg_space_enable;
   bit bus_master_enable;
 
+  // --------------------------------------------------------------------------
+  // Type-0 configuration-space BAR image.
+  // --------------------------------------------------------------------------
   // Six fixed BAR descriptors are used because PCIe Type-0 has six BAR slots.
   pcie_unified_bar_cfg bars[6];
 
@@ -34,6 +40,9 @@ class pcie_device_cfg extends uvm_object;
 
   function new(string name = "pcie_device_cfg");
     super.new(name);
+
+    // Create all six descriptors up front so scenario code may update BAR
+    // policy without repeating null checks for each optional override.
     foreach (bars[i])
       bars[i] = pcie_unified_bar_cfg::type_id::create(
         $sformatf("bar%0d", i));
@@ -46,19 +55,27 @@ class pcie_device_cfg extends uvm_object;
     longint unsigned apertures[3] = '{32 * 1024 * 1024,
                                       64 * 1024,
                                       64 * 1024};
+
+    // Clear stale scenario overrides before applying the project defaults.
     foreach (bars[i]) begin
       if (bars[i] == null)
         bars[i] = pcie_unified_bar_cfg::type_id::create(
           $sformatf("bar%0d", i));
+
       bars[i].implemented  = 1'b0;
       bars[i].is_64bit     = 1'b0;
       bars[i].prefetchable = 1'b0;
       bars[i].aperture     = 0;
       bars[i].initial_base = 0;
     end
+
+    // Only the low DWORD owns each 64-bit BAR.  Its adjacent descriptor stays
+    // unimplemented and is claimed by the backend when the pair is created.
     for (int pair = 0; pair < 3; pair++) begin
       int low;
+
       low = pair * 2;
+
       bars[low].implemented  = 1'b1;
       bars[low].is_64bit     = 1'b1;
       bars[low].prefetchable = 1'b1;
@@ -70,10 +87,13 @@ class pcie_device_cfg extends uvm_object;
     pcie_device_cfg source;
 
     super.do_copy(rhs);
+
     if (!$cast(source, rhs)) begin
       `uvm_fatal("GLOBAL_CFG_COPY", "device source has the wrong type")
       return;
     end
+
+    // Scalar configuration-space identity and enable policy.
     device_id          = source.device_id;
     vendor_id          = source.vendor_id;
     pci_device_id      = source.pci_device_id;
@@ -82,6 +102,9 @@ class pcie_device_cfg extends uvm_object;
     header_type        = source.header_type;
     cfg_space_enable   = source.cfg_space_enable;
     bus_master_enable  = source.bus_master_enable;
+
+    // BAR objects require deep copies because tests may customize each device
+    // independently after cloning a global configuration.
     foreach (bars[i]) begin
       if (source.bars[i] == null) begin
         bars[i] = null;
@@ -90,6 +113,7 @@ class pcie_device_cfg extends uvm_object;
         if (bars[i] == null)
           bars[i] = pcie_unified_bar_cfg::type_id::create(
             $sformatf("bar%0d", i));
+
         bars[i].copy(source.bars[i]);
       end
     end

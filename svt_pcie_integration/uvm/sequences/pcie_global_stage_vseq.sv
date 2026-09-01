@@ -9,6 +9,8 @@
 class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
   `uvm_object_utils(pcie_global_stage_vseq)
 
+  // The sequence is backend-neutral; derived sequences dispatch to TL or SVT
+  // virtual sequencers while preserving this stage order.
   pcie_global_cfg global_cfg;
 
   function new(string name = "pcie_global_stage_vseq");
@@ -17,6 +19,7 @@ class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
 
   // Hook 1: establish link training for enabled links only.
   virtual task start_enabled_links();
+    // Link bring-up is intentionally limited to enabled runtime policy.
     foreach (global_cfg.links[i]) begin
       if ((global_cfg.links[i] != null) && global_cfg.links[i].enabled)
         `uvm_info("GLOBAL_STAGE", $sformatf(
@@ -29,6 +32,7 @@ class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
 
   // Hook 2: initialize configuration space/BAR policy in backend order.
   virtual task initialize_devices();
+    // Device initialization follows link readiness and precedes enumeration.
     foreach (global_cfg.devices[i])
       if (global_cfg.devices[i] != null)
         `uvm_info("GLOBAL_STAGE", $sformatf(
@@ -39,6 +43,7 @@ class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
 
   // Hook 3: enumerate and perform backend-specific memory traffic.
   virtual task enumerate_and_test_memory();
+    // Concrete backends replace this hook with enumeration and traffic.
     `uvm_info("GLOBAL_STAGE", "enumeration/traffic stage requested", UVM_LOW)
   endtask
 

@@ -6,6 +6,7 @@
 class pcie_tl_backend extends pcie_backend_base;
   `uvm_object_utils(pcie_tl_backend)
 
+  // TL-only construction remains independent of Synopsys SVT libraries.
   function new(string name = "pcie_tl_backend");
     super.new(name);
   endfunction

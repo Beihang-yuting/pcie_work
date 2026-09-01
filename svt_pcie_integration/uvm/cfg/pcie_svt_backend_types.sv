@@ -1,3 +1,8 @@
+//------------------------------------------------------------------------------
+// SVT-facing policy types.  These stay separate from the backend-neutral
+// topology package so TL-only builds do not import SVT classes.
+//------------------------------------------------------------------------------
+
 typedef enum {PCIE_SVT_ROLE_RC, PCIE_SVT_ROLE_EP} pcie_svt_role_e;
 typedef enum {PCIE_SVT_TRANSPORT_SERIAL, PCIE_SVT_TRANSPORT_PIPE}
   pcie_svt_transport_e;
@@ -18,6 +23,7 @@ function automatic string pcie_svt_join_errors(input string errors[$]);
 endfunction
 
 class pcie_svt_bar_cfg extends uvm_object;
+  // BAR image used by the SVT Target App configuration-space builder.
   bit implemented;
   bit is_64bit;
   bit prefetchable;
@@ -46,7 +52,9 @@ class pcie_svt_bar_cfg extends uvm_object;
 endclass
 
 class pcie_svt_link_override_cfg extends uvm_object;
+  // Optional per-link overrides parsed from command-line arguments.
   string link_id;
+
   bit has_enable, enabled;
   bit has_gen;
   int unsigned max_gen;
@@ -89,9 +97,11 @@ class pcie_svt_link_override_cfg extends uvm_object;
 endclass
 
 class pcie_svt_port_descriptor extends uvm_object;
+  // One dynamic descriptor maps to one statically elaborated HDL slot.
   string link_id;
   string svt_node_id;
   string vif_key;
+
   int unsigned slot_index;
   int unsigned root_hierarchy;
   pcie_svt_role_e role;
@@ -105,6 +115,8 @@ class pcie_svt_port_descriptor extends uvm_object;
   time link_timeout;
   time enum_timeout;
   time traffic_timeout;
+
+  // Endpoint BARs are meaningful only when this descriptor represents an EP.
   pcie_svt_bar_cfg ep_bars[6];
 
   `uvm_object_utils(pcie_svt_port_descriptor)
@@ -119,11 +131,14 @@ class pcie_svt_port_descriptor extends uvm_object;
   virtual function void do_copy(uvm_object rhs);
     pcie_svt_port_descriptor source;
     super.do_copy(rhs);
+
     if (!$cast(source, rhs)) begin
       `uvm_fatal("SVT_COPY",
                  "pcie_svt_port_descriptor source has the wrong type")
       return;
     end
+
+    // Copy identity, slot binding, and negotiated capability policy first.
     link_id = source.link_id;
     svt_node_id = source.svt_node_id;
     vif_key = source.vif_key;

@@ -1,6 +1,7 @@
 class pcie_svt_cfg_space_builder extends uvm_object;
   `uvm_object_utils(pcie_svt_cfg_space_builder)
 
+  // PCI BAR apertures above this limit cannot be represented as 32-bit BARs.
   localparam longint unsigned BAR32_LIMIT =
     64'h0000_0001_0000_0000;
 

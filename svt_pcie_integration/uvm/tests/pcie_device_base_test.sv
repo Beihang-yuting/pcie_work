@@ -9,6 +9,7 @@
 class pcie_device_base_test extends uvm_test;
   `uvm_component_utils(pcie_device_base_test)
 
+  // Test-owned policy and common environment handle.
   pcie_global_cfg global_cfg;
   pcie_unified_env env;
 
@@ -22,6 +23,7 @@ class pcie_device_base_test extends uvm_test;
   virtual function pcie_topology_cfg build_topology();
     int unsigned max_gen;
 
+    // Gen4 is the default acceleration point; a plusarg may select Gen5.
     max_gen = 4;
     void'($value$plusargs("PCIE_GEN=%d", max_gen));
     if (max_gen != 4 && max_gen != 5)
@@ -40,6 +42,7 @@ class pcie_device_base_test extends uvm_test;
   // Hook for a scenario to edit backend, link enable/use_svt, BDF and BAR
   // policy after defaults have been generated but before env construction.
   virtual function void build_global_cfg();
+    // Derived tests customize this object after defaults are materialized.
     global_cfg.build_default_for_topology(build_topology());
   endfunction
 
@@ -47,6 +50,8 @@ class pcie_device_base_test extends uvm_test;
     string errors[$];
 
     super.build_phase(phase);
+
+    // Build policy before publishing it to the child environment.
     global_cfg = pcie_global_cfg::type_id::create("global_cfg");
     build_global_cfg();
     global_cfg.validate(errors);
@@ -55,6 +60,9 @@ class pcie_device_base_test extends uvm_test;
         "base test global configuration invalid: %s", errors[0]))
       return;
     end
+
+    // The environment consumes the same handle, avoiding a second translation
+    // path that could silently diverge from the base-test configuration.
     uvm_config_db#(pcie_global_cfg)::set(this, "env", "global_cfg",
                                          global_cfg);
     env = pcie_unified_env::type_id::create("env", this);
