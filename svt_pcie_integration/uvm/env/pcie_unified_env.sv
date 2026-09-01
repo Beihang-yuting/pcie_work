@@ -16,6 +16,10 @@ class pcie_unified_env extends uvm_env;
   // derived environment without introducing a package dependency cycle.
   pcie_backend_base backend_adapter;
 
+  // SVT_REAL_DUT owns the actual Unified VIP environment below this manager.
+  // It is created only for that backend; TL_ONLY never elaborates this child.
+  pcie_svt_topology_env svt_env;
+
   function new(string name = "pcie_unified_env", uvm_component parent = null);
     super.new(name, parent);
   endfunction
@@ -50,5 +54,44 @@ class pcie_unified_env extends uvm_env;
       `uvm_fatal("UNIFIED_BACKEND", $sformatf(
         "%s backend rejected global configuration: %s",
         backend_adapter.backend_name(), errors[0]));
+
+    if (global_cfg.backend == PCIE_BACKEND_SVT_REAL_DUT) begin
+      pcie_svt_topology_policy_cfg svt_policy;
+
+      // Translate only management policy here.  The topology graph itself is
+      // passed through unchanged so the SVT adapter and TL adapter cannot
+      // disagree about link endpoints.
+      svt_policy = pcie_svt_topology_policy_cfg::type_id::create(
+        "svt_policy");
+      svt_policy.init_defaults();
+      foreach (global_cfg.topology.nodes[i]) begin
+        pcie_topology_node_cfg node;
+        node = global_cfg.topology.nodes[i];
+        if (node == null)
+          continue;
+        // For direct RC↔EP graphs the EP is the DUT.  For Switch graphs the
+        // Switch node is the DUT and all RC/EP links are exposed to SVT.
+        if (node.kind == PCIE_TOPO_NODE_SWITCH)
+          svt_policy.dut_node_ids.push_back(node.node_id);
+      end
+      if (svt_policy.dut_node_ids.size() == 0)
+        foreach (global_cfg.topology.nodes[i])
+          if ((global_cfg.topology.nodes[i] != null) &&
+              (global_cfg.topology.nodes[i].kind == PCIE_TOPO_NODE_EP))
+            svt_policy.dut_node_ids.push_back(
+              global_cfg.topology.nodes[i].node_id);
+
+      foreach (global_cfg.links[i]) begin
+        if ((global_cfg.links[i] != null) &&
+            global_cfg.links[i].has_hdl_slot)
+          svt_policy.hdl_slot_by_link[global_cfg.links[i].link_id] =
+            global_cfg.links[i].hdl_slot;
+      end
+      uvm_config_db#(pcie_topology_cfg)::set(
+        this, "svt_env", "topology_cfg", global_cfg.topology);
+      uvm_config_db#(pcie_svt_topology_policy_cfg)::set(
+        this, "svt_env", "policy_cfg", svt_policy);
+      svt_env = pcie_svt_topology_env::type_id::create("svt_env", this);
+    end
   endfunction
 endclass
