@@ -77,6 +77,8 @@ class pcie_global_cfg_unit_test extends uvm_test;
     // Duplicate HDL slots are ambiguous because one static VIF cannot belong to
     // two logical links.  The validator must catch this independently of backend.
     if (global_cfg.links.size() > 0) begin
+      global_cfg.links[0].has_hdl_slot = 1'b1;
+      global_cfg.links[0].hdl_slot = 0;
       extra_link = pcie_link_cfg::type_id::create("duplicate_slot_link");
       extra_link.link_id = "duplicate_slot_link";
       extra_link.enabled = 1'b1;
