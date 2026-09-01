@@ -23,6 +23,7 @@ package pcie_svt_topology_pkg;
   `include "sequences/pcie_svt_link_vseq.sv"
   `include "sequences/pcie_svt_enumeration_registry.sv"
   `include "sequences/pcie_svt_enumeration_vseq.sv"
+  `include "sequences/pcie_global_stage_vseq.sv"
   `include "tests/pcie_device_base_test.sv"
 
   function automatic string pcie_svt_compiled_profile_name();

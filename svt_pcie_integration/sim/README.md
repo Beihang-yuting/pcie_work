@@ -508,3 +508,13 @@ expects no timeout. The `plus1fs` case must report the child-side
 `completion=` diagnostic, and `plus2fs` must report the watchdog-side
 `current=` diagnostic. Expected `CFG_INIT_TIMEOUT` reports are caught by the
 test before the final UVM severity counts are produced.
+# Unified global-cfg environment
+
+The backend-neutral configuration and environment-management contract is
+documented in `../../docs/pcie_unified_environment_usage.md`.  The project
+base test is `pcie_device_base_test`; it keeps topology connectivity in
+`pcie_topology_cfg` and selects TL/SVT policy through `pcie_global_cfg`.
+
+`PCIE_SVT_ENV_MAX_HDL_AGENTS` limits statically elaborated SVT HDL slots and
+`PCIE_SVT_ENV_MAX_NUM_LINKS` limits runtime UVM link policy.  These are project
+macros and must not be confused with Synopsys' `SVT_PCIE_MAX_NUM_LINKS`.
