@@ -18,6 +18,7 @@ package pcie_dpu_system_pkg;
   `include "import_pcie_svt_uvm_pkgs.svi"
   `include "uvm_macros.svh"
 
+  `include "pcie_dpu_ep_x16_profile.sv"
   `include "pcie_dpu_system_env.sv"
   `include "pcie_dpu_global_stage_vseq.sv"
   `include "pcie_dpu_device_base_test.sv"

@@ -81,6 +81,31 @@ smaller than the window, and invalid function-count limits before elaboration.
 The default transport is Serial.  PIPE support remains a future transport
 extension and is not enabled by the current topology policy.
 
+## DPU-common EP x16 example
+
+The optional DPU-aware example uses the companion filelist
+`pcie_dpu_ep_x16.f`, so native SVT builds do not acquire a hard dependency on
+`dpu-common`:
+
+```sh
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  +define+PCIE_TOPO_EP_X16 \
+  -f pcie_dpu_ep_x16.f -top pcie_svt_topology_top \
+  -o build/dpu_ep_x16_simv -l build/dpu_ep_x16_compile.log
+```
+
+The profile is selected at runtime without changing DPU authoring data:
+
+```sh
+./build/dpu_ep_x16_simv +UVM_TESTNAME=pcie_dpu_ep_x16_test \
+  +PCIE_BACKEND=SVT_REAL_DUT +PCIE_GEN=4 +PCIE_DPU_COMPILE_ONLY
+```
+
+`+PCIE_BACKEND=TL_ONLY +PCIE_DPU_CONTROLLED_EXECUTOR` runs the controlled TL
+plan smoke against the generic TL Endpoint.  The controlled executor is only
+for a protocol-only environment; a real DPU RTL register model should omit it
+and use the transport executor directly.
+
 ## RTL connection boundary
 
 `pcie_svt_topology_env_top.sv` and the reset/serial interfaces provide the

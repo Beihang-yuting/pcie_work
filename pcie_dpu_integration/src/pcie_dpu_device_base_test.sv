@@ -52,6 +52,14 @@ class pcie_dpu_device_base_test extends pcie_device_base_test;
   virtual task run_phase(uvm_phase phase);
     pcie_dpu_global_stage_vseq stage_sequence;
 
+    // Compile/elaboration mode validates configuration and child construction
+    // without pretending that the placeholder DUT wrapper can reach L0.
+    if ($test$plusargs("PCIE_DPU_COMPILE_ONLY")) begin
+      `uvm_info("DPU_SYSTEM_TEST",
+        "compile-only mode: lifecycle sequence was not started", UVM_NONE)
+      return;
+    end
+
     phase.raise_objection(this);
     stage_sequence = pcie_dpu_global_stage_vseq::type_id::create(
       "global_stage_sequence");
