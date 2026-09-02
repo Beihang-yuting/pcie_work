@@ -1,86 +1,118 @@
-# PCIe Unified Environment 使用说明
+# PCIe unified environment usage
 
-## 配置层次
+The common entry point is `pcie_device_base_test`, with
+`pcie_unified_env` creating exactly one protocol child.  Native tests can keep
+overriding `build_global_cfg()`.  DPU-aware tests derive from
+`pcie_dpu_device_base_test`, override `build_system_cfg()`, and let the system
+environment resolve and freeze DPU state before the TL or SVT child is built.
 
-统一环境使用 `pcie_global_cfg` 作为管理层入口，但连接关系仍由已有的
-`pcie_topology_cfg` 描述。配置分成三层：
+## Ownership and data flow
 
-1. 拓扑图：RC、Switch、EP 节点以及 link 上下游关系。
-2. link 策略：`enabled`、`use_svt`、x4/x8/x16、Gen4/Gen5、VIF key 和静态
-   HDL slot。
-3. device 策略：BDF、Type-0/Type-1 header、BAR0~BAR5、配置空间和 Bus
-   Master 策略。
-
-TL backend 会把 device 策略翻译成独立的 `pcie_tl_func_context`。因此多个
-   EP/DSP 可以拥有不同的 BDF、4KB 配置空间和 BAR 状态；Switch 的 USP/DSP
-   Type-1 bridge image 仍由 `pcie_tl_switch_port` 管理。
-
-SVT backend 使用同一份 link/device 策略，但 HDL interface、SVT HDL agent 和
-   物理 lane 数量必须在编译时确定。用户负责 RTL top、SerDes/PIPE 和 VIF
-   物理连接，环境负责配置传递、建链、配置空间初始化、枚举和 traffic sequence。
-
-## Backend 选择
+`dpu-common` owns device identity, domain-qualified BDFs, PF/VF functions, BAR
+roles/sizes/bases, resource placement, and frozen register plans.  PCIe owns
+the physical RC/Switch/EP graph, link width/generation, enabled links, SVT
+static slots, and VIF bindings.  `pcie_dpu_cfg_adapter` is the only translator;
+it copies frozen BDF/BAR values and does not allocate them again.
 
 ```text
-PCIE_BACKEND_TL_ONLY
-  仅创建 TL 环境，不实例化 SVT HDL agent。
-
-PCIE_BACKEND_SVT_REAL_DUT
-  SVT active VIP 连接真实 RTL。
-
-PCIE_BACKEND_SVT_TL_FORWARD
-  只有显式选择时才启用 SVT-TL adapter，用于混合验证。
+dpu_device_cfg + placement_cfg
+        -> dpu_configuration_resolver
+        -> frozen device/resource snapshots
+        -> pcie_dpu_cfg_adapter + attachment map
+        -> pcie_global_cfg
+        -> pcie_unified_env (one TL or one SVT child)
 ```
 
-`pcie_device_base_test` 提供 `build_topology()` 和 `build_global_cfg()` 两个
-   hook。用户 test 在 `build_global_cfg()` 中修改 backend、link enable/use_svt、
-   BDF、BAR 和超时策略。
-
-## 编译期 slot 宏
-
-项目使用私有宏，不能覆盖 Synopsys 的 `SVT_PCIE_MAX_NUM_LINKS`：
+The DPU-aware package is deliberately separate from the native packages:
 
 ```text
-PCIE_SVT_ENV_MAX_HDL_AGENTS   静态生成的 SVT HDL slot 上限
-PCIE_SVT_ENV_MAX_NUM_LINKS    UVM 管理层允许的逻辑 link 上限
+pcie_dpu_integration_pkg   backend-neutral attachment/projection/executor base
+pcie_dpu_system_pkg        DPU + TL + SVT system extension and stage sequence
 ```
 
-默认值由 topology 宏推导：
+## Backend selection
+
+`pcie_global_cfg.backend` selects one of:
+
+- `PCIE_BACKEND_TL_ONLY`: creates `pcie_tl_custom_env` and uses the selected
+  TL RC virtual sequencer.
+- `PCIE_BACKEND_SVT_REAL_DUT`: creates `pcie_svt_topology_env` and uses the
+  SVT RC transaction sequencer.  Serial is the supported transport.
+- `PCIE_BACKEND_SVT_TL_FORWARD`: retained for an explicitly supplied hybrid
+  adapter; it is not selected by the EP x16 profile.
+
+For the example profile, use `+PCIE_BACKEND=TL_ONLY` or
+`+PCIE_BACKEND=SVT_REAL_DUT`.  `+PCIE_GEN=4|5` changes only the PCIe topology
+capability; Gen4 is the safe R-2020.12 runtime default.
+
+## Stage order
+
+The DPU-aware stage sequence is:
 
 ```text
-PCIE_TOPO_EP_X16              1 slot
-PCIE_TOPO_EP_2X8              2 slots
-PCIE_TOPO_SWITCH_1X16_4X4     5 slots
+DPU resolve/freeze
+-> local VIP/config-space initialization
+-> SVT link-up (SVT only)
+-> SVT enumeration (SVT only)
+-> DPU bootstrap register plan
+-> DPU VIO register plan
+-> service traffic hook
 ```
 
-如果定义 `PCIE_USE_SVT_PEER`，所需静态 slot 数按两侧 agent 数量翻倍。运行时
-可以禁用 link，但不能把 x4 物理 slot 变成 x8，也不能创建超过宏上限的 HDL agent。
+SVT cfg-init intentionally precedes link enable because the R-2020.12 refresh
+and reset-release contract requires links to be down.  Every stage is a
+virtual hook; switch enumeration and service traffic can be replaced by a
+derived sequence without changing DPU resolution.
 
-示例：
+## DPU EP x16 example
 
-```bash
-+define+PCIE_TOPO_EP_X16
-+define+PCIE_SVT_ENV_MAX_HDL_AGENTS=1
-+define+PCIE_SVT_ENV_MAX_NUM_LINKS=1
-```
-
-## SVT VIF 激活语义
-
-SVT HDL wrapper 必须为 link 提供非空 VIF handle。是否实际驱动由 VIF 中的：
+The companion filelist is `svt_pcie_integration/sim/pcie_dpu_ep_x16.f` and
+requires `DPU_COMMON_ROOT`, `HOST_MEM_ROOT`, `DESIGNWARE_HOME`, and
+`PCIE_SVT_ROOT` to be set by the caller.  The profile creates one RC-to-EP x16
+link and one PF0 with:
 
 ```text
-device_is_root       选择 RC 或 EP 角色
-connect_active_vip   选择 active/inactive 驱动状态
+BDF 01:00.0
+BAR0/1 32 MiB, 64-bit, Prefetchable
+BAR2/3 64 KiB,  64-bit, Prefetchable
+BAR4/5 64 KiB,  64-bit, Prefetchable
 ```
 
-因此 inactive 侧可以没有 SerDes 连接，但仍保留配置句柄；global-cfg 只校验
-   期望角色和 slot 绑定，不替换 SVT HDL 侧的实际值。
+Compile/elaborate against the official Serial HDL top:
 
-## 验证限制
+```sh
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  +define+PCIE_TOPO_EP_X16 \
+  -f svt_pcie_integration/sim/pcie_dpu_ep_x16.f \
+  -top pcie_svt_topology_top -o build/dpu_ep_x16_simv
+./build/dpu_ep_x16_simv +UVM_TESTNAME=pcie_dpu_ep_x16_test \
+  +PCIE_BACKEND=SVT_REAL_DUT +PCIE_GEN=4 +PCIE_DPU_COMPILE_ONLY
+```
 
-当前可独立复用的 TL 能力包括多 RC/EP、多 USP/DSP、DSP owner、bus/window、
-Type-1 Switch image、独立 TL device context、BAR decoder 和配置空间管理。
+For a protocol-only TL plan smoke against the generic TL model:
 
-SVT Target App 的 Multi-Endpoint BAR sizing 必须使用官方 RO-map/service 或
-callback 流程。仅直接写 BAR 值不能表达 aperture。真实 DUT 模式下，配置空间和
-BAR 的最终响应仍以 DUT/SVT Target App 的实际实现为准。
+```sh
+./build/dpu_ep_x16_simv +UVM_TESTNAME=pcie_dpu_ep_x16_test \
+  +PCIE_BACKEND=TL_ONLY +PCIE_DPU_CONTROLLED_EXECUTOR
+```
+
+The controlled executor verifies DPU plan ordering when the generic TL model
+does not implement DPU AF/VIO register semantics.  Omit that switch when a
+real DUT or register model is connected; the transport executor will then
+issue Config/Memory requests through the selected RC VIP.
+
+## Switch attachment rule
+
+For a switch, a DPU function is attached to its DSP link, while the SVT RC
+executor is selected by the USP link.  The SVT executor accepts this pair only
+when both descriptors have the same `root_hierarchy`; an attachment in another
+root is rejected during preflight.  This prevents a multi-host BDF from being
+sent through the wrong RC.
+
+## Real RTL boundary
+
+The project HDL top publishes the static Serial VIF slots and reset VIF.  The
+user supplies the DUT wrapper, clocks/resets, SerDes wiring, and any board
+specific PIPE conversion.  This repository manages policy, stage ordering,
+enumeration hooks, and register-plan dispatch; it does not claim real-DUT link
+success when the placeholder wrapper is used.

@@ -266,8 +266,9 @@
 
 **Files:**
 - Create: `pcie_dpu_integration/tests/pcie_dpu_ep_x16_test.sv`
+- Create: `pcie_dpu_integration/tests/pcie_dpu_ep_x16_tb_top.sv`
+- Create: `svt_pcie_integration/sim/pcie_dpu_ep_x16.f`
 - Modify: `pcie_dpu_integration/sim/pcie_dpu_integration.f`
-- Modify: `svt_pcie_integration/sim/pcie_svt_topology.f`
 - Modify: `svt_pcie_integration/sim/README.md`
 - Test: VCS compile/elaboration and controlled plan-execution smoke test
 
@@ -275,23 +276,23 @@
 - Consumes: the system environment and one DPU PF0 configuration.
 - Produces: a repeatable EP x16 example with DPU-owned BDF/BAR values.
 
-- [ ] **Step 1: Add the test skeleton and expected failure checks**
+- [x] **Step 1: Add the test skeleton and expected failure checks**
 
   Register a test that builds one RC-to-EP x16 topology, one DPU PF0 with a pinned BDF, and the three BAR pairs. Initially assert the expected system environment handle and stage result; run before implementing the integration and capture the failure.
 
-- [ ] **Step 2: Implement the minimum example configuration**
+- [x] **Step 2: Implement the minimum example configuration**
 
   Use the current project BAR profile only where it matches the DPU role mapping. Publish the physical attachment for `RC0_EP0`. Make the backend selectable without changing the DPU authoring object.
 
-- [ ] **Step 3: Run TL compile and plan smoke**
+- [x] **Step 3: Run TL compile and plan smoke**
 
   Use the TL filelist with the DPU integration include paths. Verify BDF/BAR projection, plan ordering, and zero UVM errors.
 
-- [ ] **Step 4: Run SVT compile/elaboration on the VCS host**
+- [x] **Step 4: Run SVT compile/elaboration on the VCS host**
 
   On `10.11.10.53`, use a login shell and the R-2020.12 environment. Compile the EP x16 profile with Serial and verify the HDL slot contract and environment construction. Do not claim real-DUT link success when using the placeholder wrapper.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add pcie_dpu_integration svt_pcie_integration/sim
@@ -307,7 +308,7 @@
 - Delete: only files shown by `rg` to be unreferenced after Tasks 1–6
 - Test: filelist/package/reference audit scripts
 
-- [ ] **Step 1: Build the deletion candidate list**
+- [x] **Step 1: Build the deletion candidate list**
 
   Run this exact audit after the unified tests pass:
 
@@ -324,19 +325,23 @@
   delete `pcie_tl_env`, `pcie_svt_topology_env`, focused unit tests, or
   compatibility tests before their replacements pass.
 
-- [ ] **Step 2: Remove only confirmed obsolete entries**
+- [x] **Step 2: Remove only confirmed obsolete entries**
+
+  The post-Task-6 audit found no safe production deletion candidate.  Files
+  with a single textual stem match are package-included or active HDL/test
+  boundary files and remain intact.
 
   Delete stale duplicate/proxy/sidecar sources only when no active package, filelist, test, or documentation references them. Use `apply_patch` for each deletion and describe the reason in the commit.
 
-- [ ] **Step 3: Update usage documentation**
+- [x] **Step 3: Update usage documentation**
 
   Document `dpu-common` as the device-config authority, the attachment mapping, the two executors, the stage order, and the requirement to set `DPU_COMMON_ROOT`/`PCIE_SVT_ROOT` without hard-coded developer paths.
 
-- [ ] **Step 4: Run the complete audit**
+- [x] **Step 4: Run the complete audit**
 
   Run `git diff --check`, active filelist duplicate checks, all available TL unit tests, and SVT compile/elaboration checks. Confirm no deleted file remains in a package include or filelist.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add -A

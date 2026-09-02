@@ -264,14 +264,23 @@ endfunction
 
 ---
 
-## 9. 后续 SVT 后端边界
+## 9. SVT/DPU 统一管理层边界
 
-本阶段只实现公共拓扑模型及 `pcie_tl_vip` 后端，尚未实现 SVT topology environment。后续环境的继承边界固定为：
+当前仓库已经提供可选的 SVT/DPU 管理层，继承边界为：
 
 ```systemverilog
 class pcie_svt_topology_env extends pcie_device_unified_vip_env;
-    // 后续阶段把 pcie_topology_cfg 翻译为 SVT 配置、状态和 agent 注册。
+    // SVT topology adapter owns descriptors, VIFs, status, and agent registration.
 endclass
 ```
 
-基类来自 Synopsys 官方 `tb_pcie_svt_uvm_unified_vip_sys` 示例。该示例保持为本机 Synopsys 安装依赖，不把示例源码或产品源码复制进本仓库。只有后续 SVT 后端负责把保留的宽度/代际意图应用到 Serial/PIPE transport、LTSSM 和协商状态；不要把当前 TL profile 的通过结果解释为这些物理行为已经实现。
+在需要由 `dpu-common` 统一产生 BDF/BAR/功能资源时，使用
+`pcie_dpu_device_base_test` 和 `pcie_dpu_system_pkg`。系统环境先解析并冻结
+DPU snapshot，再通过 `pcie_dpu_cfg_adapter` 投影到 `pcie_global_cfg`，最后只
+创建一个 TL 或 SVT 子环境。SVT 运行顺序是 cfg-init → link-up → enumeration
+→ DPU bootstrap/VIO plans → traffic；Serial 是当前支持的传输，PIPE 仍是预留
+扩展。
+
+Synopsys R-2020.12 安装和官方 `tb_pcie_svt_uvm_unified_vip_sys` 示例仍是本机
+依赖，不把产品源码复制进仓库。placeholder wrapper 的 compile/elaboration
+只能证明环境和 HDL slot contract 正确，不能替代真实 RTL 建链验证。

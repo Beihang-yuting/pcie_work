@@ -7,3 +7,5 @@
 ../../pcie_dpu_integration/src/pcie_dpu_system_pkg.sv
 ../../pcie_dpu_integration/tests/pcie_dpu_system_env_unit_test.sv
 ../../pcie_dpu_integration/tests/pcie_dpu_system_env_tb_top.sv
+../../pcie_dpu_integration/tests/pcie_dpu_ep_x16_test.sv
+../../pcie_dpu_integration/tests/pcie_dpu_ep_x16_tb_top.sv
