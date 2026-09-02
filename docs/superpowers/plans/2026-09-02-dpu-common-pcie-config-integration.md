@@ -161,7 +161,7 @@
 
   Run the unified environment unit test and the existing TL topology adapter tests. Require no regressions in native TL construction.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add svt_pcie_integration/uvm
@@ -182,27 +182,27 @@
 - Consumes: frozen `dpu_reg_plan`, selected RC sequencer, and backend-specific environment handles.
 - Produces: `dpu_execution_report` with preflight and execution status; no resource allocation.
 
-- [ ] **Step 1: Write failing executor contract tests**
+- [x] **Step 1: Write failing executor contract tests**
 
   Create a small plan containing one PCI config write, one MMIO write, and one read/verify. Assert that null plans, unfrozen plans, unsupported target spaces, and missing sequencers are rejected before execution.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
   Run the focused executor tests. Expected: the executor classes are missing.
 
-- [ ] **Step 3: Implement the neutral contract and TL executor**
+- [x] **Step 3: Implement the neutral contract and TL executor**
 
   The base adapter must validate plan freezing and expose a common `configure(...)` method. The TL executor must map PCI config and MMIO operations to existing TL config/memory sequence types and use the selected `pcie_tl_virtual_sequencer`. Preserve operation dependencies and return readback mismatches as execution failures.
 
-- [ ] **Step 4: Implement the SVT executor**
+- [x] **Step 4: Implement the SVT executor**
 
   Map config and memory operations to SVT RC sequence calls through the existing SVT virtual sequencer. Keep SVT-specific imports in the SVT integration filelist; the DPU common package must not import SVT.
 
-- [ ] **Step 5: Run focused tests to verify both executors pass**
+- [x] **Step 5: Run focused tests to verify both executors pass**
 
   Require all contract tests to pass with zero UVM errors and verify that the same plan ordering is preserved in both backends.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   ```bash
   git add pcie_dpu_integration svt_pcie_integration/uvm/backend
