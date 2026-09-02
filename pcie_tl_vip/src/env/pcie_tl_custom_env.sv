@@ -12,6 +12,7 @@ class pcie_tl_custom_env extends pcie_tl_env;
     virtual function void build_phase(uvm_phase phase);
         pcie_tl_env_config translated_cfg;
         pcie_tl_env_config policy_cfg;
+        pcie_global_cfg global_cfg;
         string errors[$];
         string message;
 
@@ -51,6 +52,17 @@ class pcie_tl_custom_env extends pcie_tl_env;
             (policy_cfg == null)) begin
             policy_cfg = pcie_tl_env_config::type_id::create(
                 "default_tl_policy_cfg");
+        end
+
+        // The unified manager publishes backend-neutral device images.  Copy
+        // their handles into the native TL policy; pcie_tl_env translates each
+        // image into an independent function/configuration-space context.
+        if (uvm_config_db#(pcie_global_cfg)::get(
+                this, "", "global_cfg", global_cfg) &&
+            (global_cfg != null)) begin
+            policy_cfg.device_cfgs.delete();
+            foreach (global_cfg.devices[i])
+                policy_cfg.device_cfgs.push_back(global_cfg.devices[i]);
         end
 
         // Policy owns all non-topology settings. Overwrite only the six fields

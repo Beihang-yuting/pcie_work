@@ -1,9 +1,9 @@
 //------------------------------------------------------------------------------
 // Common PCIe environment management layer.
 //
-// Protocol-specific child environments remain in their own package/filelist;
-// this component owns the shared policy and backend selection without forcing
-// a full TL package into an SVT-only build.
+// Protocol-specific child environments remain in their own packages.  This
+// component owns the shared policy and creates the selected child through the
+// UVM factory, keeping the SVT package compilable when TL is not installed.
 //------------------------------------------------------------------------------
 
 class pcie_unified_env extends uvm_env;
@@ -23,8 +23,13 @@ class pcie_unified_env extends uvm_env;
   pcie_backend_base backend_adapter;
 
   // --------------------------------------------------------------------------
-  // Optional protocol child.
+  // Mutually exclusive protocol children.
   // --------------------------------------------------------------------------
+  // The TL handle intentionally uses uvm_component.  A combined TL/SVT build
+  // registers pcie_tl_custom_env with the factory; an SVT-only build can still
+  // compile this manager and will reject TL selection with a clear fatal.
+  uvm_component tl_env;
+
   // SVT_REAL_DUT owns the actual Unified VIP environment below this manager.
   // It is created only for that backend; TL_ONLY never elaborates this child.
   pcie_svt_topology_env svt_env;
@@ -72,8 +77,20 @@ class pcie_unified_env extends uvm_env;
         "%s backend rejected global configuration: %s",
         backend_adapter.backend_name(), errors[0]));
 
-    // Only the real-DUT SVT backend owns a Unified VIP child environment.
-    if (global_cfg.backend == PCIE_BACKEND_SVT_REAL_DUT) begin
+    // Exactly one protocol child is created.  Publish only backend-neutral
+    // objects here; the TL child performs its native config translation.
+    if ((global_cfg.backend == PCIE_BACKEND_TL_ONLY) ||
+        (global_cfg.backend == PCIE_BACKEND_SVT_TL_FORWARD)) begin
+      uvm_config_db#(pcie_topology_cfg)::set(
+        this, "tl_env", "topology_cfg", global_cfg.topology);
+      uvm_config_db#(pcie_global_cfg)::set(
+        this, "tl_env", "global_cfg", global_cfg);
+      tl_env = uvm_factory::get().create_component_by_name(
+        "pcie_tl_custom_env", get_full_name(), "tl_env", this);
+      if (tl_env == null)
+        `uvm_fatal("UNIFIED_BACKEND",
+          "TL backend selected but pcie_tl_custom_env is not registered")
+    end else if (global_cfg.backend == PCIE_BACKEND_SVT_REAL_DUT) begin
       pcie_svt_topology_policy_cfg svt_policy;
 
       // Translate only management policy here.  The topology graph itself is
@@ -82,6 +99,21 @@ class pcie_unified_env extends uvm_env;
       svt_policy = pcie_svt_topology_policy_cfg::type_id::create(
         "svt_policy");
       svt_policy.init_defaults();
+
+      // Preserve every device/function image.  The SVT topology adapter maps
+      // these records to physical Endpoint descriptors by node/link ownership.
+      foreach (global_cfg.devices[i]) begin
+        pcie_device_cfg device_copy;
+
+        if (global_cfg.devices[i] == null) begin
+          svt_policy.device_cfgs.push_back(null);
+        end else begin
+          device_copy = pcie_device_cfg::type_id::create(
+            $sformatf("svt_device_cfg%0d", i));
+          device_copy.copy(global_cfg.devices[i]);
+          svt_policy.device_cfgs.push_back(device_copy);
+        end
+      end
 
       // Select the DUT node(s): a switch graph exposes the switch; a direct
       // RC-to-EP graph exposes the endpoint as the real DUT.
@@ -102,12 +134,84 @@ class pcie_unified_env extends uvm_env;
             svt_policy.dut_node_ids.push_back(
               global_cfg.topology.nodes[i].node_id);
 
-      // Preserve explicit static slot ownership when handing policy to SVT.
+      // Convert backend-neutral link policy into explicit SVT overrides.  A
+      // topology-disabled link is omitted because the adapter already skips it;
+      // every other link carries enable/use_svt and its negotiated capability.
       foreach (global_cfg.links[i]) begin
-        if ((global_cfg.links[i] != null) &&
-            global_cfg.links[i].has_hdl_slot)
-          svt_policy.hdl_slot_by_link[global_cfg.links[i].link_id] =
-          global_cfg.links[i].hdl_slot;
+        pcie_link_cfg link_cfg;
+        pcie_topology_link_cfg topology_link;
+        pcie_svt_link_override_cfg override_cfg;
+        bit active;
+
+        link_cfg = global_cfg.links[i];
+        if (link_cfg == null)
+          continue;
+
+        topology_link = null;
+        foreach (global_cfg.topology.links[topology_index])
+          if ((global_cfg.topology.links[topology_index] != null) &&
+              (global_cfg.topology.links[topology_index].link_id ==
+               link_cfg.link_id))
+            topology_link = global_cfg.topology.links[topology_index];
+        if ((topology_link == null) || !topology_link.enabled)
+          continue;
+
+        active = link_cfg.enabled && link_cfg.use_svt;
+        override_cfg = pcie_svt_link_override_cfg::type_id::create(
+          $sformatf("global_link_override%0d", i));
+        override_cfg.link_id = link_cfg.link_id;
+        override_cfg.has_enable = 1'b1;
+        override_cfg.enabled = active;
+
+        if (active) begin
+          override_cfg.has_gen = 1'b1;
+          override_cfg.max_gen = link_cfg.max_gen;
+          override_cfg.has_width = 1'b1;
+          override_cfg.link_width = link_cfg.link_width;
+          if (link_cfg.vif_key != "") begin
+            override_cfg.has_vif_key = 1'b1;
+            override_cfg.vif_key = link_cfg.vif_key;
+          end else if (link_cfg.has_hdl_slot) begin
+            override_cfg.has_vif_key = 1'b1;
+            override_cfg.vif_key = {
+              svt_policy.vif_prefix, $sformatf("%0d", link_cfg.hdl_slot)};
+          end
+          if (link_cfg.has_hdl_slot)
+            svt_policy.hdl_slot_by_link[link_cfg.link_id] =
+              link_cfg.hdl_slot;
+        end
+
+        svt_policy.link_overrides.push_back(override_cfg);
+      end
+
+      // The official top publishes VIFs at the test scope because the native
+      // topology environment used to be a direct test child.  Preserve that
+      // external contract while inserting this manager level: retrieve each
+      // handle from our parent and republish it at the scope queried by
+      // pcie_svt_topology_env.
+      begin
+        virtual pcie_svt_reset_if reset_vif;
+
+        reset_vif = null;
+        if (uvm_config_db#(virtual pcie_svt_reset_if)::get(
+              get_parent(), "", svt_policy.reset_vif_key, reset_vif) &&
+            (reset_vif != null))
+          uvm_config_db#(virtual pcie_svt_reset_if)::set(
+            this, "", svt_policy.reset_vif_key, reset_vif);
+      end
+      foreach (svt_policy.link_overrides[i]) begin
+        svt_pcie_vif link_vif;
+
+        if ((svt_policy.link_overrides[i] == null) ||
+            !svt_policy.link_overrides[i].enabled)
+          continue;
+
+        link_vif = null;
+        if (uvm_config_db#(svt_pcie_vif)::get(
+              get_parent(), "", svt_policy.link_overrides[i].vif_key,
+              link_vif) && (link_vif != null))
+          uvm_config_db#(svt_pcie_vif)::set(
+            this, "", svt_policy.link_overrides[i].vif_key, link_vif);
       end
 
       // The topology graph remains the single source of connectivity truth.

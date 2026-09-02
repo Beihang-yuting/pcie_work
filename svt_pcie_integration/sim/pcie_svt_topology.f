@@ -4,6 +4,18 @@
 +incdir+../uvm/callbacks
 +incdir+../uvm/env
 +incdir+../uvm/tests
++incdir+$HOST_MEM_ROOT/src
++incdir+../../pcie_tl_vip/src
++incdir+../../pcie_tl_vip/src/types
++incdir+../../pcie_tl_vip/src/shared
++incdir+../../pcie_tl_vip/src/agent
++incdir+../../pcie_tl_vip/src/env
++incdir+../../pcie_tl_vip/src/adapter
++incdir+../../pcie_tl_vip/src/seq/base
++incdir+../../pcie_tl_vip/src/seq/constraints
++incdir+../../pcie_tl_vip/src/seq/scenario
++incdir+../../pcie_tl_vip/src/seq/virtual
++incdir+../../pcie_tl_vip/src/switch
 +incdir+../../pcie_tl_vip/src/topology
 +incdir+$PCIE_SVT_ROOT/sverilog/include
 +incdir+$PCIE_SVT_ROOT/examples/sverilog/tb_pcie_svt_uvm_unified_vip_sys/env
@@ -13,12 +25,17 @@
 +define+SVT_PCIE_ENABLE_10_BIT_TAGS
 -y $PCIE_SVT_ROOT/verilog/src/vcs
 -y $PCIE_SVT_ROOT/sverilog/src/vcs
+$HOST_MEM_ROOT/src/host_mem_pkg.sv
+../../pcie_tl_vip/src/pcie_tl_if.sv
+../../pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv
+../../pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
+../../pcie_tl_vip/src/topology/pcie_topology_pkg.sv
+../../pcie_tl_vip/src/pcie_tl_pkg.sv
 ../rtl/pcie_svt_vip_bootstrap.sv
 ../rtl/pcie_svt_serial_port_if.sv
 ../rtl/pcie_svt_reset_if.sv
 ../rtl/pcie_svt_serial_adapter.sv
 ../rtl/pcie_svt_dut_wrapper.sv
-../../pcie_tl_vip/src/topology/pcie_topology_pkg.sv
 ../uvm/pcie_svt_topology_pkg.sv
 ../sim/pcie_svt_topology_ep_bar_sizing_callback_unit_test.sv
 ../uvm/tests/pcie_svt_topology_model_unit_test.sv
@@ -30,4 +47,7 @@
 ../uvm/tests/pcie_svt_cfg_init_directed_test.sv
 ../uvm/tests/pcie_svt_peer_test.sv
 ../uvm/tests/pcie_unified_env_unit_test.sv
+../../pcie_tl_vip/tests/pcie_tl_topology_adapter_unit_test.sv
+../../pcie_tl_vip/tests/pcie_global_cfg_unit_test.sv
+../../pcie_tl_vip/tests/pcie_tl_device_cfg_adapter_unit_test.sv
 ../rtl/pcie_svt_topology_env_top.sv

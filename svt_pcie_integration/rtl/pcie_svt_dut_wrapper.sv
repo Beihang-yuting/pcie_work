@@ -1,11 +1,12 @@
 module pcie_svt_dut_wrapper #(
+  parameter int unsigned RESET_WIDTH = 5,
   parameter int unsigned PORT0_WIDTH = 16,
   parameter int unsigned PORT1_WIDTH = 4,
   parameter int unsigned PORT2_WIDTH = 4,
   parameter int unsigned PORT3_WIDTH = 4,
   parameter int unsigned PORT4_WIDTH = 4
 ) (
-  input  logic [4:0] reset_asserted,
+  input  logic [RESET_WIDTH-1:0] reset_asserted,
   input  logic [PORT0_WIDTH-1:0] port0_tx_p,
   input  logic [PORT0_WIDTH-1:0] port0_tx_n,
   output logic [PORT0_WIDTH-1:0] port0_rx_p,

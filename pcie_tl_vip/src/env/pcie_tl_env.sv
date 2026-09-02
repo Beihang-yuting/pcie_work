@@ -82,7 +82,7 @@ class pcie_tl_env extends uvm_env;
                     if (device_contexts.exists(cfg.device_cfgs[i].bdf))
                         configured_ep_context =
                             device_contexts[cfg.device_cfgs[i].bdf];
-                    return;
+                    return configured_ep_context;
                 end
                 ordinal++;
             end

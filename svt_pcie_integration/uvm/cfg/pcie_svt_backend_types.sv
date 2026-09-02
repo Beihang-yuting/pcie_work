@@ -166,6 +166,8 @@ class pcie_svt_link_override_cfg extends uvm_object;
   int unsigned max_gen;
   bit has_width;
   int unsigned link_width;
+  bit has_vif_key;
+  string vif_key;
   bit has_endpoint_model;
   pcie_svt_endpoint_model_e endpoint_model;
   bit has_fast_link_training, fast_link_training;
@@ -193,6 +195,8 @@ class pcie_svt_link_override_cfg extends uvm_object;
     max_gen = source.max_gen;
     has_width = source.has_width;
     link_width = source.link_width;
+    has_vif_key = source.has_vif_key;
+    vif_key = source.vif_key;
     has_endpoint_model = source.has_endpoint_model;
     endpoint_model = source.endpoint_model;
     has_fast_link_training = source.has_fast_link_training;
@@ -229,6 +233,12 @@ class pcie_svt_port_descriptor extends uvm_object;
   // Endpoint BARs are meaningful only when this descriptor represents an EP.
   pcie_svt_bar_cfg ep_bars[6];
 
+  // Backend-neutral function images are retained per physical SVT endpoint.
+  // The first image drives the legacy single-Endpoint Target App BAR view;
+  // later multi-BDF support can consume the complete queue without rebuilding
+  // device ownership from the topology.
+  pcie_device_cfg device_cfgs[$];
+
   `uvm_object_utils(pcie_svt_port_descriptor)
 
   function new(string name = "pcie_svt_port_descriptor");
@@ -241,6 +251,7 @@ class pcie_svt_port_descriptor extends uvm_object;
 
   virtual function void do_copy(uvm_object rhs);
     pcie_svt_port_descriptor source;
+    pcie_device_cfg device_copy;
     super.do_copy(rhs);
 
     if (!$cast(source, rhs)) begin
@@ -281,6 +292,18 @@ class pcie_svt_port_descriptor extends uvm_object;
           ep_bars[i] = pcie_svt_bar_cfg::type_id::create(
             $sformatf("bar%0d", i));
         ep_bars[i].copy(source.ep_bars[i]);
+      end
+    end
+
+    device_cfgs.delete();
+    foreach (source.device_cfgs[i]) begin
+      if (source.device_cfgs[i] == null) begin
+        device_cfgs.push_back(null);
+      end else begin
+        device_copy = pcie_device_cfg::type_id::create(
+          $sformatf("device_cfg%0d", i));
+        device_copy.copy(source.device_cfgs[i]);
+        device_cfgs.push_back(device_copy);
       end
     end
   endfunction

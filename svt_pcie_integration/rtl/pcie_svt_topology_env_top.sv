@@ -39,7 +39,9 @@ module pcie_svt_topology_top;
     clkreq_n[0], wake_n, peer_reset_vif.asserted[0], 0, 0)
   `PCIE_SVT_CONNECT_SERIAL_PEERS(primary_rc0_serial, peer_ep0_serial)
 `else
-  pcie_svt_dut_wrapper #(.PORT0_WIDTH(16)) dut (
+  pcie_svt_dut_wrapper #(
+    .RESET_WIDTH($bits(reset_vif.asserted)), .PORT0_WIDTH(16)
+  ) dut (
     .reset_asserted(reset_vif.asserted),
     .port0_tx_p(primary_rc0_serial.rx_p),
     .port0_tx_n(primary_rc0_serial.rx_n),
@@ -83,6 +85,7 @@ module pcie_svt_topology_top;
   `PCIE_SVT_CONNECT_SERIAL_PEERS(primary_rc1_serial, peer_ep1_serial)
 `else
   pcie_svt_dut_wrapper #(
+    .RESET_WIDTH($bits(reset_vif.asserted)),
     .PORT0_WIDTH(8), .PORT1_WIDTH(8)
   ) dut (
     .reset_asserted(reset_vif.asserted),
@@ -153,6 +156,7 @@ module pcie_svt_topology_top;
   `PCIE_SVT_CONNECT_SERIAL_PEERS(primary_ep3_serial, peer_rc3_serial)
 `else
   pcie_svt_dut_wrapper #(
+    .RESET_WIDTH($bits(reset_vif.asserted)),
     .PORT0_WIDTH(16), .PORT1_WIDTH(4), .PORT2_WIDTH(4),
     .PORT3_WIDTH(4), .PORT4_WIDTH(4)
   ) dut (

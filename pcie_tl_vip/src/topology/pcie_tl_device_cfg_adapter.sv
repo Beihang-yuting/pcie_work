@@ -44,18 +44,24 @@ class pcie_tl_device_cfg_adapter extends uvm_object;
     dst.bus_master_en   = src.bus_master_enable;
     dst.init_cfg_space(vendor, device, .header_type(src.header_type));
 
-    // BAR state is copied per function.  This prevents multiple endpoints
-    // from sharing an owner-USP configuration manager.
-    // Copy each BAR descriptor into the context.  A high DWORD of a 64-bit
-    // pair points back to its low owner, matching the decoder's convention.
+    // Initialize every slot before translating owners.  Keeping this as a
+    // separate pass prevents an unimplemented high-DWORD placeholder from
+    // overwriting the owner assigned by its preceding 64-bit low DWORD.
     foreach (src.bars[bar]) begin
-      pcie_unified_bar_cfg bar_cfg;
-      bar_cfg = src.bars[bar];
       dst.bar_owner[bar] = bar;
       dst.bar_base[bar]  = 0;
       dst.bar_size[bar]  = 0;
       dst.bar_enable[bar] = 0;
       dst.bar_flags[bar] = 0;
+    end
+
+    // BAR state is copied per function.  This prevents multiple endpoints
+    // from sharing an owner-USP configuration manager.  A high DWORD of a
+    // 64-bit pair points back to its low owner for decoder/config-space access.
+    foreach (src.bars[bar]) begin
+      pcie_unified_bar_cfg bar_cfg;
+
+      bar_cfg = src.bars[bar];
 
       if (bar_cfg == null)
         continue;

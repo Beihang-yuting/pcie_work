@@ -25,6 +25,12 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
   // Endpoint image and explicit link overrides.
   // --------------------------------------------------------------------------
   pcie_svt_bar_cfg ep_bars[6];
+
+  // Device policy originates in pcie_global_cfg.  Keep independent copies so
+  // every physical Endpoint can receive its own BDF/BAR image rather than the
+  // historical profile-wide ep_bars[] defaults.
+  pcie_device_cfg device_cfgs[$];
+
   pcie_svt_link_override_cfg link_overrides[$];
   int unsigned hdl_slot_by_link[string];
 
@@ -41,6 +47,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
   function void init_defaults();
     // Reset collection-valued overrides before applying deterministic defaults.
     dut_node_ids.delete();
+    device_cfgs.delete();
     link_overrides.delete();
     hdl_slot_by_link.delete();
     transport = PCIE_SVT_TRANSPORT_SERIAL;
@@ -86,6 +93,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
 
   virtual function void do_copy(uvm_object rhs);
     pcie_svt_topology_policy_cfg source;
+    pcie_device_cfg device_copy;
     super.do_copy(rhs);
 
     if (!$cast(source, rhs)) begin
@@ -124,6 +132,20 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
           ep_bars[i] = pcie_svt_bar_cfg::type_id::create(
             $sformatf("bar%0d", i));
         ep_bars[i].copy(source.ep_bars[i]);
+      end
+    end
+
+    // Deep-copy backend-neutral device images.  Tests may override one
+    // Endpoint without mutating the DPU-owned global snapshot projection.
+    device_cfgs.delete();
+    foreach (source.device_cfgs[i]) begin
+      if (source.device_cfgs[i] == null) begin
+        device_cfgs.push_back(null);
+      end else begin
+        device_copy = pcie_device_cfg::type_id::create(
+          $sformatf("device_cfg%0d", i));
+        device_copy.copy(source.device_cfgs[i]);
+        device_cfgs.push_back(device_copy);
       end
     end
 
@@ -256,6 +278,12 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
             (link_overrides[i].link_width != 16)) begin
           errors.push_back($sformatf(
             "link override '%s' width must be 4, 8, or 16",
+            link_overrides[i].link_id));
+        end
+        if (link_overrides[i].has_vif_key &&
+            (link_overrides[i].vif_key.len() == 0)) begin
+          errors.push_back($sformatf(
+            "link override '%s' has an empty explicit VIF key",
             link_overrides[i].link_id));
         end
         if (link_overrides[i].has_endpoint_model &&

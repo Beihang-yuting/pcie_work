@@ -143,21 +143,21 @@
 - Consumes: `pcie_global_cfg`, projected topology/device policy, and optional DPU snapshot projection.
 - Produces: exactly one `pcie_tl_custom_env` for `PCIE_BACKEND_TL_ONLY` or one `pcie_svt_topology_env` for `PCIE_BACKEND_SVT_REAL_DUT`.
 
-- [ ] **Step 1: Extend the unit test with failing child-selection cases**
+- [x] **Step 1: Extend the unit test with failing child-selection cases**
 
   Add one test that sets `PCIE_BACKEND_TL_ONLY` and asserts `env.tl_env` is non-null while `env.svt_env` is null. Add a second test that sets `PCIE_BACKEND_SVT_REAL_DUT` and asserts the inverse. Add a negative test that supplies an invalid projected policy and asserts no child is created.
 
-- [ ] **Step 2: Run the tests to verify the current failure**
+- [x] **Step 2: Run the tests to verify the current failure**
 
   Run the unified environment unit test. Expected: the TL case fails because the current environment creates no TL child.
 
-- [ ] **Step 3: Implement explicit child ownership**
+- [x] **Step 3: Implement explicit child ownership**
 
   Add a `pcie_tl_custom_env tl_env` handle beside `svt_env`. For TL backend, publish `topology_cfg` and a translated `pcie_tl_env_config` under `tl_env`, then create `pcie_tl_custom_env`. For SVT backend, preserve the existing SVT creation path but copy every projected link/device policy field required by the adapter, not only DUT node IDs and HDL slots. Keep `pcie_global_cfg` backend-neutral; do not add a hard dependency on `dpu_resource_pkg` to the TL topology package.
 
   Add comments explaining that only one child is built per run and that the topology graph remains authoritative.
 
-- [ ] **Step 4: Run all affected unit tests**
+- [x] **Step 4: Run all affected unit tests**
 
   Run the unified environment unit test and the existing TL topology adapter tests. Require no regressions in native TL construction.
 

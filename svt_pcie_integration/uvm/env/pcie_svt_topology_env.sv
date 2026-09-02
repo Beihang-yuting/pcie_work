@@ -88,7 +88,6 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
     pcie_svt_device_cfg_builder cfg_builder;
 
     // Deliberately do not call super: the official example always creates one
-    // Deliberately do not call super: the official example always creates one
     // fixed Root and one fixed Endpoint agent.
     if (!uvm_config_db#(pcie_topology_cfg)::get(
           this, "", "topology_cfg", topology_cfg) ||

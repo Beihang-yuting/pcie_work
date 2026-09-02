@@ -95,6 +95,7 @@ class pcie_svt_topology_adapter extends uvm_object;
       if (!effective_enabled) begin
         if ((override_cfg != null) &&
             (override_cfg.has_gen || override_cfg.has_width ||
+             override_cfg.has_vif_key ||
              override_cfg.has_endpoint_model ||
              override_cfg.has_fast_link_training ||
              override_cfg.has_link_timeout)) begin
@@ -166,8 +167,11 @@ class pcie_svt_topology_adapter extends uvm_object;
         descriptor.slot_index = policy.hdl_slot_by_link[link.link_id];
       else
         descriptor.slot_index = physical_slot;
-      descriptor.vif_key = {policy.vif_prefix,
-                            $sformatf("%0d", descriptor.slot_index)};
+      if ((override_cfg != null) && override_cfg.has_vif_key)
+        descriptor.vif_key = override_cfg.vif_key;
+      else
+        descriptor.vif_key = {policy.vif_prefix,
+                              $sformatf("%0d", descriptor.slot_index)};
       descriptor.role = (svt_node.kind == PCIE_TOPO_NODE_RC) ?
                         PCIE_SVT_ROLE_RC : PCIE_SVT_ROLE_EP;
       descriptor.endpoint_model = effective_endpoint_model(
@@ -189,6 +193,44 @@ class pcie_svt_topology_adapter extends uvm_object;
       descriptor.enum_cfg.copy(policy.enum_cfg);
       foreach (descriptor.ep_bars[bar])
         descriptor.ep_bars[bar].copy(policy.ep_bars[bar]);
+
+      // Match all function images owned by this physical SVT Endpoint.  The
+      // complete queue preserves multi-BDF intent; the first function remains
+      // the active single-Endpoint BAR image for the R-2020.12 Target App path.
+      if (descriptor.role == PCIE_SVT_ROLE_EP) begin
+        foreach (policy.device_cfgs[device_index]) begin
+          pcie_device_cfg device_cfg;
+          pcie_device_cfg device_copy;
+
+          device_cfg = policy.device_cfgs[device_index];
+          if ((device_cfg == null) ||
+              !(((device_cfg.physical_node_id != "") &&
+                 (device_cfg.physical_node_id == descriptor.svt_node_id)) ||
+                ((device_cfg.physical_node_id == "") &&
+                 (device_cfg.device_id == descriptor.svt_node_id))))
+            continue;
+
+          device_copy = pcie_device_cfg::type_id::create(
+            $sformatf("%s_device%0d", descriptor.link_id,
+                      descriptor.device_cfgs.size()));
+          device_copy.copy(device_cfg);
+          descriptor.device_cfgs.push_back(device_copy);
+        end
+
+        if (descriptor.device_cfgs.size() != 0)
+          foreach (descriptor.ep_bars[bar]) begin
+            descriptor.ep_bars[bar].implemented =
+              descriptor.device_cfgs[0].bars[bar].implemented;
+            descriptor.ep_bars[bar].is_64bit =
+              descriptor.device_cfgs[0].bars[bar].is_64bit;
+            descriptor.ep_bars[bar].prefetchable =
+              descriptor.device_cfgs[0].bars[bar].prefetchable;
+            descriptor.ep_bars[bar].aperture =
+              descriptor.device_cfgs[0].bars[bar].aperture;
+            descriptor.ep_bars[bar].initial_base =
+              descriptor.device_cfgs[0].bars[bar].initial_base;
+          end
+      end
       ports.push_back(descriptor);
     end
 
