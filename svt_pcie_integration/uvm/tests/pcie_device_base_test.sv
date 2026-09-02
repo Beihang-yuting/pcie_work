@@ -46,25 +46,39 @@ class pcie_device_base_test extends uvm_test;
     global_cfg.build_default_for_topology(build_topology());
   endfunction
 
+  // Native tests keep policy ownership here.  An integration extension may
+  // return one when it must resolve an external authority (for example a
+  // frozen DPU snapshot) inside the environment before protocol children are
+  // created.  The factory still returns a pcie_unified_env-compatible handle.
+  virtual function bit environment_owns_global_cfg();
+    return 1'b0;
+  endfunction
+
   virtual function void build_phase(uvm_phase phase);
     string errors[$];
 
     super.build_phase(phase);
 
-    // Build policy before publishing it to the child environment.
-    global_cfg = pcie_global_cfg::type_id::create("global_cfg");
-    build_global_cfg();
-    global_cfg.validate(errors);
-    if (errors.size() != 0) begin
-      `uvm_fatal("GLOBAL_CFG", $sformatf(
-        "base test global configuration invalid: %s", errors[0]))
-      return;
+    if (!environment_owns_global_cfg()) begin
+      // Build policy before publishing it to the child environment.
+      global_cfg = pcie_global_cfg::type_id::create("global_cfg");
+      build_global_cfg();
+      global_cfg.validate(errors);
+      if (errors.size() != 0) begin
+        `uvm_fatal("GLOBAL_CFG", $sformatf(
+          "base test global configuration invalid: %s", errors[0]))
+        return;
+      end
+
+      // Native environments consume the same handle, avoiding a second
+      // translation path that could diverge from test configuration.
+      uvm_config_db#(pcie_global_cfg)::set(this, "env", "global_cfg",
+                                           global_cfg);
+    end else begin
+      // The factory-selected integration environment owns policy publication.
+      global_cfg = null;
     end
 
-    // The environment consumes the same handle, avoiding a second translation
-    // path that could silently diverge from the base-test configuration.
-    uvm_config_db#(pcie_global_cfg)::set(this, "env", "global_cfg",
-                                         global_cfg);
     env = pcie_unified_env::type_id::create("env", this);
   endfunction
 endclass

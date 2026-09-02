@@ -14,4 +14,5 @@ package pcie_dpu_integration_pkg;
   `include "pcie_dpu_attachment_cfg.sv"
   `include "pcie_dpu_cfg_adapter.sv"
   `include "pcie_dpu_reg_executor_base.sv"
+  `include "pcie_dpu_system_cfg.sv"
 endpackage : pcie_dpu_integration_pkg

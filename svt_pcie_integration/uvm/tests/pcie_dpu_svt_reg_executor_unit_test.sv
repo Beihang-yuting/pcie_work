@@ -119,6 +119,8 @@ class pcie_dpu_svt_reg_executor_unit_test extends uvm_test;
 
   function void build_phase(uvm_phase phase);
     pcie_svt_port_descriptor descriptor;
+    pcie_svt_port_descriptor downstream_descriptor;
+    pcie_svt_port_descriptor other_root_descriptor;
     svt_pcie_device_configuration rc_cfg;
 
     super.build_phase(phase);
@@ -138,6 +140,25 @@ class pcie_dpu_svt_reg_executor_unit_test extends uvm_test;
     descriptor.root_hierarchy = 0;
     topology_vseqr.descriptor_by_link[descriptor.link_id] = descriptor;
     topology_vseqr.seqr_by_link[descriptor.link_id] = rc_seqr;
+
+    // Switch-routed device policy names the downstream physical link, while
+    // transactions originate from the RC VIP on the upstream link.  Root
+    // hierarchy is the stable association between those two ports.
+    downstream_descriptor = pcie_svt_port_descriptor::type_id::create(
+      "downstream_descriptor");
+    downstream_descriptor.link_id = "SW0_DSP0_EP0";
+    downstream_descriptor.role = PCIE_SVT_ROLE_EP;
+    downstream_descriptor.root_hierarchy = 0;
+    topology_vseqr.descriptor_by_link[downstream_descriptor.link_id] =
+      downstream_descriptor;
+
+    other_root_descriptor = pcie_svt_port_descriptor::type_id::create(
+      "other_root_descriptor");
+    other_root_descriptor.link_id = "SW1_DSP0_EP1";
+    other_root_descriptor.role = PCIE_SVT_ROLE_EP;
+    other_root_descriptor.root_hierarchy = 1;
+    topology_vseqr.descriptor_by_link[other_root_descriptor.link_id] =
+      other_root_descriptor;
   endfunction
 
   function void require(bit condition, string message);
@@ -275,6 +296,25 @@ class pcie_dpu_svt_reg_executor_unit_test extends uvm_test;
             "SVT execution report omitted successful operations");
   endtask
 
+  task check_switch_root_routing();
+    pcie_dpu_svt_reg_executor_probe executor;
+    dpu_reg_plan plan;
+    string why;
+
+    plan = make_plan();
+    executor = pcie_dpu_svt_reg_executor_probe::type_id::create(
+      "switch_root_exec");
+    executor.configure(topology_vseqr, make_global_cfg("SW0_DSP0_EP0"),
+                       "RC0_EP0", null, 1'b1);
+    require(executor.preflight(plan, why),
+            {"switch executor rejected a downstream link in its root: ", why});
+
+    executor.configure(topology_vseqr, make_global_cfg("SW1_DSP0_EP1"),
+                       "RC0_EP0", null, 1'b1);
+    require(!executor.preflight(plan, why),
+            "switch executor accepted a downstream link in another root");
+  endtask
+
   task check_posted_write_completion_policy();
     pcie_dpu_svt_reg_executor_probe executor;
 
@@ -292,6 +332,7 @@ class pcie_dpu_svt_reg_executor_unit_test extends uvm_test;
     phase.raise_objection(this);
     check_rejections();
     check_order_and_resolution();
+    check_switch_root_routing();
     check_posted_write_completion_policy();
     phase.drop_objection(this);
   endtask

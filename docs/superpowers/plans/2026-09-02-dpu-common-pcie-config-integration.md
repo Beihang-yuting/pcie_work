@@ -214,28 +214,31 @@
 **Files:**
 - Create: `pcie_dpu_integration/src/pcie_dpu_system_cfg.sv`
 - Create: `pcie_dpu_integration/src/pcie_dpu_system_env.sv`
+- Create: `pcie_dpu_integration/src/pcie_dpu_global_stage_vseq.sv`
+- Create: `pcie_dpu_integration/src/pcie_dpu_device_base_test.sv`
+- Create: `pcie_dpu_integration/src/pcie_dpu_system_pkg.sv`
 - Modify: `svt_pcie_integration/uvm/tests/pcie_device_base_test.sv`
 - Modify: `svt_pcie_integration/uvm/sequences/pcie_global_stage_vseq.sv`
-- Modify: `svt_pcie_integration/uvm/pcie_svt_topology_pkg.sv`
+- Modify: `svt_pcie_integration/uvm/backend/pcie_dpu_svt_reg_executor.sv`
 - Test: `pcie_dpu_integration/tests/pcie_dpu_system_env_unit_test.sv`
 
 **Interfaces:**
 - Consumes: `dpu_device_cfg`, placement policy, attachment records, and backend selection.
 - Produces: resolved snapshots, projected global PCIe policy, one protocol child, and ordered stage dispatch.
 
-- [ ] **Step 1: Write the failing lifecycle test**
+- [x] **Step 1: Write the failing lifecycle test**
 
   Assert the lifecycle order using a spy executor and a minimal one-function configuration: DPU resolution precedes child creation; TL runs config/bootstrap/VIO operations; SVT runs link/config/enumeration hooks before the same DPU plans. Assert that an unresolved snapshot prevents child construction.
 
-- [ ] **Step 2: Run the lifecycle test to verify it fails**
+- [x] **Step 2: Run the lifecycle test to verify it fails**
 
   Run the focused system environment test. Expected: the current global stage sequence only logs requests and does not dispatch backend operations.
 
-- [ ] **Step 3: Implement system configuration ownership**
+- [x] **Step 3: Implement system configuration ownership**
 
   `pcie_dpu_system_cfg` stores the DPU authoring config, placement config, physical attachment map, topology graph, backend, and executor. `pcie_dpu_system_env` resolves DPU state before publishing immutable snapshot handles and before creating the unified PCIe child. Use explicit parent-child ordering; do not rely on sibling build order.
 
-- [ ] **Step 4: Implement backend stage dispatch**
+- [x] **Step 4: Implement backend stage dispatch**
 
   Replace logging-only hooks with backend-specific dispatch:
 
@@ -244,13 +247,15 @@
   SVT: cfg_init -> link-up -> enumeration -> DPU bootstrap plan -> DPU VIO plan -> traffic
   ```
 
-  Keep each stage overridable and document which sequencer handle it consumes.
+  The SVT local cfg-init precedes link-up because R-2020.12 requires its
+  configuration refresh and reset release while the link is still down. Keep
+  each stage overridable and document which sequencer handle it consumes.
 
-- [ ] **Step 5: Run lifecycle and existing tests**
+- [x] **Step 5: Run lifecycle and existing tests**
 
   Run the DPU system unit test, unified environment unit test, existing SVT topology model/adapter tests, and TL global-cfg tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   ```bash
   git add pcie_dpu_integration svt_pcie_integration/uvm

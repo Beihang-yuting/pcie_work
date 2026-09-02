@@ -2,8 +2,8 @@
 // Backend-neutral PCIe stage sequence scaffold.
 //
 // The sequence defines the required ordering without hard-coding protocol
-// objects.  Backend-specific derived sequences override the three hooks and
-// start existing TL or SVT sequences on their own virtual sequencers.
+// objects.  Backend-specific derived sequences override the hooks and start
+// existing TL or SVT sequences on their own virtual sequencers.
 //------------------------------------------------------------------------------
 
 class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
@@ -17,7 +17,7 @@ class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
     super.new(name);
   endfunction
 
-  // Hook 1: establish link training for enabled links only.
+  // Hook 2: establish link training for enabled links only.
   virtual task start_enabled_links();
     // Link bring-up is intentionally limited to enabled runtime policy.
     foreach (global_cfg.links[i]) begin
@@ -30,9 +30,11 @@ class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
     end
   endtask
 
-  // Hook 2: initialize configuration space/BAR policy in backend order.
+  // Hook 1: initialize local VIP/configuration-space state while links are
+  // still down.  R-2020.12 requires its CFG refresh and reset release before
+  // PHY/link enable sequences are started.
   virtual task initialize_devices();
-    // Device initialization follows link readiness and precedes enumeration.
+    // Device initialization precedes physical link enable and enumeration.
     foreach (global_cfg.devices[i])
       if (global_cfg.devices[i] != null)
         `uvm_info("GLOBAL_STAGE", $sformatf(
@@ -41,10 +43,21 @@ class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
           global_cfg.devices[i].bdf), UVM_LOW)
   endtask
 
-  // Hook 3: enumerate and perform backend-specific memory traffic.
+  // Hook 3: enumerate devices after every enabled physical link is ready.
+  virtual task enumerate_devices();
+    `uvm_info("GLOBAL_STAGE", "enumeration stage requested", UVM_LOW)
+  endtask
+
+  // Compatibility hook retained for existing derived tests that combined
+  // enumeration and traffic.  New integrations override enumerate_devices()
+  // and start_traffic() independently so DPU plans can run between them.
   virtual task enumerate_and_test_memory();
-    // Concrete backends replace this hook with enumeration and traffic.
-    `uvm_info("GLOBAL_STAGE", "enumeration/traffic stage requested", UVM_LOW)
+    `uvm_info("GLOBAL_STAGE", "traffic stage requested", UVM_LOW)
+  endtask
+
+  // Hook 4: start service traffic only after configuration plans complete.
+  virtual task start_traffic();
+    enumerate_and_test_memory();
   endtask
 
   virtual task body();
@@ -52,10 +65,11 @@ class pcie_global_stage_vseq extends uvm_sequence #(uvm_sequence_item);
       `uvm_fatal("GLOBAL_STAGE", "global_cfg is required")
       return;
     end
-    // PCIe verification ordering is intentional: traffic before link/config
-    // completion would create false failures and can deadlock completions.
-    start_enabled_links();
+    // Local VIP configuration must run with reset asserted and links down;
+    // enumeration follows L0, and traffic is always last.
     initialize_devices();
-    enumerate_and_test_memory();
+    start_enabled_links();
+    enumerate_devices();
+    start_traffic();
   endtask
 endclass

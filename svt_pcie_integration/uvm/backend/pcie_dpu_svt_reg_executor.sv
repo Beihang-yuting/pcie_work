@@ -94,16 +94,40 @@ package pcie_dpu_svt_backend_pkg;
         dpu_reg_op operation,
         pcie_device_cfg device,
         output string why);
+      pcie_svt_port_descriptor device_descriptor;
+
       why = "";
-      if ((device == null) || (device.link_id != link_id)) begin
+      if (device == null) begin
         why = $sformatf(
-          {"operation %s resolves to PCIe link '%s', but SVT executor ",
-           "selected link '%s'"},
-          operation.op_id, (device == null) ? "<null>" : device.link_id,
-          link_id);
+          "operation %s resolved to a null PCIe device", operation.op_id);
         return 1'b0;
       end
-      return 1'b1;
+
+      // Direct RC-to-Endpoint traffic uses the same logical link on both the
+      // projected device and the selected RC executor.
+      if (device.link_id == link_id)
+        return 1'b1;
+
+      // A switch DUT separates the RC VIP's USP link from the Endpoint's DSP
+      // attachment link.  Both descriptors must belong to the same root
+      // hierarchy; accepting an arbitrary downstream link would route a DPU
+      // operation through the wrong independent host.
+      if (use_switch_routing &&
+          topology_vseqr.descriptor_by_link.exists(device.link_id)) begin
+        device_descriptor =
+          topology_vseqr.descriptor_by_link[device.link_id];
+        if ((device_descriptor != null) &&
+            (device_descriptor.root_hierarchy ==
+             selected_descriptor.root_hierarchy))
+          return 1'b1;
+      end
+
+      why = $sformatf(
+        {"operation %s resolves to PCIe link '%s', which is not reachable ",
+         "from selected RC link '%s' in root hierarchy %0d"},
+        operation.op_id, device.link_id, link_id,
+        selected_descriptor.root_hierarchy);
+      return 1'b0;
     endfunction
 
     protected function bit [3:0] first_dw_be(

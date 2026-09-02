@@ -130,16 +130,18 @@ The required stage order is:
 
 ```text
 DPU resolve
--> SVT link-up (SVT only)
--> PCIe configuration/BAR sizing
+-> local VIP/config-space initialization
+-> SVT link-up and enumeration (SVT only)
 -> apply DPU bootstrap plan
 -> apply DPU VIO register plan
 -> Virtio/service traffic
 ```
 
-TL-only runs omit physical link-up and use the TL environment's configuration
-and traffic path.  SVT enumeration must use or verify the BDF/BAR values from
-the DPU snapshot rather than independently selecting conflicting addresses.
+R-2020.12 local cfg-init runs before PHY/link enable because its refresh and
+reset-release service requires the link to remain down. TL-only runs omit
+physical link-up and use the TL environment's configuration and traffic path.
+SVT enumeration must use or verify the BDF/BAR values from the DPU snapshot
+rather than independently selecting conflicting addresses.
 
 ## 7. Configuration and build-time contracts
 
@@ -186,4 +188,3 @@ only after equivalent unified tests pass.
    remain clean.
 7. New and modified code contains comments documenting ownership, source of
    each value, and stage ordering.
-
