@@ -23,6 +23,18 @@ class pcie_device_cfg extends uvm_object;
 
   // Runtime BDF and header format used for enumeration and routing checks.
   bit [15:0] bdf;
+
+  // Domain-qualified identity is supplied by dpu-common.  The legacy
+  // topology-only path leaves these at zero; multi-domain backends can use
+  // them to disambiguate identical BDF values.
+  int unsigned domain_host_id;
+  int unsigned domain_segment_id;
+
+  // Optional DPU ownership labels.  Strings keep this package independent of
+  // dpu_resource_pkg while still allowing an adapter to carry the mapping.
+  string physical_node_id;
+  string link_id;
+  string function_key_name;
   bit [7:0] header_type;
 
   // Command-space policy.  The backend may update the live enable state after
@@ -99,6 +111,11 @@ class pcie_device_cfg extends uvm_object;
     pci_device_id      = source.pci_device_id;
     role               = source.role;
     bdf                = source.bdf;
+    domain_host_id     = source.domain_host_id;
+    domain_segment_id  = source.domain_segment_id;
+    physical_node_id   = source.physical_node_id;
+    link_id            = source.link_id;
+    function_key_name  = source.function_key_name;
     header_type        = source.header_type;
     cfg_space_enable   = source.cfg_space_enable;
     bus_master_enable  = source.bus_master_enable;

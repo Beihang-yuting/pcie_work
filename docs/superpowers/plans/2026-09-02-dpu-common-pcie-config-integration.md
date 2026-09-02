@@ -34,11 +34,11 @@
 - Consumes: `dpu_resource_pkg` types, `pcie_topology_pkg` types.
 - Produces: `pcie_dpu_attachment_cfg`, a typed mapping from a DPU function key to a PCIe physical node/link, including `function_key`, `physical_node_id`, `link_id`, `function_number`, and optional `has_function_number`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
   Add a UVM unit test that creates two attachments, verifies valid function/link lookup, rejects duplicate function keys, rejects empty link IDs, and rejects a function-number collision on one physical Endpoint.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
   Run:
 
@@ -48,7 +48,7 @@
 
   Expected: compilation fails because the attachment class and package are not defined.
 
-- [ ] **Step 3: Implement the minimal attachment model**
+- [x] **Step 3: Implement the minimal attachment model**
 
   Define a UVM object with dynamic attachment records and these methods:
 
@@ -71,11 +71,11 @@
 
   Keep the package independent of SVT classes; import only the common topology and DPU resource packages.
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
   Re-run the focused VCS command and require `UVM_ERROR=0` and `UVM_FATAL=0`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add pcie_dpu_integration
@@ -93,15 +93,15 @@
 - Consumes: frozen `dpu_device_snapshot`, optional frozen `dpu_resource_snapshot`, `pcie_topology_cfg`, and `pcie_dpu_attachment_cfg`.
 - Produces: `pcie_global_cfg` with device BDF/BAR projections and unchanged topology; errors before any backend child is created.
 
-- [ ] **Step 1: Write the failing projection tests**
+- [x] **Step 1: Write the failing projection tests**
 
   Build a minimal DPU configuration with one PF0, a pinned BDF, and three BAR pairs. Resolve and freeze it through `dpu_device_resolver`. Assert that the adapter emits the same BDF, BAR bases, sizes, 64-bit flags, and role mapping. Add negative tests for an unfrozen snapshot, a missing attachment, and an overlapping/invalid BAR pair.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
   Run the focused adapter test through the DPU integration filelist. Expected: failure because `pcie_dpu_cfg_adapter` is not defined.
 
-- [ ] **Step 3: Implement the projection**
+- [x] **Step 3: Implement the projection**
 
   Add:
 
@@ -121,11 +121,11 @@
 
   Add a clearly commented conversion for domain-qualified BDFs and per-root enumeration windows. Reject a projection if an attachment is absent or if one physical link receives incompatible function ownership.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
   Require positive and negative projection tests to pass and confirm no protocol environment is constructed by the unit test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git add pcie_dpu_integration
