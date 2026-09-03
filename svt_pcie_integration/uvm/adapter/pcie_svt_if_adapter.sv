@@ -6,6 +6,10 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
 
   pcie_svt_route_info route;
 
+  // 父类已占用名称 codec（pcie_tl_codec 类型），因此这里使用明确的
+  // codec_adapter 句柄，避免同名遮蔽。转换函数本身是 Task 1 定义的静态 API。
+  pcie_svt_tlp_codec codec_adapter;
+
   svt_pcie_tlp_mapper mapper;
 
   pcie_svt_tlp_mapper_bridge mapper_endpoint;
@@ -17,6 +21,10 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
 
   function void build_phase(uvm_phase phase);
     super.build_phase(phase);
+
+    codec_adapter = new();
+    if (codec_adapter == null)
+      `uvm_fatal("SVT_ADAPTER", "SVT codec 实例化失败")
 
     // 在 build 阶段创建层次组件，避免 connect 阶段动态改变 UVM 树。
     if ((mapper_endpoint == null) && (mapper != null)) begin
