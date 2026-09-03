@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - `pcie_tl_env` remains the sole transaction/configuration control plane.
-- No deletion or renaming of existing public classes, enums, packages, or filelists in this phase.
+- No deletion or renaming of existing pcie_tl_vip public classes, enums, packages, or filelists in this phase. Legacy SVT-only wrappers may be superseded.
 - SVT integration uses only documented/public TLP Mapper TLM ports; no SVT private internals or direct Serial driving from UVM.
 - Dynamic UVM arrays are bounded by the existing `PCIE_SVT_ENV_MAX_NUM_LINKS` HDL slot macro.
 - Missing bridge handles are fatal during build/connect; unsupported TLP fields are reported explicitly.

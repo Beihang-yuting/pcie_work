@@ -65,7 +65,7 @@ by the existing macro; UVM arrays remain dynamic.
 ### Compatibility
 
 `pcie_tl_env`, `pcie_tl_custom_env`, existing package names, native SVT files,
-and current filelists are retained in this phase. No source deletion or enum
+and current pcie_tl_vip filelists are retained in this phase. Legacy SVT-only wrappers are not compatibility targets. No source deletion or enum
 renaming is performed until the bridge path and legacy regression both pass.
 
 ## Configuration
