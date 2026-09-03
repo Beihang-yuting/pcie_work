@@ -13,6 +13,9 @@ import uvm_pkg::*;
 import pcie_topology_pkg::*;
 import pcie_tl_pkg::*;
 import pcie_svt_topology_pkg::*;
+// Mapper 定义属于 SVT 原生 UVM package；topology package 不重新导出该类型。
+// 在测试类所在 compilation unit 显式导入，保证 R-2020.12 与 TL bridge 均可见。
+import svt_pcie_uvm_pkg::*;
 `include "uvm_macros.svh"
 
 // 测试只负责选择后端和发布桥接输入；拓扑图、VIF 绑定及 adapter 创建仍由
@@ -63,9 +66,19 @@ class pcie_tl_svt_bridge_1rc1ep_test extends pcie_device_base_test;
 
   virtual function void build_phase(uvm_phase phase);
     svt_pcie_tlp_mapper mapper;
+    svt_pcie_device_configuration mapper_cfg;
 
     // Mapper 必须在 SVT topology build 前存在；缺失时环境会给出明确 fatal。
     mapper = svt_pcie_tlp_mapper::type_id::create("bridge_mapper", this);
+
+    // R-2020.12 的 Mapper 在自身 build_phase 会从 config DB 读取 `cfg`。
+    // 即使桥接示例暂不启动 SVT EP application，也要提供合法配置对象，
+    // 否则 Mapper 会在 build_phase 以 "cfg is null" 终止仿真。
+    mapper_cfg = svt_pcie_device_configuration::type_id::create(
+      "bridge_mapper_cfg", this);
+    uvm_config_db#(svt_pcie_device_configuration)::set(
+      this, "bridge_mapper", "cfg", mapper_cfg);
+
     uvm_config_db#(svt_pcie_tlp_mapper)::set(
       this, "env", "pcie_svt_mapper", mapper);
     super.build_phase(phase);
@@ -124,9 +137,11 @@ module pcie_svt_topology_top;
   initial begin
     primary_rc0_spd.update_if_variables(4'h0, 0,
       "uvm_test_top", "uvm_test_top");
-    uvm_config_db#(svt_pcie_vif)::set(null, "uvm_test_top",
+    // 使用通配 scope，使 manager 层和其 svt_env 子层都能读取同一个
+    // virtual interface；pcie_unified_env 仍会在 build 时重新发布到局部域。
+    uvm_config_db#(svt_pcie_vif)::set(null, "*",
       "primary_vif_0", primary_rc0_if);
-    uvm_config_db#(virtual pcie_svt_reset_if)::set(null, "uvm_test_top",
+    uvm_config_db#(virtual pcie_svt_reset_if)::set(null, "*",
       "primary_reset_vif", reset_vif);
   end
 

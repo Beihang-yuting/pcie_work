@@ -9,6 +9,10 @@
 +define+PCIE_SVT_AVAILABLE
 +define+PCIE_TOPO_EP_X16
 
+// SVT 发行版和 TL 源码被 VCS 合并到同一个 compilation unit；统一默认
+// timescale，避免 SVT `` `timescale`` 与前置 package 的隐式 timescale 冲突。
+-timescale=1ns/1ps
+
 +incdir+../rtl
 +incdir+../uvm
 +incdir+../uvm/cfg

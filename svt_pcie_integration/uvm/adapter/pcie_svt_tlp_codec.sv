@@ -63,7 +63,10 @@ class pcie_svt_tlp_codec;
         if (route.completer_id_valid && route.completer_id != cpl.completer_id) begin `uvm_error("PCIE_SVT_CODEC", "route completer_id mismatch"); return 0; end
         if (route.completion_status_valid && route.completion_status != cpl.cpl_status) begin `uvm_error("PCIE_SVT_CODEC", "route completion status mismatch"); return 0; end
         svt_tlp.tlp_type = svt_pcie_tlp::CPL; svt_tlp.completer_id = cpl.completer_id; svt_tlp.ln = (tlp.kind inside {TLP_CPL_LK,TLP_CPLD_LK});
-        svt_tlp.completion_status = cpl.cpl_status; svt_tlp.byte_count_modified = cpl.bcm;
+        // TL 与 SVT 都使用 PCIe 规定的 3-bit 编码，但 SystemVerilog 将
+        // 两个 typedef enum 视为不同类型，因此必须显式静态转换。
+        svt_tlp.completion_status = svt_pcie_tlp::completion_status_enum'(cpl.cpl_status);
+        svt_tlp.byte_count_modified = cpl.bcm;
         svt_tlp.byte_count = cpl.byte_count; svt_tlp.lower_address = cpl.lower_addr;
       end
       default: begin `uvm_error("PCIE_SVT_CODEC", "unsupported TL transaction kind"); return 0; end
@@ -128,7 +131,18 @@ class pcie_svt_tlp_codec;
       if (!(svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_3_DWORD})) begin
         `uvm_error("PCIE_SVT_CODEC", "malformed completion format"); tlp = null; return 0;
       end
-      cpl = new("tl_cpl"); tlp = cpl; cpl.completer_id = svt_tlp.completer_id; cpl.cpl_status = svt_tlp.completion_status; cpl.bcm = svt_tlp.byte_count_modified; cpl.byte_count = svt_tlp.byte_count; cpl.lower_addr = svt_tlp.lower_address; cpl.kind = (svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? (svt_tlp.ln ? TLP_CPLD_LK : TLP_CPLD) : (svt_tlp.ln ? TLP_CPL_LK : TLP_CPL); cpl.type_f = svt_tlp.ln ? TLP_TYPE_CPL_LK : TLP_TYPE_CPL;
+      cpl = new("tl_cpl");
+      tlp = cpl;
+      cpl.completer_id = svt_tlp.completer_id;
+      // 反向转换与 encode 对称，保留原始 PCIe completion status 编码。
+      cpl.cpl_status = cpl_status_e'(svt_tlp.completion_status);
+      cpl.bcm = svt_tlp.byte_count_modified;
+      cpl.byte_count = svt_tlp.byte_count;
+      cpl.lower_addr = svt_tlp.lower_address;
+      cpl.kind = (svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ?
+        (svt_tlp.ln ? TLP_CPLD_LK : TLP_CPLD) :
+        (svt_tlp.ln ? TLP_CPL_LK : TLP_CPL);
+      cpl.type_f = svt_tlp.ln ? TLP_TYPE_CPL_LK : TLP_TYPE_CPL;
     end else begin `uvm_error("PCIE_SVT_CODEC", "unsupported SVT transaction type"); tlp = null; return 0; end
     tlp.tc = svt_tlp.traffic_class; tlp.th = svt_tlp.th; tlp.td = svt_tlp.td; tlp.ep_bit = svt_tlp.ep; tlp.attr = {svt_tlp.attr_no_snoop,svt_tlp.attr_id_order,svt_tlp.attr_relaxed_ordering}; tlp.length = svt_tlp.length; tlp.requester_id = svt_tlp.requester_id; tlp.tag = svt_tlp.tag;
     case (svt_tlp.fmt)

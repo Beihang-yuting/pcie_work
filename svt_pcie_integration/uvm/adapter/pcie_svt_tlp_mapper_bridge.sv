@@ -20,6 +20,16 @@ class pcie_svt_tlp_mapper_bridge extends uvm_component;
     super.new(name, parent);
   endfunction
 
+  function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+
+    // uvm_blocking_put_imp 本身是 UVM port component，必须在 build 阶段
+    // 创建。此前在 connect_phase 的 bind_application() 中动态 new，VCS
+    // 会报告 ILLCRT（build phase 已结束后禁止创建组件）。
+    if (rx_imp == null)
+      rx_imp = new("rx_imp", this);
+  endfunction
+
   function void bind_mapper(svt_pcie_tlp_mapper endpoint);
     mapper = endpoint;
     if (mapper == null)
@@ -36,7 +46,10 @@ class pcie_svt_tlp_mapper_bridge extends uvm_component;
       return;
     end
 
-    rx_imp = new($sformatf("rx_imp_%0d", application_id), this);
+    if (rx_imp == null) begin
+      `uvm_fatal("SVT_BRIDGE", "rx_imp 未在 build_phase 创建")
+      return;
+    end
     mapper.rx_tlp_out_port[application_id].connect(rx_imp);
   endfunction
 

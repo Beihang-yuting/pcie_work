@@ -18,6 +18,11 @@ vcs -full64 -sverilog -ntb_opts uvm-1.2 \
   -o build/simv -l build/compile.log
 ```
 
+`pcie_tl_svt_bridge_1rc1ep.f` 已内置 `-timescale=1ns/1ps`。这是必要的
+VCS 选项：SVT R-2020.12 的 source map 含有显式 `` `timescale``，而 TL
+package 通常没有；统一默认时间单位可避免 compilation-unit timescale
+冲突。若自行重写 filelist，请保留该选项。
+
 The installed SVT environment must provide `svt_pcie.uvm.pkg`, the Unified VIP
 environment example include directory, and the VCS/PLI support files.  Use a
 login shell on the VCS host so `VCS_HOME`, `PCIE_SVT_ROOT`, and the license
@@ -112,13 +117,26 @@ vcs -full64 -sverilog -ntb_opts uvm-1.2 \
 
 The command requires a login shell with VCS and SVT R-2020.12 installed and
 the `PCIE_SVT_ROOT`, `DESIGNWARE_HOME`, and `HOST_MEM_ROOT` variables exported.
-No credentials are embedded in the filelist.  The VCS host (`10.11.10.53`) is
-reachable and exposes `vcs`, but its current login environment does not export
-`PCIE_SVT_ROOT`, `DESIGNWARE_HOME`, or `HOST_MEM_ROOT`; the required
-R-2020.12 SVT file locations therefore cannot be resolved.  The compile result
-is **not run (required SVT environment variables unavailable)**; source the
-site SVT setup that supplies those three variables, then rerun the exact
-command above for final elaboration evidence.
+No credentials are embedded in the filelist.  The current 53 号 VCS host uses
+these paths for the reference installation:
+
+```sh
+export VCS_HOME=/home/ubuntu/synopsys/vcs/W-2024.09-SP1
+export PCIE_SVT_ROOT=/home/ubuntu/synopsys/designware_vip_R-2020.12/vip/svt/pcie_svt/R-2020.12
+export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
+export HOST_MEM_ROOT=/home/ubuntu/workspace/host_mem
+```
+
+The compile must still be treated as a compile/elaboration check only until a
+real DUT is connected; the placeholder wrapper intentionally drives electrical
+idle and does not prove LTSSM, enumeration, or memory traffic.
+
+当前 bridge smoke 若直接运行，会进入 SVT Mapper 的 application-service
+线程；该线程要求由正式 SVT device-agent/application-agent 提供 service
+sequencer，不能用一个孤立的 `svt_pcie_tlp_mapper` 句柄替代。因而本例
+的验收门槛暂定为 VCS compile/elaboration；接入真实 RTL 时应由正式
+application-agent 创建 Mapper，再通过公开 `tx_tlp_in_export[]` /
+`rx_tlp_out_port[]` 交给本项目 adapter。
 
 ## DPU-common EP x16 example
 
