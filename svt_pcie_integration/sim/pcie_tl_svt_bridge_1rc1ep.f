@@ -42,6 +42,9 @@
 +define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME
 +define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
 +define+SVT_PCIE_ENABLE_10_BIT_TAGS
+// Keep the Gen4/Gen5 physical-rate models enabled for the bridge entry point.
++define+EXPERTIO_PCIESVC_INCLUDE_8G
++define+EXPERTIO_PCIESVC_INCLUDE_16G
 -y $PCIE_SVT_ROOT/verilog/src/vcs
 -y $PCIE_SVT_ROOT/sverilog/src/vcs
 

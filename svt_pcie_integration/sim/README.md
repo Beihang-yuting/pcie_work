@@ -86,6 +86,26 @@ smaller than the window, and invalid function-count limits before elaboration.
 The default transport is Serial.  PIPE support remains a future transport
 extension and is not enabled by the current topology policy.
 
+### 已验证的双侧 Serial link test
+
+`pcie_svt_peer_test` 已加入 `pcie_svt_topology.f`，并作为双向 TL/SVT
+对接前的正式 link 门禁。它在同一顶层创建 primary RC 和 peer EP 两个
+`pcie_svt_topology_env`，通过 `PCIE_SVT_CONNECT_SERIAL_PEERS` 互连，先
+执行两侧 CFG_INIT/REFRESH_CFG，再执行双侧 DL/PL enable 和 LTSSM 检查。
+验证命令为：
+
+```sh
+./build/peer_x16/simv -no_save \
+  +UVM_TESTNAME=pcie_svt_peer_test \
+  +PCIE_TOPOLOGY=EP_X16 +PCIE_GEN=4 +PCIE_LINK_ONLY
+```
+
+在 53 号机 VCS W-2024.09-SP1 + SVT R-2020.12 上，1RC+1EP/x16/Serial
+运行结果为 `RUN_STATUS=0`、`UVM_ERROR=0`、`UVM_FATAL=0`，两侧均报告
+`LTSSM: Link training completed`、`Speed is 16Gb/s`、`Link width is 16`，
+并输出 `PCIE_SVT_LINK_PASS`。该 test 是环境级 link 验证；真实 DUT 接入
+时只需替换 peer EP 的 HDL/Serial 连接，保留相同 test 和 sequence。
+
 ## 1RC + 1EP TL/SVT bridge compile example
 
 `pcie_tl_svt_bridge_1rc1ep.f` is a minimal 1-RC/1-EP Serial bridge entry

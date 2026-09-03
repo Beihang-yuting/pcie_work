@@ -24,6 +24,11 @@
 +define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
 +define+SVT_PCIE_ENABLE_10_BIT_TAGS
 +define+PCIE_SVT_AVAILABLE
+// Enable the Gen3+ physical-rate models required by the Gen4/Gen5 profiles.
+// Without these official SVT switches the link falls back to Gen1/2 and the
+// LTSSM raises a fatal when it attempts the requested 8G/16G rate.
++define+EXPERTIO_PCIESVC_INCLUDE_8G
++define+EXPERTIO_PCIESVC_INCLUDE_16G
 -y $PCIE_SVT_ROOT/verilog/src/vcs
 -y $PCIE_SVT_ROOT/sverilog/src/vcs
 $HOST_MEM_ROOT/src/host_mem_pkg.sv

@@ -219,6 +219,17 @@ class pcie_svt_peer_test extends pcie_svt_topology_base_test;
       link_sequence.primary_seqr = env.vseqr;
       link_sequence.peer_seqr = peer_env.vseqr;
       link_sequence.start(null);
+      // 只有双侧 descriptor 都到达 PASS，才把本次 peer 环境纳入可复用
+      // 的 link test 结果；sequence 内部的超时/fatal 不再被静默吞掉。
+      foreach (env.vseqr.link_state[link_id]) begin
+        if (env.vseqr.link_state[link_id] != PCIE_SVT_STAGE_PASS)
+          `uvm_fatal("SVT_PEER_LINK", $sformatf(
+            "link=%s did not reach LINK PASS", link_id))
+      end
+      `uvm_info("PCIE_SVT_LINK_PASS", $sformatf(
+        "profile=%s transport=%s links=%0d generation=Gen%0d",
+        profile_name, (transport == PCIE_SVT_TRANSPORT_SERIAL) ?
+          "SERIAL" : "PIPE", env.port_count(), max_gen), UVM_NONE)
     end
     if ((run_mode >= PCIE_SVT_RUN_ENUM) &&
         (profile_name != "SWITCH_1X16_4X4"))

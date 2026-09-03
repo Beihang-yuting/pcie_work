@@ -8,6 +8,8 @@ package pcie_svt_if_adapter_unit_test_pkg;
   `include "uvm_macros.svh"
   import pcie_tl_pkg::*;
   import pcie_svt_topology_pkg::*;
+  // SVT TLP 类型不由项目 package 重新导出，测试单元显式导入官方包。
+  import svt_pcie_uvm_pkg::*;
 
   class pcie_svt_if_adapter_unit_test extends uvm_test;
     `uvm_component_utils(pcie_svt_if_adapter_unit_test)
@@ -31,7 +33,9 @@ package pcie_svt_if_adapter_unit_test_pkg;
 
       pcie_tl_tlp rx;
 
-      svt_pcie_tlp wire;
+      // `wire` 是 SystemVerilog 关键字，使用明确的交易变量名避免
+      // 在 VCS 编译整个 SVT filelist 时触发语法错误。
+      svt_pcie_tlp encoded_tlp;
 
       phase.raise_objection(this);
 
@@ -46,7 +50,7 @@ package pcie_svt_if_adapter_unit_test_pkg;
       tx.payload = new[4];
       tx.payload = '{8'hde, 8'had, 8'hbe, 8'hef};
 
-      if (!pcie_svt_tlp_codec::encode(tx, wire, adapter.route))
+      if (!pcie_svt_tlp_codec::encode(tx, encoded_tlp, adapter.route))
         `uvm_fatal("SVT_ADAPTER_TEST", "mock outbound 编码失败")
 
       // mapper 为空时 bridge 会把 TX 交易放入测试捕获队列，验证 send 合同。
@@ -54,7 +58,8 @@ package pcie_svt_if_adapter_unit_test_pkg;
       if (adapter.mapper_endpoint.tx_queue.size() != 1)
         `uvm_fatal("SVT_ADAPTER_TEST", "未捕获到出站交易")
 
-      adapter.mapper_endpoint.push_rx(adapter.route.application_id, wire);
+      adapter.mapper_endpoint.push_rx(adapter.route.application_id,
+                                      encoded_tlp);
       adapter.receive(rx);
       if ((rx == null) || (rx.requester_id != tx.requester_id) ||
           (rx.payload.size() != tx.payload.size()))

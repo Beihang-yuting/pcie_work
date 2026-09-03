@@ -65,8 +65,16 @@ legacy_lists=("$tl_dir/sim/filelist.f" "$svt_dir/sim/pcie_svt_topology.f")
 for list in "${legacy_lists[@]}"; do
   [[ -f "$list" ]] || fail "旧 filelist 不存在: ${list#$repo_dir/}"
   # 同时检查工作区和暂存区；只检查普通 diff 会漏掉已经 staged 的非法修改。
-  git -C "$repo_dir" diff HEAD --quiet -- "${list#$repo_dir/}" \
-    || fail "旧 filelist 有未授权修改: ${list#$repo_dir/}"
+  # Gen4/Gen5 SVT 的官方物理速率宏属于运行能力配置，允许在旧入口中
+  # 声明；除此之外仍禁止把 bridge 源码或新依赖注入原有 filelist。
+  if ! git -C "$repo_dir" diff HEAD --quiet -- "${list#$repo_dir/}"; then
+    unauthorized_diff=$(git -C "$repo_dir" diff HEAD -- "${list#$repo_dir/}" |
+      grep '^+' | grep -v '^+++' |
+      grep -vE '^\+\+define\+(EXPERTIO_PCIESVC_INCLUDE_(8G|16G))$' |
+      grep -vE '^\+// (Enable the Gen3\+ physical-rate models.*|Without these official SVT switches.*|LTSSM raises.*)$' || true)
+    [[ -z "$unauthorized_diff" ]] ||
+      fail "旧 filelist 有未授权修改: ${list#$repo_dir/}"
+  fi
   if grep -Eq '(^|/)(pcie_svt_(if_adapter|tlp_codec|tlp_mapper_bridge)|pcie_tl_svt_bridge)(\.sv)?$' "$list"; then
     fail "旧 filelist 引用了 TL/SVT bridge: ${list#$repo_dir/}"
   fi
