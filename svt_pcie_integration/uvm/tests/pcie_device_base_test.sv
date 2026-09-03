@@ -1,15 +1,13 @@
 //------------------------------------------------------------------------------
-// Project PCIe base test.
+// 兼容历史入口。
 //
-// The build ordering follows the official Unified VIP example while moving
-// topology/device policy into pcie_global_cfg.  User tests override
-// build_global_cfg() to select links, BDFs, BARs, and backend behavior.
+// 推荐的新测试直接继承 pcie_tl_vip 的 base test；该类只保留旧 DPU 入口
+// 所需的 global_cfg/env 成员，并把环境实现收敛到 TL-root 兼容包装。
 //------------------------------------------------------------------------------
 
 class pcie_device_base_test extends uvm_test;
   `uvm_component_utils(pcie_device_base_test)
 
-  // Test-owned policy and common environment handle.
   pcie_global_cfg global_cfg;
   pcie_unified_env env;
 
@@ -18,80 +16,17 @@ class pcie_device_base_test extends uvm_test;
     super.new(name, parent);
   endfunction
 
-  // Select the compile-time topology graph.  Connectivity remains owned by
-  // pcie_topology_builder; the global object only adds runtime policy.
-  virtual function pcie_topology_cfg build_topology();
-    int unsigned max_gen;
-
-    // Gen4 is the default acceleration point; a plusarg may select Gen5.
-    max_gen = 4;
-    void'($value$plusargs("PCIE_GEN=%d", max_gen));
-    if (max_gen != 4 && max_gen != 5)
-      max_gen = 4;
-`ifdef PCIE_TOPO_EP_X16
-    return pcie_topology_builder::build_ep_x16(max_gen);
-`elsif PCIE_TOPO_EP_2X8
-    return pcie_topology_builder::build_ep_2x8(max_gen);
-`elsif PCIE_TOPO_SWITCH_1X16_4X4
-    return pcie_topology_builder::build_switch_1x16_4x4(max_gen);
-`else
-    return pcie_topology_builder::build_ep_x16(max_gen);
-`endif
-  endfunction
-
-  // Hook for a scenario to edit backend, link enable/use_svt, BDF and BAR
-  // policy after defaults have been generated but before env construction.
   virtual function void build_global_cfg();
-    // Derived tests customize this object after defaults are materialized.
-    global_cfg.build_default_for_topology(build_topology());
-  endfunction
-
-  // 通过 +PCIE_SVT_BRIDGE_ENABLE=1 提供不改测试源码的桥接开关；
-  // 显式 config_db 设置仍可在更高层覆盖该默认值。
-  virtual function bit bridge_enabled_from_plusarg();
-    int unsigned enable;
-
-    enable = 0;
-    if ($value$plusargs("PCIE_SVT_BRIDGE_ENABLE=%d", enable))
-      return (enable != 0);
-    // 没有 plusarg 时保留派生测试在 build_global_cfg() 中的显式设置。
-    return (global_cfg == null) ? 1'b0 : global_cfg.svt_bridge_enable;
-  endfunction
-
-  // Native tests keep policy ownership here.  An integration extension may
-  // return one when it must resolve an external authority (for example a
-  // frozen DPU snapshot) inside the environment before protocol children are
-  // created.  The factory still returns a pcie_unified_env-compatible handle.
-  virtual function bit environment_owns_global_cfg();
-    return 1'b0;
+    global_cfg = pcie_global_cfg::type_id::create("global_cfg");
+    global_cfg.build_default_for_topology(
+      pcie_topology_builder::build_ep_x16(4));
   endfunction
 
   virtual function void build_phase(uvm_phase phase);
-    string errors[$];
-
     super.build_phase(phase);
-
-    if (!environment_owns_global_cfg()) begin
-      // Build policy before publishing it to the child environment.
-      global_cfg = pcie_global_cfg::type_id::create("global_cfg");
-      build_global_cfg();
-      global_cfg.svt_bridge_enable = bridge_enabled_from_plusarg();
-      global_cfg.validate(errors);
-      if (errors.size() != 0) begin
-        `uvm_fatal("GLOBAL_CFG", $sformatf(
-          "base test global configuration invalid: %s", errors[0]))
-        return;
-      end
-
-      // Native environments consume the same handle, avoiding a second
-      // translation path that could diverge from test configuration.
-      uvm_config_db#(pcie_global_cfg)::set(this, "env", "global_cfg",
-                                           global_cfg);
-    end else begin
-      // The factory-selected integration environment owns policy publication.
-      global_cfg = null;
-    end
-
+    build_global_cfg();
+    uvm_config_db#(pcie_global_cfg)::set(
+      this, "env", "global_cfg", global_cfg);
     env = pcie_unified_env::type_id::create("env", this);
   endfunction
-endclass
+endclass : pcie_device_base_test

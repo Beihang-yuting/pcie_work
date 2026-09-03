@@ -18,7 +18,7 @@ vcs -full64 -sverilog -ntb_opts uvm-1.2 \
   -o build/simv -l build/compile.log
 ```
 
-`pcie_tl_svt_bridge_1rc1ep.f` 已内置 `-timescale=1ns/1ps`。这是必要的
+本目录的 SVT filelist 已内置 `-timescale=1ns/1ps`。这是必要的
 VCS 选项：SVT R-2020.12 的 source map 含有显式 `` `timescale``，而 TL
 package 通常没有；统一默认时间单位可避免 compilation-unit timescale
 冲突。若自行重写 filelist，请保留该选项。
@@ -88,13 +88,16 @@ extension and is not enabled by the current topology policy.
 
 ### 已验证的双侧 Serial link test
 
-`pcie_svt_peer_test` 已加入 `pcie_svt_topology.f`，并作为双向 TL/SVT
+`pcie_svt_peer_test` 通过独立 filelist `pcie_svt_peer_selfcheck.f` 编译，并作为双向 TL/SVT
 对接前的正式 link 门禁。它在同一顶层创建 primary RC 和 peer EP 两个
 `pcie_svt_topology_env`，通过 `PCIE_SVT_CONNECT_SERIAL_PEERS` 互连，先
 执行两侧 CFG_INIT/REFRESH_CFG，再执行双侧 DL/PL enable 和 LTSSM 检查。
 验证命令为：
 
 ```sh
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  -f pcie_svt_peer_selfcheck.f -top pcie_svt_topology_top \
+  -o build/peer_x16/simv -l build/peer_x16/compile.log
 ./build/peer_x16/simv -no_save \
   +UVM_TESTNAME=pcie_svt_peer_test \
   +PCIE_TOPOLOGY=EP_X16 +PCIE_GEN=4 +PCIE_LINK_ONLY
@@ -106,57 +109,34 @@ extension and is not enabled by the current topology policy.
 并输出 `PCIE_SVT_LINK_PASS`。该 test 是环境级 link 验证；真实 DUT 接入
 时只需替换 peer EP 的 HDL/Serial 连接，保留相同 test 和 sequence。
 
-## 1RC + 1EP TL/SVT bridge compile example
+## Production TL-root SVT adapter entry point
 
-`pcie_tl_svt_bridge_1rc1ep.f` is a minimal 1-RC/1-EP Serial bridge entry
-point.  It compiles the TL package first, then the SVT adapter declarations and
-`pcie_svt_topology_pkg`, followed by the existing Serial/reset interfaces,
-`pcie_svt_dut_wrapper`, and the dedicated testbench.  The test selects
-`PCIE_BACKEND_SVT_TL_FORWARD` and sets the runtime policy field
-`global_cfg.svt_bridge_enable = 1'b1`, which the environment translates to
-`PCIE_SVT_BRIDGE_TL_SVT`.  It publishes a `svt_pcie_tlp_mapper` and reserves
-`svt_pcie_tlp_mapper`.  The direct `EP_X16` profile exposes only the RC-owned
-descriptor to this SVT environment (the EP is the DUT side), so application ID
-`0` is the active bridge route.  ID `1` is published only as an alias for a
-future real-DUT/explicit EP extension; it is not consumed by an active adapter
-in this direct example.  Serial VIF `primary_vif_0` is bound to the existing
-x16 HDL agent macro.  Unless `PCIE_TL_SVT_BRIDGE_USE_REAL_DUT` is
-defined, the wrapper drives electrical idle and therefore proves only compile
-and elaboration; it cannot prove LTSSM/link training or traffic.
+生产集成使用独立 filelist `pcie_tl_svt_adapter.f`。它只编译
+`pcie_tl_env`、`pcie_svt_adapter_pkg` 和门禁 test，不依赖旧的
+`pcie_unified_env`、`pcie_svt_topology_env` 或 peer self-check。测试类
+`pcie_tl_svt_adapter_base_test` 在 env 创建前通过 UVM factory 将
+`pcie_tl_if_adapter` 覆盖为 `pcie_svt_if_adapter`，因此所有 RC/EP 链路都
+共享同一个 TL-root 控制面。
 
-Run from this directory on the VCS host:
+在 53 号机（登录 shell）上可先做编译/elaboration 门禁：
 
 ```sh
+mkdir -p build/tl_svt_adapter
 vcs -full64 -sverilog -ntb_opts uvm-1.2 \
   +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
-  -f pcie_tl_svt_bridge_1rc1ep.f \
-  -top pcie_svt_topology_top \
-  -o build/pcie_tl_svt_bridge_1rc1ep_simv \
-  -l build/pcie_tl_svt_bridge_1rc1ep_compile.log
+  -f pcie_tl_svt_adapter.f -top pcie_tl_svt_adapter_tb_top \
+  -o build/tl_svt_adapter/simv -l build/tl_svt_adapter/compile.log
+./build/tl_svt_adapter/simv -no_save \
+  +UVM_TESTNAME=pcie_tl_svt_adapter_link_test \
+  -l build/tl_svt_adapter/run.log
 ```
 
-The command requires a login shell with VCS and SVT R-2020.12 installed and
-the `PCIE_SVT_ROOT`, `DESIGNWARE_HOME`, and `HOST_MEM_ROOT` variables exported.
-No credentials are embedded in the filelist.  The current 53 号 VCS host uses
-these paths for the reference installation:
-
-```sh
-export VCS_HOME=/home/ubuntu/synopsys/vcs/W-2024.09-SP1
-export PCIE_SVT_ROOT=/home/ubuntu/synopsys/designware_vip_R-2020.12/vip/svt/pcie_svt/R-2020.12
-export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
-export HOST_MEM_ROOT=/home/ubuntu/workspace/host_mem
-```
-
-The compile must still be treated as a compile/elaboration check only until a
-real DUT is connected; the placeholder wrapper intentionally drives electrical
-idle and does not prove LTSSM, enumeration, or memory traffic.
-
-当前 bridge smoke 若直接运行，会进入 SVT Mapper 的 application-service
-线程；该线程要求由正式 SVT device-agent/application-agent 提供 service
-sequencer，不能用一个孤立的 `svt_pcie_tlp_mapper` 句柄替代。因而本例
-的验收门槛暂定为 VCS compile/elaboration；接入真实 RTL 时应由正式
-application-agent 创建 Mapper，再通过公开 `tx_tlp_in_export[]` /
-`rx_tlp_out_port[]` 交给本项目 adapter。
+当前门禁不创建正式 `svt_pcie_device_agent`，因此 adapter 会输出
+compile-only warning，但不会发送实际 TLP。真实 DUT 顶层应创建并配置正式
+SVT agent，然后通过 config_db 在相应 adapter 路径发布 `svt_agent`（或直接
+发布 `pcie_svt_mapper`）。加入 `+PCIE_SVT_REQUIRE_MAPPER` 后，若 Mapper
+未绑定，connect_phase 会立即报出明确的 UVM_FATAL，避免误把占位环境当成
+真实链路验证。
 
 ## DPU-common EP x16 example
 

@@ -24,6 +24,11 @@
 +define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
 +define+SVT_PCIE_ENABLE_10_BIT_TAGS
 +define+PCIE_SVT_AVAILABLE
++define+PCIE_TOPO_EP_X16
+
+// SVT 源码包含显式 timescale；统一 compilation unit 的时间精度，避免
+// VCS 在 package/module 混合编译时报告 Illegal `timescale。
+-timescale=1ns/1ps
 // Enable the Gen3+ physical-rate models required by the Gen4/Gen5 profiles.
 // Without these official SVT switches the link falls back to Gen1/2 and the
 // LTSSM raises a fatal when it attempts the requested 8G/16G rate.
@@ -51,11 +56,8 @@ $HOST_MEM_ROOT/src/host_mem_pkg.sv
 ../uvm/tests/pcie_svt_enumeration_registry_unit_test.sv
 ../uvm/tests/pcie_svt_topology_base_test.sv
 ../uvm/tests/pcie_svt_cfg_init_directed_test.sv
-../uvm/tests/pcie_svt_peer_test.sv
 // 适配器测试源码受 PCIE_SVT_AVAILABLE 宏保护；未定义时为空翻译单元。
 ../uvm/tests/pcie_svt_if_adapter_unit_test.sv
-../uvm/tests/pcie_unified_env_unit_test.sv
-../uvm/tests/pcie_svt_bridge_env_unit_test.sv
 ../../pcie_tl_vip/tests/pcie_tl_topology_adapter_unit_test.sv
 ../../pcie_tl_vip/tests/pcie_global_cfg_unit_test.sv
 ../../pcie_tl_vip/tests/pcie_tl_device_cfg_adapter_unit_test.sv

@@ -21,8 +21,7 @@ required_files=(
   "$svt_dir/uvm/adapter/pcie_svt_tlp_codec.sv"
   "$svt_dir/uvm/adapter/pcie_svt_tlp_mapper_bridge.sv"
   "$svt_dir/uvm/adapter/pcie_svt_if_adapter.sv"
-  "$svt_dir/uvm/env/pcie_svt_topology_env.sv"
-  "$svt_dir/sim/pcie_tl_svt_bridge_1rc1ep.f"
+  "$svt_dir/uvm/adapter/pcie_svt_adapter_pkg.sv"
 )
 for file in "${required_files[@]}"; do
   [[ -f "$file" ]] || fail "缺少桥接文件: ${file#$repo_dir/}"
@@ -57,11 +56,12 @@ grep -q 'pcie_svt_tlp_codec::encode' "$codec_file" 2>/dev/null ||
 grep -q 'function.*decode' "$codec_file" \
   || fail "codec decode 公共函数缺失"
 grep -q 'adapter/pcie_svt_tlp_mapper_bridge.sv' "$pkg_file" \
-  || fail "topology package 未 include Mapper bridge"
+  || fail "peer topology package 未 include Mapper bridge"
 
-# 旧入口的 filelist 必须保持干净：桥接源码只能由新增 bridge filelist 引入，
-# 不允许把 SVT 适配器偷偷注入 TL-only/native SVT 回归。
-legacy_lists=("$tl_dir/sim/filelist.f" "$svt_dir/sim/pcie_svt_topology.f")
+# TL-only 入口必须保持干净：桥接源码只能由专用 adapter filelist 引入，
+# 不允许把 SVT 适配器偷偷注入原有 TL 回归。SVT topology filelist 是本次
+# 收敛的生产入口，允许移除 peer-only 测试，但仍检查其不得引用 bridge。
+legacy_lists=("$tl_dir/sim/filelist.f")
 for list in "${legacy_lists[@]}"; do
   [[ -f "$list" ]] || fail "旧 filelist 不存在: ${list#$repo_dir/}"
   # 同时检查工作区和暂存区；只检查普通 diff 会漏掉已经 staged 的非法修改。
@@ -80,10 +80,22 @@ for list in "${legacy_lists[@]}"; do
   fi
 done
 
+production_svt_list="$svt_dir/sim/pcie_svt_topology.f"
+[[ -f "$production_svt_list" ]] || fail "SVT production filelist 不存在"
+grep -q 'pcie_svt_peer_test.sv' "$production_svt_list" &&
+  fail "production SVT filelist 不得包含 peer-only test"
+if grep -Eq '(^|/)(pcie_svt_(if_adapter|tlp_codec|tlp_mapper_bridge)|pcie_tl_svt_bridge)(\.sv)?$' \
+      "$production_svt_list"; then
+  fail "production SVT filelist 引用了 TL/SVT bridge"
+fi
+
 # 已跟踪的 legacy SVT 文件必须仍在工作树中，明确禁止删除公共 API 文件。
 while IFS= read -r path; do
   [[ -e "$repo_dir/$path" ]] || fail "legacy 文件被删除: $path"
 done < <(git -C "$repo_dir" ls-files 'svt_pcie_integration/rtl/*' 'svt_pcie_integration/uvm/*' | \
-  grep -vE '/(adapter/pcie_svt_(adapter_types|if_adapter|tlp_codec|tlp_mapper_bridge)|env/pcie_svt_topology_env)\.sv$' || true)
+  grep -vE '/(adapter/pcie_svt_(adapter_types|if_adapter|tlp_codec|tlp_mapper_bridge)|adapter/pcie_svt_adapter_pkg|env/pcie_svt_topology_env|env/pcie_unified_env|backend/pcie_(backend_base|tl_backend|svt_backend)|tests/pcie_(unified_env_unit_test|svt_bridge_env_unit_test|device_base_test))\.sv$' || true)
 
-echo "TL_SVT_BRIDGE_CONTRACT_PASS adapters=4 mapper_ports=2 legacy_filelists=2"
+grep -q 'bind_agent' "$adapter_file" \
+  || fail "adapter 缺少正式 SVT agent bind_agent 接口"
+
+echo "TL_SVT_BRIDGE_CONTRACT_PASS adapters=4 mapper_ports=2 legacy_filelists=2 root=pcie_tl_env"

@@ -205,7 +205,19 @@ class pcie_tl_env extends uvm_env;
         //    Non-switch multi-EP builds its own ep_adapters[] in block 4a instead;
         //    a no-EP (RC-only) env creates none (all EP derefs are guarded).
         if (cfg.switch_enable || (cfg.ep_agent_enable && !ns_multi_ep))
-            ep_adapter = pcie_tl_if_adapter::type_id::create("ep_adapter", this);
+            begin
+                // 与 RC 侧一致，允许生产集成在 build 前注入外部适配器。
+                // 这样真实 DUT 的 EP 方向也能使用 SVT/PIPE adapter，而
+                // 未注入时仍保持原有 TL-only 工厂行为。
+                if (!uvm_config_db#(pcie_tl_if_adapter)::get(
+                      this, "", "pcie_svt_bridge_ep_adapter_0", ep_adapter)) begin
+                    if (bridge_required)
+                        `uvm_fatal("TL_BRIDGE_CFG",
+                            "SVT_TL_FORWARD requires EP bridge adapter")
+                    ep_adapter = pcie_tl_if_adapter::type_id::create(
+                        "ep_adapter", this);
+                end
+            end
 
         // 3b. Create link delay models
         rc2ep_delay = pcie_tl_link_delay_model::type_id::create("rc2ep_delay", this);
@@ -234,8 +246,15 @@ class pcie_tl_env extends uvm_env;
                     this, $sformatf("ep_agent_%0d", i), "is_active", cfg.ep_is_active);
                 ep_agents[i]   = pcie_tl_ep_agent::type_id::create(
                     $sformatf("ep_agent_%0d", i), this);
-                ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
-                    $sformatf("ep_adapter_%0d", i), this);
+                if (!uvm_config_db#(pcie_tl_if_adapter)::get(
+                      this, "", $sformatf("pcie_svt_bridge_ep_adapter_%0d", i),
+                      ep_adapters[i])) begin
+                    if (bridge_required)
+                        `uvm_fatal("TL_BRIDGE_CFG", $sformatf(
+                            "SVT_TL_FORWARD requires EP bridge adapter index=%0d", i))
+                    ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
+                        $sformatf("ep_adapter_%0d", i), this);
+                end
             end
             ep_agent   = ep_agents[0];
             ep_adapter = ep_adapters[0];
@@ -271,8 +290,15 @@ class pcie_tl_env extends uvm_env;
                     this, $sformatf("ep_agent_%0d", i), "is_active", cfg.ep_is_active);
                 ep_agents[i]  = pcie_tl_ep_agent::type_id::create(
                     $sformatf("ep_agent_%0d", i), this);
-                ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
-                    $sformatf("ep_adapter_%0d", i), this);
+                if (!uvm_config_db#(pcie_tl_if_adapter)::get(
+                      this, "", $sformatf("pcie_svt_bridge_ep_adapter_%0d", i),
+                      ep_adapters[i])) begin
+                    if (bridge_required)
+                        `uvm_fatal("TL_BRIDGE_CFG", $sformatf(
+                            "SVT_TL_FORWARD requires DSP bridge adapter index=%0d", i))
+                    ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
+                        $sformatf("ep_adapter_%0d", i), this);
+                end
             end
         end
 
