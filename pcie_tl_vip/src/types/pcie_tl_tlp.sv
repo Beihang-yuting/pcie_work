@@ -761,4 +761,15 @@ class pcie_rb_registry;
             total.delete(k);
         end
     endfunction
+
+    // 外部 SVT bridge 由 RC driver 处理 Completion，不经过 note()；完成后
+    // 仍需删除注册表项，避免旧 tag 被后续迟到 Completion 误命中。
+    static function void complete(pcie_tl_cpl_tlp cpl);
+        bit [25:0] k;
+        if (cpl == null) return;
+        k = mk_key(cpl.requester_id, cpl.tag);
+        reqs.delete(k);
+        recv.delete(k);
+        total.delete(k);
+    endfunction
 endclass

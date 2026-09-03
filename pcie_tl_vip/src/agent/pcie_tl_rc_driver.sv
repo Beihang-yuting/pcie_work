@@ -299,6 +299,7 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
 
         // Fold payload/status back onto the request object for seq read-back.
         rb_note_completion(cpl);
+        pcie_rb_registry::complete(cpl);
 
         // TLP_CPL intentionally has no data (for example, successful Config
         // and IO writes) and is terminal. Keep byte accumulation only for
