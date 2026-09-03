@@ -175,8 +175,14 @@ class pcie_tl_env extends uvm_env;
             cfg_mgrs[r] = pcie_tl_cfg_space_manager::type_id::create($sformatf("cfg_mgr_%0d", r));
         end
         rc_adapters = new[nu];
-        for (int r = 0; r < nu; r++)
-            rc_adapters[r] = pcie_tl_if_adapter::type_id::create($sformatf("rc_adapter_%0d", r), this);
+        for (int r = 0; r < nu; r++) begin
+            // 可选 SVT bridge 在 TL env 建树前注入，确保 Agent 持有同一适配器。
+            if (!uvm_config_db#(pcie_tl_if_adapter)::get(
+                  this, "", $sformatf("pcie_svt_bridge_adapter_%0d", r),
+                  rc_adapters[r]))
+                rc_adapters[r] = pcie_tl_if_adapter::type_id::create(
+                    $sformatf("rc_adapter_%0d", r), this);
+        end
         // Aliases -> [0] (managers always exist; rc_adapter only when a root exists)
         tag_mgr    = tag_mgrs[0];
         fc_mgr     = fc_mgrs[0];

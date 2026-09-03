@@ -87,8 +87,7 @@ class pcie_unified_env extends uvm_env;
 
     // Exactly one protocol child is created.  Publish only backend-neutral
     // objects here; the TL child performs its native config translation.
-    if ((global_cfg.backend == PCIE_BACKEND_TL_ONLY) ||
-        (global_cfg.backend == PCIE_BACKEND_SVT_TL_FORWARD)) begin
+    if (global_cfg.backend == PCIE_BACKEND_TL_ONLY) begin
       uvm_config_db#(pcie_topology_cfg)::set(
         this, "tl_env", "topology_cfg", global_cfg.topology);
       uvm_config_db#(pcie_global_cfg)::set(
@@ -98,7 +97,8 @@ class pcie_unified_env extends uvm_env;
       if (tl_env == null)
         `uvm_fatal("UNIFIED_BACKEND",
           "TL backend selected but pcie_tl_custom_env is not registered")
-    end else if (global_cfg.backend == PCIE_BACKEND_SVT_REAL_DUT) begin
+    end else if ((global_cfg.backend == PCIE_BACKEND_SVT_REAL_DUT) ||
+                 (global_cfg.backend == PCIE_BACKEND_SVT_TL_FORWARD)) begin
       pcie_svt_topology_policy_cfg svt_policy;
 
       // Translate only management policy here.  The topology graph itself is
@@ -230,10 +230,34 @@ class pcie_unified_env extends uvm_env;
         this, "svt_env", "topology_cfg", global_cfg.topology);
       uvm_config_db#(pcie_svt_topology_policy_cfg)::set(
         this, "svt_env", "policy_cfg", svt_policy);
+      begin
+        svt_pcie_tlp_mapper mapper_handle;
+        mapper_handle = null;
+        if (uvm_config_db#(svt_pcie_tlp_mapper)::get(
+              this, "", "pcie_svt_mapper", mapper_handle) &&
+            (mapper_handle != null))
+          uvm_config_db#(svt_pcie_tlp_mapper)::set(
+            this, "svt_env", "pcie_svt_mapper", mapper_handle);
+      end
       uvm_config_db#(bit)::set(
         this, "svt_env", "pcie_svt_bridge_enable",
-        global_cfg.svt_bridge_enable);
+        global_cfg.svt_bridge_enable ||
+        (global_cfg.backend == PCIE_BACKEND_SVT_TL_FORWARD));
       svt_env = pcie_svt_topology_env::type_id::create("svt_env", this);
+
+      if (global_cfg.backend == PCIE_BACKEND_SVT_TL_FORWARD) begin
+        // Forward mode保留TL child作为唯一控制面，并复用 SVT child 已发布的
+        // per-link bridge adapter；TL-only 不创建该额外子环境。
+        uvm_config_db#(pcie_topology_cfg)::set(
+          this, "tl_env", "topology_cfg", global_cfg.topology);
+        uvm_config_db#(pcie_global_cfg)::set(
+          this, "tl_env", "global_cfg", global_cfg);
+        tl_env = uvm_factory::get().create_component_by_name(
+          "pcie_tl_custom_env", get_full_name(), "tl_env", this);
+        if (tl_env == null)
+          `uvm_fatal("UNIFIED_BACKEND",
+            "SVT_TL_FORWARD selected but TL child is unavailable")
+      end
     end
   endfunction
 endclass

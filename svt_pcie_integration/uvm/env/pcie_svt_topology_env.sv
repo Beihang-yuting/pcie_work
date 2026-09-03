@@ -230,6 +230,7 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         // config-DB object while link and hierarchy remain topology-owned.
         route = bridge_route_info;
         route.link_id = descriptors[i].slot_index;
+        route.link_name = descriptors[i].link_id;
         route.root_index = descriptors[i].root_hierarchy;
         if (route.application_id == 0)
           route.application_id = descriptors[i].slot_index;
@@ -249,6 +250,11 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
           bridge_mapper);
         uvm_config_db#(pcie_svt_route_info)::set(
           this, bridge_adapters[i].get_name(), "pcie_svt_route_info", route);
+        // 将同一适配器发布给并行的 TL child；TL env 在 build 前读取该键，
+        // 因而不会生成孤立的原生 TLM adapter。
+        uvm_config_db#(pcie_tl_if_adapter)::set(
+          null, {get_parent().get_full_name(), ".tl_env"},
+          $sformatf("pcie_svt_bridge_adapter_%0d", i), bridge_adapters[i]);
       end
       if (requires_bar_sizing_callback(descriptors[i])) begin
         bar_sizing_callback_by_link[descriptors[i].link_id] =

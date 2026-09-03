@@ -39,6 +39,8 @@ class pcie_svt_bridge_env_unit_test extends uvm_test;
     if (copied_policy.bridge_mode != PCIE_SVT_BRIDGE_TL_SVT)
       `uvm_fatal("SVT_BRIDGE_TEST", "bridge_mode was not copied")
 
+    bridge_route_info_check();
+
     // The exact key is part of the integration contract and must not drift.
     bridge_enable = 1'b1;
     uvm_config_db#(bit)::set(this, "", "pcie_svt_bridge_enable",
@@ -51,4 +53,14 @@ class pcie_svt_bridge_env_unit_test extends uvm_test;
 
     phase.drop_objection(this);
   endtask
+
+  function void bridge_route_info_check();
+    pcie_svt_route_info route;
+
+    route = pcie_svt_route_info_default();
+    route.link_id = 3;
+    route.link_name = "RC0_EP0";
+    if (route.link_name != "RC0_EP0")
+      `uvm_fatal("SVT_BRIDGE_TEST", "logical route link_name was lost")
+  endfunction
 endclass
