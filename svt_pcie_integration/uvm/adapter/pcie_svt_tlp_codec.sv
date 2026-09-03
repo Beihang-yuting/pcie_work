@@ -20,7 +20,7 @@ class pcie_svt_tlp_codec;
     svt_tlp.length = tlp.length; svt_tlp.requester_id = tlp.requester_id;
     svt_tlp.tag = tlp.tag;
     if (route.requester_id_valid && route.requester_id != tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", $sformatf("route requester_id mismatch (app=%0d link=%0d)", route.application_id, route.link_id)); return 0; end
-    if (route.requester_tag != 0 && route.requester_tag != tlp.tag) begin `uvm_error("PCIE_SVT_CODEC", "route requester tag mismatch"); return 0; end
+    if (route.requester_tag_valid && route.requester_tag != tlp.tag) begin `uvm_error("PCIE_SVT_CODEC", "route requester tag mismatch"); return 0; end
     case (tlp.fmt)
       FMT_3DW_NO_DATA: svt_tlp.fmt = svt_pcie_tlp::NO_DATA_3_DWORD;
       FMT_4DW_NO_DATA: svt_tlp.fmt = svt_pcie_tlp::NO_DATA_4_DWORD;
@@ -80,7 +80,7 @@ class pcie_svt_tlp_codec;
     pcie_tl_mem_tlp mem; pcie_tl_cfg_tlp cfg; pcie_tl_cpl_tlp cpl;
     if (svt_tlp == null) begin `uvm_error("PCIE_SVT_CODEC", "decode called with null SVT TLP"); tlp = null; return 0; end
     if (route.requester_id_valid && route.requester_id != svt_tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded requester_id disagrees with route"); tlp = null; return 0; end
-    if (route.requester_tag != 0 && route.requester_tag != svt_tlp.tag) begin `uvm_error("PCIE_SVT_CODEC", "decoded tag disagrees with route"); tlp = null; return 0; end
+    if (route.requester_tag_valid && route.requester_tag != svt_tlp.tag) begin `uvm_error("PCIE_SVT_CODEC", "decoded tag disagrees with route"); tlp = null; return 0; end
     if (svt_tlp.tlp_type == svt_pcie_tlp::MEM_REQ) begin
       // 配置/完成请求必须使用 3DW；内存请求可使用 3DW 或 4DW。
       mem = new("tl_mem"); tlp = mem; mem.addr = svt_tlp.address; mem.first_be = svt_tlp.first_dw_be; mem.last_be = svt_tlp.last_dw_be;

@@ -8,6 +8,7 @@ typedef struct {
   bit [31:0] root_index;
   bit        requester_id_valid;
   bit [15:0] requester_id;
+  bit        requester_tag_valid;
   bit [9:0]  requester_tag;
   bit        completer_id_valid;
   bit [15:0] completer_id;
