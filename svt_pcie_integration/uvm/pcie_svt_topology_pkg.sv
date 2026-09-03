@@ -16,6 +16,8 @@ package pcie_svt_topology_pkg;
   `include "adapter/pcie_svt_topology_adapter.sv"
   `include "adapter/pcie_svt_adapter_types.sv"
   `include "adapter/pcie_svt_tlp_codec.sv"
+  `include "adapter/pcie_svt_tlp_mapper_bridge.sv"
+  `include "adapter/pcie_svt_if_adapter.sv"
   `include "cfg/pcie_svt_cli_parser.sv"
   `include "cfg/pcie_svt_profile_factory.sv"
   `include "adapter/pcie_svt_peer_fixture_builder.sv"
