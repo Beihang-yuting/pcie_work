@@ -32,6 +32,17 @@ class pcie_svt_tlp_codec;
       TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR: begin
         if (!$cast(mem, tlp)) begin `uvm_error("PCIE_SVT_CODEC", "memory TLP cast failed"); return 0; end
         if ((tlp.kind == TLP_MEM_WR) != (tlp.fmt inside {FMT_3DW_WITH_DATA,FMT_4DW_WITH_DATA})) begin `uvm_error("PCIE_SVT_CODEC", "memory kind/format mismatch"); return 0; end
+        // 3DW header只能携带32位地址；读请求不允许携带 data。
+        if ((tlp.fmt inside {FMT_3DW_NO_DATA,FMT_3DW_WITH_DATA}) &&
+            (mem.addr[63:32] != 0)) begin
+          `uvm_error("PCIE_SVT_CODEC", "3DW memory request has address above 4GB")
+          return 0;
+        end
+        if ((tlp.kind != TLP_MEM_WR) &&
+            (tlp.fmt inside {FMT_3DW_WITH_DATA,FMT_4DW_WITH_DATA})) begin
+          `uvm_error("PCIE_SVT_CODEC", "memory read request cannot carry data")
+          return 0;
+        end
         svt_tlp.tlp_type = svt_pcie_tlp::MEM_REQ; svt_tlp.address = mem.addr; svt_tlp.ln = (tlp.kind == TLP_MEM_RD_LK);
         svt_tlp.first_dw_be = mem.first_be; svt_tlp.last_dw_be = mem.last_be;
       end

@@ -68,6 +68,20 @@ class pcie_unified_env extends uvm_env;
       return;
     end
 
+    // Forward 模式要求 TL 与 SVT 看到完全相同的活动链路集合；若只把
+    // 部分 enabled link 投给 SVT，root_hierarchy 会被重新压缩而错接。
+    if (global_cfg.backend == PCIE_BACKEND_SVT_TL_FORWARD) begin
+      foreach (global_cfg.links[i]) begin
+        if ((global_cfg.links[i] != null) && global_cfg.links[i].enabled &&
+            !global_cfg.links[i].use_svt) begin
+          `uvm_fatal("UNIFIED_BACKEND", $sformatf(
+            "SVT_TL_FORWARD requires every enabled link to use SVT: '%s'",
+            global_cfg.links[i].link_id))
+          return;
+        end
+      end
+    end
+
     // Select the policy adapter without importing the opposite protocol stack.
     case (global_cfg.backend)
       PCIE_BACKEND_TL_ONLY,
