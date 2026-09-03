@@ -28,13 +28,15 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
 
   function void connect_phase(uvm_phase phase);
     super.connect_phase(phase);
-    if ((mapper_endpoint == null) && (mapper == null))
-      `uvm_fatal("SVT_ADAPTER", "未配置 Mapper endpoint")
     if (mapper_endpoint == null) begin
-      mapper_endpoint = pcie_svt_tlp_mapper_bridge::type_id::create(
-        "mapper_bridge", this);
-      mapper_endpoint.bind_mapper(mapper);
+      `uvm_fatal("SVT_ADAPTER", "build 阶段未配置 Mapper endpoint")
     end
+
+    // mock endpoint 可能没有真实 Mapper；仍需同步 application_id，确保
+    // push_rx/get_rx 使用同一路由键并能覆盖错误 ID 诊断。
+    if (mapper == null)
+      mapper_endpoint.application_id = route.application_id;
+
     // 外部 mock endpoint 可能没有真实 Mapper；真实 Mapper 才需要建立 RX 连接。
     if (mapper != null) begin
       if (!mapper.tx_tlp_in_export.exists(route.application_id) ||

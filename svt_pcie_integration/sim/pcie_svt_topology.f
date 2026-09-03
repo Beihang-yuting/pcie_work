@@ -23,6 +23,7 @@
 +define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME
 +define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
 +define+SVT_PCIE_ENABLE_10_BIT_TAGS
++define+PCIE_SVT_AVAILABLE
 -y $PCIE_SVT_ROOT/verilog/src/vcs
 -y $PCIE_SVT_ROOT/sverilog/src/vcs
 $HOST_MEM_ROOT/src/host_mem_pkg.sv
