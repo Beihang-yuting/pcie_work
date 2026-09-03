@@ -81,8 +81,6 @@ class pcie_svt_tlp_codec;
     if (svt_tlp == null) begin `uvm_error("PCIE_SVT_CODEC", "decode called with null SVT TLP"); tlp = null; return 0; end
     if (route.requester_id != 0 && route.requester_id != svt_tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded requester_id disagrees with route"); tlp = null; return 0; end
     if (route.requester_tag != 0 && route.requester_tag != svt_tlp.tag) begin `uvm_error("PCIE_SVT_CODEC", "decoded tag disagrees with route"); tlp = null; return 0; end
-    if (route.completer_id != 0 && route.completer_id != svt_tlp.completer_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded completer_id disagrees with route"); tlp = null; return 0; end
-    if (route.completion_status != 0 && route.completion_status != svt_tlp.completion_status) begin `uvm_error("PCIE_SVT_CODEC", "decoded completion status disagrees with route"); tlp = null; return 0; end
     if (svt_tlp.tlp_type == svt_pcie_tlp::MEM_REQ) begin
       // 配置/完成请求必须使用 3DW；内存请求可使用 3DW 或 4DW。
       mem = new("tl_mem"); tlp = mem; mem.addr = svt_tlp.address; mem.first_be = svt_tlp.first_dw_be; mem.last_be = svt_tlp.last_dw_be;
@@ -107,6 +105,8 @@ class pcie_svt_tlp_codec;
       cfg.kind = (svt_tlp.tlp_type == svt_pcie_tlp::TYPE_0_CFG_REQ) ? ((svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? TLP_CFG_WR0 : TLP_CFG_RD0) : ((svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? TLP_CFG_WR1 : TLP_CFG_RD1);
       cfg.type_f = (svt_tlp.tlp_type == svt_pcie_tlp::TYPE_0_CFG_REQ) ? TLP_TYPE_CFG_RD0 : TLP_TYPE_CFG_RD1;
     end else if (svt_tlp.tlp_type == svt_pcie_tlp::CPL) begin
+      if (route.completer_id != 0 && route.completer_id != svt_tlp.completer_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded completer_id disagrees with route"); tlp = null; return 0; end
+      if (route.completion_status != 0 && route.completion_status != svt_tlp.completion_status) begin `uvm_error("PCIE_SVT_CODEC", "decoded completion status disagrees with route"); tlp = null; return 0; end
       if (!(svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_3_DWORD})) begin
         `uvm_error("PCIE_SVT_CODEC", "malformed completion format"); tlp = null; return 0;
       end
@@ -125,6 +125,9 @@ class pcie_svt_tlp_codec;
       svt_pcie_tlp::TRANSLATED: tlp.at = 2'b10;
       default: begin `uvm_error("PCIE_SVT_CODEC", "unsupported SVT AT"); tlp = null; return 0; end
     endcase
+    if (!(tlp.fmt inside {FMT_3DW_WITH_DATA, FMT_4DW_WITH_DATA}) && svt_tlp.payload.size() != 0) begin
+      `uvm_error("PCIE_SVT_CODEC", "no-data TLP contains payload"); tlp = null; return 0;
+    end
     tlp.payload = new[svt_tlp.payload.size()*4]; foreach (tlp.payload[i]) tlp.payload[i] = svt_tlp.payload[i/4][31-8*(i%4)-:8];
     return 1;
   endfunction

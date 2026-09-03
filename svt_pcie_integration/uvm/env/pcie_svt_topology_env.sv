@@ -232,8 +232,11 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         route.link_id = descriptors[i].slot_index;
         route.link_name = descriptors[i].link_id;
         route.root_index = descriptors[i].root_hierarchy;
-        if (route.application_id == 0)
+        // application_id=0 合法；仅在调用方未声明有效值时使用 slot 默认值。
+        if (!route.application_id_valid) begin
           route.application_id = descriptors[i].slot_index;
+          route.application_id_valid = 1'b1;
+        end
         bridge_adapters[i] = pcie_svt_if_adapter::type_id::create(
           port_owned_name("bridge_adapter", descriptors[i]), this);
         // Per-adapter Config DB entries may override the shared route object;
