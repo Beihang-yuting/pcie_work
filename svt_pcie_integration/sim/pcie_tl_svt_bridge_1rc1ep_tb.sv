@@ -44,9 +44,11 @@ class pcie_tl_svt_bridge_1rc1ep_test extends pcie_device_base_test;
     // 携带拓扑 link_id/root_index，避免依赖隐含数组下标。
     rc_route = pcie_svt_route_info_default();
     rc_route.application_id = 32'h0000_0000;
+    rc_route.application_id_valid = 1'b1;
     rc_route.link_name = "RC0_EP0";
     ep_route = pcie_svt_route_info_default();
     ep_route.application_id = 32'h0000_0001;
+    ep_route.application_id_valid = 1'b1;
     ep_route.link_name = "RC0_EP0";
 
     // route 对象通过 Config DB 在 build_phase 前发布；两个别名键均保留，
