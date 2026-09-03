@@ -67,6 +67,9 @@ class pcie_tl_env extends uvm_env;
     // verification consumers without changing the legacy transport path.
     uvm_analysis_port #(pcie_tl_tlp) legacy_rc_cpl_ap;
 
+    // 该状态跨越 build/connect/apply_config 三个阶段，不能声明为局部变量。
+    bit bridge_required;
+
     // Return the Nth Endpoint policy context in declaration order.  The graph
     // remains authoritative; this helper only provides a stable mapping from
     // dynamically created EP agents to their independent config image.
@@ -101,7 +104,6 @@ class pcie_tl_env extends uvm_env;
         int  n_mgr;         // manager-set count (>=1 so EP-only still has managers)
         int  tag_bit;       // physical VIP/DUT tag width selected by +TAG_BIT
         bit  ns_multi_ep;   // non-switch multi-EP (num_ep>1) -> ep_agents[] array
-        bit  bridge_required;
         super.build_phase(phase);
 
         bridge_required = 1'b0;
