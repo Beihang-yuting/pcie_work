@@ -11,9 +11,12 @@ class pcie_svt_tlp_codec;
     svt_tlp.attr_relaxed_ordering = tlp.attr[0];
     svt_tlp.attr_id_order = tlp.attr[1]; svt_tlp.attr_no_snoop = tlp.attr[2];
     svt_tlp.at = svt_pcie_tlp::UNTRANSLATED;
-    // SVT R-2020.12 exposes only UNTRANSLATED/TRANSLATED; 01 (translated
-    // request) and 10 (translated) therefore share TRANSLATED on the wire.
-    if (tlp.at inside {2'b01,2'b10}) svt_tlp.at = svt_pcie_tlp::TRANSLATED;
+    // SVT 仅暴露两种 AT；01 无法无损表示，明确拒绝避免静默丢失。
+    if (tlp.at == 2'b01) begin `uvm_error("PCIE_SVT_CODEC", "AT=01 unsupported by SVT"); svt_tlp=null; return 0; end
+    if (tlp.at == 2'b10) svt_tlp.at = svt_pcie_tlp::TRANSLATED;
+    if (tlp.inject_ecrc_err || tlp.inject_lcrc_err || tlp.inject_poisoned || tlp.violate_ordering || tlp.field_bitmask != 0) begin
+      `uvm_error("PCIE_SVT_CODEC", "TL error-injection metadata unsupported by SVT codec"); svt_tlp=null; return 0;
+    end
     svt_tlp.length = tlp.length; svt_tlp.requester_id = tlp.requester_id;
     svt_tlp.tag = tlp.tag;
     if (route.requester_id != 0 && route.requester_id != tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", $sformatf("route requester_id mismatch (app=%0d link=%0d)", route.application_id, route.link_id)); return 0; end
@@ -28,6 +31,7 @@ class pcie_svt_tlp_codec;
     case (tlp.kind)
       TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR: begin
         if (!$cast(mem, tlp)) begin `uvm_error("PCIE_SVT_CODEC", "memory TLP cast failed"); return 0; end
+        if ((tlp.kind == TLP_MEM_WR) != (tlp.fmt inside {FMT_3DW_WITH_DATA,FMT_4DW_WITH_DATA})) begin `uvm_error("PCIE_SVT_CODEC", "memory kind/format mismatch"); return 0; end
         svt_tlp.tlp_type = svt_pcie_tlp::MEM_REQ; svt_tlp.address = mem.addr; svt_tlp.ln = (tlp.kind == TLP_MEM_RD_LK);
         svt_tlp.first_dw_be = mem.first_be; svt_tlp.last_dw_be = mem.last_be;
       end
@@ -36,6 +40,7 @@ class pcie_svt_tlp_codec;
         svt_tlp.tlp_type = (tlp.kind inside {TLP_CFG_RD0,TLP_CFG_WR0}) ? svt_pcie_tlp::TYPE_0_CFG_REQ : svt_pcie_tlp::TYPE_1_CFG_REQ;
         svt_tlp.completer_id = cfg.completer_id; svt_tlp.register_number = cfg.reg_num;
         svt_tlp.first_dw_be = cfg.first_be;
+        if ((tlp.kind inside {TLP_CFG_WR0,TLP_CFG_WR1}) != (tlp.fmt == FMT_3DW_WITH_DATA)) begin `uvm_error("PCIE_SVT_CODEC", "config kind/format mismatch"); return 0; end
       end
       TLP_CPL, TLP_CPLD, TLP_CPL_LK, TLP_CPLD_LK: begin
         if (!$cast(cpl, tlp)) begin `uvm_error("PCIE_SVT_CODEC", "completion TLP cast failed"); return 0; end
