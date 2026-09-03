@@ -63,15 +63,22 @@ class pcie_svt_tlp_codec;
     if (route.completer_id != 0 && route.completer_id != svt_tlp.completer_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded completer_id disagrees with route"); tlp = null; return 0; end
     if (route.completion_status != 0 && route.completion_status != svt_tlp.completion_status) begin `uvm_error("PCIE_SVT_CODEC", "decoded completion status disagrees with route"); tlp = null; return 0; end
     if (svt_tlp.tlp_type == svt_pcie_tlp::MEM_REQ) begin
+      // 配置/完成请求必须使用 3DW；内存请求可使用 3DW 或 4DW。
       mem = new("tl_mem"); tlp = mem; mem.addr = svt_tlp.address; mem.first_be = svt_tlp.first_dw_be; mem.last_be = svt_tlp.last_dw_be;
       mem.kind = (svt_tlp.fmt inside {svt_pcie_tlp::WITH_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_4_DWORD}) ? TLP_MEM_WR : (svt_tlp.ln ? TLP_MEM_RD_LK : TLP_MEM_RD);
       mem.is_64bit = (svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_4_DWORD,svt_pcie_tlp::WITH_DATA_4_DWORD});
       mem.type_f = svt_tlp.ln ? TLP_TYPE_MEM_RD_LK : TLP_TYPE_MEM_RD;
     end else if (svt_tlp.tlp_type inside {svt_pcie_tlp::TYPE_0_CFG_REQ,svt_pcie_tlp::TYPE_1_CFG_REQ}) begin
+      if (!(svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_3_DWORD})) begin
+        `uvm_error("PCIE_SVT_CODEC", "malformed config request format"); tlp = null; return 0;
+      end
       cfg = new("tl_cfg"); tlp = cfg; cfg.completer_id = svt_tlp.completer_id; cfg.reg_num = svt_tlp.register_number; cfg.first_be = svt_tlp.first_dw_be;
       cfg.kind = (svt_tlp.tlp_type == svt_pcie_tlp::TYPE_0_CFG_REQ) ? ((svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? TLP_CFG_WR0 : TLP_CFG_RD0) : ((svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? TLP_CFG_WR1 : TLP_CFG_RD1);
       cfg.type_f = (svt_tlp.tlp_type == svt_pcie_tlp::TYPE_0_CFG_REQ) ? TLP_TYPE_CFG_RD0 : TLP_TYPE_CFG_RD1;
     end else if (svt_tlp.tlp_type == svt_pcie_tlp::CPL) begin
+      if (!(svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_3_DWORD})) begin
+        `uvm_error("PCIE_SVT_CODEC", "malformed completion format"); tlp = null; return 0;
+      end
       cpl = new("tl_cpl"); tlp = cpl; cpl.completer_id = svt_tlp.completer_id; cpl.cpl_status = svt_tlp.completion_status; cpl.bcm = svt_tlp.byte_count_modified; cpl.byte_count = svt_tlp.byte_count; cpl.lower_addr = svt_tlp.lower_address; cpl.kind = (svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? (svt_tlp.ln ? TLP_CPLD_LK : TLP_CPLD) : (svt_tlp.ln ? TLP_CPL_LK : TLP_CPL); cpl.type_f = svt_tlp.ln ? TLP_TYPE_CPL_LK : TLP_TYPE_CPL;
     end else begin `uvm_error("PCIE_SVT_CODEC", "unsupported SVT transaction type"); tlp = null; return 0; end
     tlp.tc = svt_tlp.traffic_class; tlp.th = svt_tlp.th; tlp.td = svt_tlp.td; tlp.ep_bit = svt_tlp.ep; tlp.attr = {svt_tlp.attr_no_snoop,svt_tlp.attr_id_order,svt_tlp.attr_relaxed_ordering}; tlp.length = svt_tlp.length; tlp.requester_id = svt_tlp.requester_id; tlp.tag = svt_tlp.tag;
