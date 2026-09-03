@@ -38,7 +38,12 @@ class pcie_svt_tlp_codec;
       TLP_CFG_RD0, TLP_CFG_WR0, TLP_CFG_RD1, TLP_CFG_WR1: begin
         if (!$cast(cfg, tlp)) begin `uvm_error("PCIE_SVT_CODEC", "config TLP cast failed"); return 0; end
         svt_tlp.tlp_type = (tlp.kind inside {TLP_CFG_RD0,TLP_CFG_WR0}) ? svt_pcie_tlp::TYPE_0_CFG_REQ : svt_pcie_tlp::TYPE_1_CFG_REQ;
-        svt_tlp.completer_id = cfg.completer_id; svt_tlp.register_number = cfg.reg_num;
+        // 配置请求的 BDF 在 SVT 中拆成 bus/device/function 字段。
+        svt_tlp.completer_id = cfg.completer_id;
+        svt_tlp.bus_number = cfg.completer_id[15:8];
+        svt_tlp.device_number = cfg.completer_id[7:3];
+        svt_tlp.function_number = cfg.completer_id[2:0];
+        svt_tlp.register_number = cfg.reg_num;
         svt_tlp.first_dw_be = cfg.first_be;
         if ((tlp.kind inside {TLP_CFG_WR0,TLP_CFG_WR1}) != (tlp.fmt == FMT_3DW_WITH_DATA)) begin `uvm_error("PCIE_SVT_CODEC", "config kind/format mismatch"); return 0; end
       end
@@ -70,6 +75,9 @@ class pcie_svt_tlp_codec;
     if (svt_tlp.tlp_type == svt_pcie_tlp::MEM_REQ) begin
       // 配置/完成请求必须使用 3DW；内存请求可使用 3DW 或 4DW。
       mem = new("tl_mem"); tlp = mem; mem.addr = svt_tlp.address; mem.first_be = svt_tlp.first_dw_be; mem.last_be = svt_tlp.last_dw_be;
+      if ((svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_3_DWORD}) && (svt_tlp.address[63:32] != 0)) begin
+        `uvm_error("PCIE_SVT_CODEC", "3DW memory request has non-zero upper address"); tlp = null; return 0;
+      end
       mem.kind = (svt_tlp.fmt inside {svt_pcie_tlp::WITH_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_4_DWORD}) ? TLP_MEM_WR : (svt_tlp.ln ? TLP_MEM_RD_LK : TLP_MEM_RD);
       mem.is_64bit = (svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_4_DWORD,svt_pcie_tlp::WITH_DATA_4_DWORD});
       // 写请求的 type_f 必须与 kind/fmt 同步；否则 TL driver 会把回解后的
@@ -84,7 +92,7 @@ class pcie_svt_tlp_codec;
       if (!(svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_3_DWORD})) begin
         `uvm_error("PCIE_SVT_CODEC", "malformed config request format"); tlp = null; return 0;
       end
-      cfg = new("tl_cfg"); tlp = cfg; cfg.completer_id = svt_tlp.completer_id; cfg.reg_num = svt_tlp.register_number; cfg.first_be = svt_tlp.first_dw_be;
+      cfg = new("tl_cfg"); tlp = cfg; cfg.completer_id = {svt_tlp.bus_number,svt_tlp.device_number,svt_tlp.function_number}; cfg.reg_num = svt_tlp.register_number; cfg.first_be = svt_tlp.first_dw_be;
       cfg.kind = (svt_tlp.tlp_type == svt_pcie_tlp::TYPE_0_CFG_REQ) ? ((svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? TLP_CFG_WR0 : TLP_CFG_RD0) : ((svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? TLP_CFG_WR1 : TLP_CFG_RD1);
       cfg.type_f = (svt_tlp.tlp_type == svt_pcie_tlp::TYPE_0_CFG_REQ) ? TLP_TYPE_CFG_RD0 : TLP_TYPE_CFG_RD1;
     end else if (svt_tlp.tlp_type == svt_pcie_tlp::CPL) begin

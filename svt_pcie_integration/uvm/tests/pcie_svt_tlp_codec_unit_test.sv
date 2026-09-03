@@ -10,6 +10,7 @@ package pcie_svt_tlp_codec_unit_test_pkg;
       cfg = new("cfg"); cfg.kind=TLP_CFG_RD0; cfg.type_f=TLP_TYPE_CFG_RD0; cfg.fmt=FMT_3DW_NO_DATA; cfg.length=1; cfg.requester_id=16'h1234; cfg.tag=10'h155; cfg.completer_id=16'h5678; cfg.reg_num=10'h44; cfg.first_be=4'hf;
       if (!pcie_svt_tlp_codec::encode(cfg,svt,r) || !pcie_svt_tlp_codec::decode(svt,back,rb)) `uvm_fatal("CODEC","config round trip failed");
       if (back.fmt != FMT_3DW_NO_DATA || back.requester_id != cfg.requester_id || back.tag != cfg.tag) `uvm_fatal("CODEC","config fields mismatch");
+      if (svt.bus_number != cfg.completer_id[15:8] || svt.device_number != cfg.completer_id[7:3] || svt.function_number != cfg.completer_id[2:0]) `uvm_fatal("CODEC","config BDF mapping mismatch");
       mem = new("mem"); mem.kind=TLP_MEM_WR; mem.type_f=TLP_TYPE_MEM_RD; mem.fmt=FMT_3DW_WITH_DATA; mem.length=2; mem.addr=64'h1000; mem.first_be=4'hf; mem.last_be=4'hf; mem.payload=new[8]; foreach(mem.payload[i]) mem.payload[i]=i;
       if (!pcie_svt_tlp_codec::encode(mem,svt,r) || !pcie_svt_tlp_codec::decode(svt,back,rb) || back.payload.size()!=8) `uvm_fatal("CODEC","memory round trip failed");
       if (back.fmt != FMT_3DW_WITH_DATA || back.kind != TLP_MEM_WR || back.payload[7] != 7) `uvm_fatal("CODEC","memory fields mismatch");
