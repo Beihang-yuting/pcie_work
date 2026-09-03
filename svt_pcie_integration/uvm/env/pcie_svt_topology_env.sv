@@ -224,6 +224,7 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
 
       if (bridge_enable && (descriptors[i] != null)) begin
         pcie_svt_route_info route;
+        pcie_svt_route_info route_override;
 
         // Route identity defaults to the translated descriptor.  A caller may
         // override application_id/requester metadata through the stable route
@@ -232,6 +233,21 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         route.link_id = descriptors[i].slot_index;
         route.link_name = descriptors[i].link_id;
         route.root_index = descriptors[i].root_hierarchy;
+
+        // Config DB 会沿层次继承；只有 link_name 为空或精确匹配当前链路时，
+        // 才应用覆盖，避免 env 级 route 意外复制到所有多链路 adapter。
+        route_override = pcie_svt_route_info_default();
+        if (uvm_config_db#(pcie_svt_route_info)::get(
+              this, "", $sformatf("pcie_svt_route_info_%s",
+                                  descriptors[i].link_id), route_override) &&
+            ((route_override.link_name == "") ||
+             (route_override.link_name == descriptors[i].link_id))) begin
+          route = route_override;
+          route.link_id = descriptors[i].slot_index;
+          route.link_name = descriptors[i].link_id;
+          route.root_index = descriptors[i].root_hierarchy;
+        end
+
         // application_id=0 合法；仅在调用方未声明有效值时使用 slot 默认值。
         if (!route.application_id_valid) begin
           route.application_id = descriptors[i].slot_index;
@@ -239,10 +255,6 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         end
         bridge_adapters[i] = pcie_svt_if_adapter::type_id::create(
           port_owned_name("bridge_adapter", descriptors[i]), this);
-        // Per-adapter Config DB entries may override the shared route object;
-        // this is how multi-link tests assign distinct application IDs.
-        void'(uvm_config_db#(pcie_svt_route_info)::get(
-          this, bridge_adapters[i].get_name(), "pcie_svt_route_info", route));
         bridge_adapters[i].mapper = bridge_mapper;
         bridge_adapters[i].route = route;
         // 适配器的 send()/receive() 直接走 Mapper，但 mode 必须标记为
