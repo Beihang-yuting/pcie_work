@@ -46,6 +46,8 @@ $HOST_MEM_ROOT/src/host_mem_pkg.sv
 ../uvm/tests/pcie_svt_topology_base_test.sv
 ../uvm/tests/pcie_svt_cfg_init_directed_test.sv
 ../uvm/tests/pcie_svt_peer_test.sv
+// 适配器测试源码受 PCIE_SVT_AVAILABLE 宏保护；未定义时为空翻译单元。
+../uvm/tests/pcie_svt_if_adapter_unit_test.sv
 ../uvm/tests/pcie_unified_env_unit_test.sv
 ../../pcie_tl_vip/tests/pcie_tl_topology_adapter_unit_test.sv
 ../../pcie_tl_vip/tests/pcie_global_cfg_unit_test.sv

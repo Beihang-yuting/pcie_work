@@ -48,7 +48,6 @@ class pcie_svt_tlp_mapper_bridge extends uvm_component;
     if (mapper == null) begin
       tx_queue.push_back(tlp);
       return;
-      return;
     end
     // tx_tlp_in_export 是 SVT 公共的 blocking_put_imp；按 app id 选择端点。
     if (!mapper.tx_tlp_in_export.exists(application_id)) begin

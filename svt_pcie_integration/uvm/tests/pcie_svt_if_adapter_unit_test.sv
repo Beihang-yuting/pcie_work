@@ -28,7 +28,9 @@ package pcie_svt_if_adapter_unit_test_pkg;
 
     task run_phase(uvm_phase phase);
       pcie_tl_mem_tlp tx;
+
       pcie_tl_tlp rx;
+
       svt_pcie_tlp wire;
 
       phase.raise_objection(this);
