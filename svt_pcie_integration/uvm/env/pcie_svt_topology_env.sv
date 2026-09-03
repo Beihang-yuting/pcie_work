@@ -245,9 +245,10 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
           this, bridge_adapters[i].get_name(), "pcie_svt_route_info", route));
         bridge_adapters[i].mapper = bridge_mapper;
         bridge_adapters[i].route = route;
-        // send()/receive() override the parent transport; retain TLM_MODE so
-        // the inherited run_phase never starts an unrelated FC/VIF worker.
-        bridge_adapters[i].mode = TLM_MODE;
+        // 适配器的 send()/receive() 直接走 Mapper，但 mode 必须标记为
+        // SV_IF_MODE，使 TL monitor 启用 read-back registry/completion 清理。
+        // bridge 不绑定父类 vif，因此继承的 FC worker 不会被启动。
+        bridge_adapters[i].mode = SV_IF_MODE;
         uvm_config_db#(svt_pcie_tlp_mapper)::set(
           this, bridge_adapters[i].get_name(), "pcie_svt_mapper",
           bridge_mapper);
