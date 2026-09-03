@@ -13,6 +13,9 @@ class pcie_svt_tlp_mapper_bridge extends uvm_component;
 
   svt_pcie_tlp rx_queue[$];
 
+  // 无 SVT 时用于单元测试的 TX 捕获队列；真实 Mapper 路径不会读取该队列。
+  svt_pcie_tlp tx_queue[$];
+
   function new(string name = "pcie_svt_tlp_mapper_bridge", uvm_component parent = null);
     super.new(name, parent);
   endfunction
@@ -43,7 +46,8 @@ class pcie_svt_tlp_mapper_bridge extends uvm_component;
       return;
     end
     if (mapper == null) begin
-      `uvm_fatal("SVT_BRIDGE", "发送前未绑定 svt_pcie_tlp_mapper")
+      tx_queue.push_back(tlp);
+      return;
       return;
     end
     // tx_tlp_in_export 是 SVT 公共的 blocking_put_imp；按 app id 选择端点。

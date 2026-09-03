@@ -47,6 +47,11 @@ package pcie_svt_if_adapter_unit_test_pkg;
       if (!pcie_svt_tlp_codec::encode(tx, wire, adapter.route))
         `uvm_fatal("SVT_ADAPTER_TEST", "mock outbound 编码失败")
 
+      // mapper 为空时 bridge 会把 TX 交易放入测试捕获队列，验证 send 合同。
+      adapter.send(tx);
+      if (adapter.mapper_endpoint.tx_queue.size() != 1)
+        `uvm_fatal("SVT_ADAPTER_TEST", "未捕获到出站交易")
+
       adapter.mapper_endpoint.push_rx(adapter.route.application_id, wire);
       adapter.receive(rx);
       if ((rx == null) || (rx.requester_id != tx.requester_id) ||
@@ -58,4 +63,3 @@ package pcie_svt_if_adapter_unit_test_pkg;
   endclass
 endpackage
 `endif
-

@@ -6,10 +6,6 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
 
   pcie_svt_route_info route;
 
-  // R-2020.12 的 codec API 为静态函数；这里保留可选句柄用于配置检查，
-  // 实际转换统一调用 pcie_svt_tlp_codec::encode/decode。
-  pcie_svt_tlp_codec svt_codec;
-
   svt_pcie_tlp_mapper mapper;
 
   pcie_svt_tlp_mapper_bridge mapper_endpoint;
@@ -21,6 +17,13 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
 
   function void build_phase(uvm_phase phase);
     super.build_phase(phase);
+
+    // 在 build 阶段创建层次组件，避免 connect 阶段动态改变 UVM 树。
+    if ((mapper_endpoint == null) && (mapper != null)) begin
+      mapper_endpoint = pcie_svt_tlp_mapper_bridge::type_id::create(
+        "mapper_bridge", this);
+      mapper_endpoint.bind_mapper(mapper);
+    end
   endfunction
 
   function void connect_phase(uvm_phase phase);
@@ -28,12 +31,19 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
     if ((mapper_endpoint == null) && (mapper == null))
       `uvm_fatal("SVT_ADAPTER", "未配置 Mapper endpoint")
     if (mapper_endpoint == null) begin
-      mapper_endpoint = new({get_full_name(), ".mapper_bridge"});
+      mapper_endpoint = pcie_svt_tlp_mapper_bridge::type_id::create(
+        "mapper_bridge", this);
       mapper_endpoint.bind_mapper(mapper);
     end
     // 外部 mock endpoint 可能没有真实 Mapper；真实 Mapper 才需要建立 RX 连接。
-    if (mapper != null)
+    if (mapper != null) begin
+      if (!mapper.tx_tlp_in_export.exists(route.application_id) ||
+          !mapper.rx_tlp_out_port.exists(route.application_id))
+        `uvm_fatal("SVT_ADAPTER", $sformatf(
+          "application_id=%0d 未在 Mapper TX/RX 端口注册",
+          route.application_id))
       mapper_endpoint.bind_application(route.application_id);
+    end
   endfunction
 
   virtual task send(pcie_tl_tlp tlp);
