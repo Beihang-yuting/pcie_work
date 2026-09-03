@@ -173,6 +173,43 @@ endclass
 
 现有测试无需迁移：它们仍可直接创建 `pcie_tl_env`，并使用原生 `pcie_tl_env_config`/`pcie_tl_switch_config`。
 
+### 3.6 TL/SVT Serial bridge（新的集成入口）
+
+需要让 TL VIP 继续负责配置、枚举和事务层策略，同时把 Serial/协议链路交给
+Synopsys SVT 时，使用仓库提供的专用入口：
+`svt_pcie_integration/sim/pcie_tl_svt_bridge_1rc1ep.f`。该 filelist 按依赖顺序
+编译 TL package、SVT adapter/codec、`pcie_svt_topology_pkg`，最后加入 HDL
+Serial 接口和 `pcie_tl_svt_bridge_1rc1ep_tb.sv`。最小 1-RC + 1-EP 示例中的
+关键配置如下（中文注释刻意保留，便于复制到项目 test）：
+
+```systemverilog
+// TL 仍是唯一控制面；SVT 仅承载 Mapper 之后的协议/Serial 数据面。
+global_cfg.backend         = PCIE_BACKEND_SVT_TL_FORWARD;
+global_cfg.svt_bridge_enable = 1'b1;
+
+// Mapper 是 SVT R-2020.12 的公开 TLM 边界，不要连接私有 Serial 信号。
+svt_pcie_tlp_mapper mapper = svt_pcie_tlp_mapper::type_id::create("mapper", this);
+uvm_config_db#(svt_pcie_tlp_mapper)::set(this, "env", "pcie_svt_mapper", mapper);
+```
+
+适配器公开的事务合同仍是 `pcie_tl_if_adapter::send/receive`；每条活动链路通过
+`pcie_svt_route_info.application_id` 绑定 Mapper 的 TX/RX 端口（示例保留 `0`
+给 RC、`1` 给 EP）。从该入口启动 VCS 时，需在登录 shell 中提供
+`PCIE_SVT_ROOT`、`DESIGNWARE_HOME` 和 `HOST_MEM_ROOT`，完整命令及 placeholder
+DUT 说明见 `svt_pcie_integration/sim/README.md` §1RC + 1EP。
+
+#### 兼容性边界
+
+| 保证继续有效 | 不属于本阶段保证 |
+|--------------|------------------|
+| `pcie_tl_env`、`pcie_tl_custom_env`、TL package 和现有 TL sequence API | 真实 DUT 的 LTSSM/link-up、速率协商和电气时序 |
+| `pcie_tl_vip/sim/filelist.f` 及原生 `pcie_svt_topology.f` 内容与入口 | PIPE transport、Switch bridge 及多链路运行时行为 |
+| `svt_pcie_integration/rtl` 下 legacy SVT wrapper、HDL agent 宏和 Serial 接口文件 | 直接调用 SVT 私有 Mapper/Serial 成员 |
+
+旧 TL-only 或 legacy SVT 测试不需要增加 bridge define，也不会因为该入口而自动
+加载 SVT adapter。桥接 filelist 是隔离的新增入口；若未提供公开 Mapper/VIF，环境
+会在 build/connect 阶段报告 fatal，而不是延迟到运行期静默丢包。
+
 ---
 
 ## 4. 出激励 / 取句柄
