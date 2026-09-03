@@ -72,7 +72,14 @@ class pcie_svt_tlp_codec;
       mem = new("tl_mem"); tlp = mem; mem.addr = svt_tlp.address; mem.first_be = svt_tlp.first_dw_be; mem.last_be = svt_tlp.last_dw_be;
       mem.kind = (svt_tlp.fmt inside {svt_pcie_tlp::WITH_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_4_DWORD}) ? TLP_MEM_WR : (svt_tlp.ln ? TLP_MEM_RD_LK : TLP_MEM_RD);
       mem.is_64bit = (svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_4_DWORD,svt_pcie_tlp::WITH_DATA_4_DWORD});
-      mem.type_f = svt_tlp.ln ? TLP_TYPE_MEM_RD_LK : TLP_TYPE_MEM_RD;
+      // 写请求的 type_f 必须与 kind/fmt 同步；否则 TL driver 会把回解后的
+      // Memory Write 误判成 Read，导致桥接后的请求方向丢失。
+      if (svt_tlp.fmt inside {
+            svt_pcie_tlp::WITH_DATA_3_DWORD,
+            svt_pcie_tlp::WITH_DATA_4_DWORD})
+        mem.type_f = TLP_TYPE_MEM_WR;
+      else
+        mem.type_f = svt_tlp.ln ? TLP_TYPE_MEM_RD_LK : TLP_TYPE_MEM_RD;
     end else if (svt_tlp.tlp_type inside {svt_pcie_tlp::TYPE_0_CFG_REQ,svt_pcie_tlp::TYPE_1_CFG_REQ}) begin
       if (!(svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_3_DWORD})) begin
         `uvm_error("PCIE_SVT_CODEC", "malformed config request format"); tlp = null; return 0;
