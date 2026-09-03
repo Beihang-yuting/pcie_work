@@ -31,7 +31,9 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
       mapper_endpoint = new({get_full_name(), ".mapper_bridge"});
       mapper_endpoint.bind_mapper(mapper);
     end
-    mapper_endpoint.bind_application(route.application_id);
+    // 外部 mock endpoint 可能没有真实 Mapper；真实 Mapper 才需要建立 RX 连接。
+    if (mapper != null)
+      mapper_endpoint.bind_application(route.application_id);
   endfunction
 
   virtual task send(pcie_tl_tlp tlp);
