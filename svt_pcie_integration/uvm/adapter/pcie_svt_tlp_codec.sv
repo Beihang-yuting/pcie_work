@@ -11,8 +11,9 @@ class pcie_svt_tlp_codec;
     svt_tlp.attr_relaxed_ordering = tlp.attr[0];
     svt_tlp.attr_id_order = tlp.attr[1]; svt_tlp.attr_no_snoop = tlp.attr[2];
     svt_tlp.at = svt_pcie_tlp::UNTRANSLATED;
-    if (tlp.at == 2'b01) svt_tlp.at = svt_pcie_tlp::TRANSLATED;
-    else if (tlp.at == 2'b10) svt_tlp.at = svt_pcie_tlp::TRANSLATED;
+    // SVT R-2020.12 exposes only UNTRANSLATED/TRANSLATED; 01 (translated
+    // request) and 10 (translated) therefore share TRANSLATED on the wire.
+    if (tlp.at inside {2'b01,2'b10}) svt_tlp.at = svt_pcie_tlp::TRANSLATED;
     svt_tlp.length = tlp.length; svt_tlp.requester_id = tlp.requester_id;
     svt_tlp.tag = tlp.tag;
     if (route.requester_id != 0 && route.requester_id != tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", $sformatf("route requester_id mismatch (app=%0d link=%0d)", route.application_id, route.link_id)); return 0; end
@@ -38,6 +39,8 @@ class pcie_svt_tlp_codec;
       end
       TLP_CPL, TLP_CPLD, TLP_CPL_LK, TLP_CPLD_LK: begin
         if (!$cast(cpl, tlp)) begin `uvm_error("PCIE_SVT_CODEC", "completion TLP cast failed"); return 0; end
+        if (route.completer_id != 0 && route.completer_id != cpl.completer_id) begin `uvm_error("PCIE_SVT_CODEC", "route completer_id mismatch"); return 0; end
+        if (route.completion_status != 0 && route.completion_status != cpl.cpl_status) begin `uvm_error("PCIE_SVT_CODEC", "route completion status mismatch"); return 0; end
         svt_tlp.tlp_type = svt_pcie_tlp::CPL; svt_tlp.completer_id = cpl.completer_id; svt_tlp.ln = (tlp.kind inside {TLP_CPL_LK,TLP_CPLD_LK});
         svt_tlp.completion_status = cpl.cpl_status; svt_tlp.byte_count_modified = cpl.bcm;
         svt_tlp.byte_count = cpl.byte_count; svt_tlp.lower_address = cpl.lower_addr;
@@ -57,11 +60,13 @@ class pcie_svt_tlp_codec;
     if (svt_tlp == null) begin `uvm_error("PCIE_SVT_CODEC", "decode called with null SVT TLP"); tlp = null; return 0; end
     if (route.requester_id != 0 && route.requester_id != svt_tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded requester_id disagrees with route"); tlp = null; return 0; end
     if (route.requester_tag != 0 && route.requester_tag != svt_tlp.tag) begin `uvm_error("PCIE_SVT_CODEC", "decoded tag disagrees with route"); tlp = null; return 0; end
+    if (route.completer_id != 0 && route.completer_id != svt_tlp.completer_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded completer_id disagrees with route"); tlp = null; return 0; end
+    if (route.completion_status != 0 && route.completion_status != svt_tlp.completion_status) begin `uvm_error("PCIE_SVT_CODEC", "decoded completion status disagrees with route"); tlp = null; return 0; end
     if (svt_tlp.tlp_type == svt_pcie_tlp::MEM_REQ) begin
       mem = new("tl_mem"); tlp = mem; mem.addr = svt_tlp.address; mem.first_be = svt_tlp.first_dw_be; mem.last_be = svt_tlp.last_dw_be;
       mem.kind = (svt_tlp.fmt inside {svt_pcie_tlp::WITH_DATA_3_DWORD,svt_pcie_tlp::WITH_DATA_4_DWORD}) ? TLP_MEM_WR : (svt_tlp.ln ? TLP_MEM_RD_LK : TLP_MEM_RD);
       mem.is_64bit = (svt_tlp.fmt inside {svt_pcie_tlp::NO_DATA_4_DWORD,svt_pcie_tlp::WITH_DATA_4_DWORD});
-      mem.type_f = TLP_TYPE_MEM_RD;
+      mem.type_f = svt_tlp.ln ? TLP_TYPE_MEM_RD_LK : TLP_TYPE_MEM_RD;
     end else if (svt_tlp.tlp_type inside {svt_pcie_tlp::TYPE_0_CFG_REQ,svt_pcie_tlp::TYPE_1_CFG_REQ}) begin
       cfg = new("tl_cfg"); tlp = cfg; cfg.completer_id = svt_tlp.completer_id; cfg.reg_num = svt_tlp.register_number; cfg.first_be = svt_tlp.first_dw_be;
       cfg.kind = (svt_tlp.tlp_type == svt_pcie_tlp::TYPE_0_CFG_REQ) ? ((svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? TLP_CFG_WR0 : TLP_CFG_RD0) : ((svt_tlp.fmt == svt_pcie_tlp::WITH_DATA_3_DWORD) ? TLP_CFG_WR1 : TLP_CFG_RD1);

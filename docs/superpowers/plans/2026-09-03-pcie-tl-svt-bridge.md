@@ -18,6 +18,7 @@
 - Dynamic UVM arrays are bounded by the existing `PCIE_SVT_ENV_MAX_NUM_LINKS` HDL slot macro.
 - Missing bridge handles are fatal during build/connect; unsupported TLP fields are reported explicitly.
 - First verification target is compile/elaboration for one RC and one EP over Serial; switch and PIPE are follow-up work.
+- All newly added or modified code must use detailed Chinese comments for responsibilities, field mappings, and error paths, with blank lines separating declarations and logical blocks.
 
 ### Task 1: Define bridge route metadata and codec API
 
@@ -110,4 +111,3 @@
 - [ ] **Step 3: Re-run VCS compile/elaboration for TL-only and bridge examples on the VCS host.**
 - [ ] **Step 4: Confirm no public legacy class or file was removed, and document the new integration entry point.**
 - [ ] **Step 5: Commit `docs: document TL SVT bridge integration and compatibility`.**
-
