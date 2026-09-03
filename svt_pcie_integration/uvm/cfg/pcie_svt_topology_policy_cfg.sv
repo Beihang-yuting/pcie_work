@@ -11,6 +11,8 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
   // --------------------------------------------------------------------------
   pcie_svt_transport_e transport;
   pcie_svt_endpoint_model_e default_endpoint_model;
+  // 明确控制是否创建 TL/SVT Mapper 适配器；兼容默认值为 TL-only。
+  pcie_svt_bridge_mode_e bridge_mode;
   bit default_fast_link_training;
   time cfg_timeout;
   time link_timeout;
@@ -52,6 +54,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     hdl_slot_by_link.delete();
     transport = PCIE_SVT_TRANSPORT_SERIAL;
     default_endpoint_model = PCIE_SVT_EP_SINGLE;
+    bridge_mode = PCIE_SVT_BRIDGE_TL_ONLY;
     vif_prefix = "primary_vif_";
     reset_vif_key = "primary_reset_vif";
     default_fast_link_training = 1'b0;
@@ -110,6 +113,7 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
     reset_vif_key = source.reset_vif_key;
     transport = source.transport;
     default_endpoint_model = source.default_endpoint_model;
+    bridge_mode = source.bridge_mode;
     default_fast_link_training = source.default_fast_link_training;
     cfg_timeout = source.cfg_timeout;
     link_timeout = source.link_timeout;
@@ -203,6 +207,9 @@ class pcie_svt_topology_policy_cfg extends uvm_object;
 
     if (transport != PCIE_SVT_TRANSPORT_SERIAL)
       errors.push_back("PIPE transport is not implemented");
+    if (!((bridge_mode == PCIE_SVT_BRIDGE_TL_ONLY) ||
+          (bridge_mode == PCIE_SVT_BRIDGE_TL_SVT)))
+      errors.push_back("bridge_mode must be TL-only or TL/SVT");
     if (!((default_endpoint_model == PCIE_SVT_EP_SINGLE) ||
           (default_endpoint_model == PCIE_SVT_EP_MULTI_BDF))) begin
       errors.push_back("default Endpoint model must be Single or Multiple-BDF");

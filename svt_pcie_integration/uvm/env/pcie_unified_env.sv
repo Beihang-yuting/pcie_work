@@ -40,6 +40,7 @@ class pcie_unified_env extends uvm_env;
 
   virtual function void build_phase(uvm_phase phase);
     string errors[$];
+    bit bridge_override;
 
     super.build_phase(phase);
 
@@ -50,6 +51,13 @@ class pcie_unified_env extends uvm_env;
       `uvm_fatal("UNIFIED_CFG", "non-null global_cfg is required")
       return;
     end
+
+    // 允许在 env/test 作用域通过稳定 Config DB 键覆盖，同时保留普通调用
+    // 者直接设置 backend-neutral 字段的路径。
+    bridge_override = 1'b0;
+    if (uvm_config_db#(bit)::get(
+          this, "", "pcie_svt_bridge_enable", bridge_override))
+      global_cfg.svt_bridge_enable = bridge_override;
 
     // Validate before creating protocol children so failures are reported as
     // configuration errors instead of partial component-tree failures.
@@ -99,6 +107,9 @@ class pcie_unified_env extends uvm_env;
       svt_policy = pcie_svt_topology_policy_cfg::type_id::create(
         "svt_policy");
       svt_policy.init_defaults();
+      // 全局策略只携带后端无关的 bit；进入 SVT 包边界后再转换为专用枚举。
+      if (global_cfg.svt_bridge_enable)
+        svt_policy.bridge_mode = PCIE_SVT_BRIDGE_TL_SVT;
 
       // Preserve every device/function image.  The SVT topology adapter maps
       // these records to physical Endpoint descriptors by node/link ownership.
@@ -219,6 +230,9 @@ class pcie_unified_env extends uvm_env;
         this, "svt_env", "topology_cfg", global_cfg.topology);
       uvm_config_db#(pcie_svt_topology_policy_cfg)::set(
         this, "svt_env", "policy_cfg", svt_policy);
+      uvm_config_db#(bit)::set(
+        this, "svt_env", "pcie_svt_bridge_enable",
+        global_cfg.svt_bridge_enable);
       svt_env = pcie_svt_topology_env::type_id::create("svt_env", this);
     end
   endfunction

@@ -27,6 +27,27 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
   pcie_svt_topology_adapter adapter;
   string errors[$];
 
+  // --------------------------------------------------------------------------
+  // Optional TL/SVT Mapper bridge.
+  // --------------------------------------------------------------------------
+  // These handles are intentionally kept separate from the native SVT agent
+  // arrays.  TL-only and legacy native tests therefore retain the same aliases
+  // and component hierarchy when the bridge is disabled.
+  bit bridge_enable;
+  svt_pcie_tlp_mapper bridge_mapper;
+  pcie_svt_route_info bridge_route_info;
+  pcie_svt_if_adapter bridge_adapters[];
+
+  function int unsigned bridge_adapter_count();
+    int unsigned count;
+
+    count = 0;
+    foreach (bridge_adapters[i])
+      if (bridge_adapters[i] != null)
+        count++;
+    return count;
+  endfunction
+
   function new(string name = "pcie_svt_topology_env",
                uvm_component parent = null);
     super.new(name, parent);
@@ -86,6 +107,7 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
 
   virtual function void build_phase(uvm_phase phase);
     pcie_svt_device_cfg_builder cfg_builder;
+    bit configured_bridge_enable;
 
     // Deliberately do not call super: the official example always creates one
     // fixed Root and one fixed Endpoint agent.
@@ -99,6 +121,28 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
           this, "", "policy_cfg", policy_cfg) ||
         (policy_cfg == null)) begin
       `uvm_fatal("SVT_ENV_CFG", "non-null policy_cfg is required")
+      return;
+    end
+
+    // Config DB is the stable integration contract.  A policy value remains
+    // the fallback so existing direct SVT tests need no new setup call.
+    bridge_enable = (policy_cfg.bridge_mode == PCIE_SVT_BRIDGE_TL_SVT);
+    configured_bridge_enable = 1'b0;
+    if (uvm_config_db#(bit)::get(
+          this, "", "pcie_svt_bridge_enable", configured_bridge_enable))
+      bridge_enable = configured_bridge_enable;
+    bridge_mapper = null;
+    void'(uvm_config_db#(svt_pcie_tlp_mapper)::get(
+      this, "", "pcie_svt_mapper", bridge_mapper));
+    bridge_route_info = pcie_svt_route_info_default();
+    void'(uvm_config_db#(pcie_svt_route_info)::get(
+      this, "", "pcie_svt_route_info", bridge_route_info));
+
+    // A bridge without its public Mapper endpoint cannot make progress; fail
+    // during build rather than deferring a null dereference to run time.
+    if (bridge_enable && (bridge_mapper == null)) begin
+      `uvm_fatal("SVT_BRIDGE_CFG",
+        "pcie_svt_bridge_enable is set but pcie_svt_mapper is null")
       return;
     end
 
@@ -118,10 +162,23 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         descriptors.size(), `PCIE_SVT_ENV_MAX_NUM_LINKS))
       return;
     end
+    foreach (descriptors[i]) begin
+      if ((descriptors[i] == null) ||
+          (descriptors[i].slot_index >= `PCIE_SVT_ENV_MAX_HDL_AGENTS)) begin
+        `uvm_fatal("SVT_ENV_LIMIT", $sformatf(
+          "descriptor slot=%0d exceeds PCIE_SVT_ENV_MAX_HDL_AGENTS=%0d",
+          (descriptors[i] == null) ? 0 : descriptors[i].slot_index,
+          `PCIE_SVT_ENV_MAX_HDL_AGENTS))
+        return;
+      end
+    end
 
     port_cfg = new[descriptors.size()];
     port_status = new[descriptors.size()];
     port_agent = new[descriptors.size()];
+    bridge_adapters = new[0];
+    if (bridge_enable)
+      bridge_adapters = new[descriptors.size()];
     vseqr = pcie_svt_topology_virtual_sequencer::type_id::create(
       "vseqr", this);
     sys_virt_seqr =
@@ -164,6 +221,35 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         this, child_name, "shared_status", port_status[i]);
       port_agent[i] = svt_pcie_device_agent::type_id::create(
         child_name, this);
+
+      if (bridge_enable && (descriptors[i] != null)) begin
+        pcie_svt_route_info route;
+
+        // Route identity defaults to the translated descriptor.  A caller may
+        // override application_id/requester metadata through the stable route
+        // config-DB object while link and hierarchy remain topology-owned.
+        route = bridge_route_info;
+        route.link_id = descriptors[i].slot_index;
+        route.root_index = descriptors[i].root_hierarchy;
+        if (route.application_id == 0)
+          route.application_id = descriptors[i].slot_index;
+        bridge_adapters[i] = pcie_svt_if_adapter::type_id::create(
+          port_owned_name("bridge_adapter", descriptors[i]), this);
+        // Per-adapter Config DB entries may override the shared route object;
+        // this is how multi-link tests assign distinct application IDs.
+        void'(uvm_config_db#(pcie_svt_route_info)::get(
+          this, bridge_adapters[i].get_name(), "pcie_svt_route_info", route));
+        bridge_adapters[i].mapper = bridge_mapper;
+        bridge_adapters[i].route = route;
+        // send()/receive() override the parent transport; retain TLM_MODE so
+        // the inherited run_phase never starts an unrelated FC/VIF worker.
+        bridge_adapters[i].mode = TLM_MODE;
+        uvm_config_db#(svt_pcie_tlp_mapper)::set(
+          this, bridge_adapters[i].get_name(), "pcie_svt_mapper",
+          bridge_mapper);
+        uvm_config_db#(pcie_svt_route_info)::set(
+          this, bridge_adapters[i].get_name(), "pcie_svt_route_info", route);
+      end
       if (requires_bar_sizing_callback(descriptors[i])) begin
         bar_sizing_callback_by_link[descriptors[i].link_id] =
           pcie_svt_topology_ep_bar_sizing_callback::type_id::create(

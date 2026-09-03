@@ -18,6 +18,10 @@ class pcie_global_cfg extends uvm_object;
   // Backend selection controls which child environment is constructed.
   pcie_backend_e backend = PCIE_BACKEND_TL_ONLY;
 
+  // 后端无关的 SVT Mapper 桥接显式开关。将其放在公共配置中可让
+  // TL-only 编译路径保持不依赖 SVT 枚举/类，同时保留默认关闭行为。
+  bit svt_bridge_enable = 1'b0;
+
   // Runtime link count is bounded by compile-time project macros.
   int unsigned runtime_num_links;
 
@@ -266,6 +270,7 @@ class pcie_global_cfg extends uvm_object;
     // link/device records are deep-copied for independent scenario overrides.
     topology = source.topology;
     backend = source.backend;
+    svt_bridge_enable = source.svt_bridge_enable;
     runtime_num_links = source.runtime_num_links;
 
     links.delete();

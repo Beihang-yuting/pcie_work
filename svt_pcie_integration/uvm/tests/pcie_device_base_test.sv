@@ -46,6 +46,18 @@ class pcie_device_base_test extends uvm_test;
     global_cfg.build_default_for_topology(build_topology());
   endfunction
 
+  // 通过 +PCIE_SVT_BRIDGE_ENABLE=1 提供不改测试源码的桥接开关；
+  // 显式 config_db 设置仍可在更高层覆盖该默认值。
+  virtual function bit bridge_enabled_from_plusarg();
+    int unsigned enable;
+
+    enable = 0;
+    if ($value$plusargs("PCIE_SVT_BRIDGE_ENABLE=%d", enable))
+      return (enable != 0);
+    // 没有 plusarg 时保留派生测试在 build_global_cfg() 中的显式设置。
+    return (global_cfg == null) ? 1'b0 : global_cfg.svt_bridge_enable;
+  endfunction
+
   // Native tests keep policy ownership here.  An integration extension may
   // return one when it must resolve an external authority (for example a
   // frozen DPU snapshot) inside the environment before protocol children are
@@ -63,6 +75,7 @@ class pcie_device_base_test extends uvm_test;
       // Build policy before publishing it to the child environment.
       global_cfg = pcie_global_cfg::type_id::create("global_cfg");
       build_global_cfg();
+      global_cfg.svt_bridge_enable = bridge_enabled_from_plusarg();
       global_cfg.validate(errors);
       if (errors.size() != 0) begin
         `uvm_fatal("GLOBAL_CFG", $sformatf(

@@ -8,6 +8,13 @@ typedef enum {PCIE_SVT_TRANSPORT_SERIAL, PCIE_SVT_TRANSPORT_PIPE}
   pcie_svt_transport_e;
 typedef enum {PCIE_SVT_EP_SINGLE, PCIE_SVT_EP_MULTI_BDF}
   pcie_svt_endpoint_model_e;
+
+// 桥接模式是 SVT 拓扑环境的显式策略；默认值必须保持 TL-only，
+// 这样既有只使用原生 SVT 环境的测试不会意外创建 Mapper 适配器。
+typedef enum {
+  PCIE_SVT_BRIDGE_TL_ONLY,
+  PCIE_SVT_BRIDGE_TL_SVT
+} pcie_svt_bridge_mode_e;
 typedef enum {PCIE_SVT_STAGE_NOT_RUN, PCIE_SVT_STAGE_PASS,
               PCIE_SVT_STAGE_FAIL} pcie_svt_stage_state_e;
 typedef enum {PCIE_SVT_RUN_COMPILE, PCIE_SVT_RUN_CFG,
