@@ -6,9 +6,12 @@ typedef struct {
   // 可读的拓扑逻辑 ID；numeric link_id 继续保留以兼容旧路由检查。
   string link_name;
   bit [31:0] root_index;
+  bit        requester_id_valid;
   bit [15:0] requester_id;
   bit [9:0]  requester_tag;
+  bit        completer_id_valid;
   bit [15:0] completer_id;
+  bit        completion_status_valid;
   bit [2:0]  completion_status;
 } pcie_svt_route_info;
 

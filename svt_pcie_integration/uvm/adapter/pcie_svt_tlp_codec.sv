@@ -19,7 +19,7 @@ class pcie_svt_tlp_codec;
     end
     svt_tlp.length = tlp.length; svt_tlp.requester_id = tlp.requester_id;
     svt_tlp.tag = tlp.tag;
-    if (route.requester_id != 0 && route.requester_id != tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", $sformatf("route requester_id mismatch (app=%0d link=%0d)", route.application_id, route.link_id)); return 0; end
+    if (route.requester_id_valid && route.requester_id != tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", $sformatf("route requester_id mismatch (app=%0d link=%0d)", route.application_id, route.link_id)); return 0; end
     if (route.requester_tag != 0 && route.requester_tag != tlp.tag) begin `uvm_error("PCIE_SVT_CODEC", "route requester tag mismatch"); return 0; end
     case (tlp.fmt)
       FMT_3DW_NO_DATA: svt_tlp.fmt = svt_pcie_tlp::NO_DATA_3_DWORD;
@@ -60,8 +60,8 @@ class pcie_svt_tlp_codec;
       end
       TLP_CPL, TLP_CPLD, TLP_CPL_LK, TLP_CPLD_LK: begin
         if (!$cast(cpl, tlp)) begin `uvm_error("PCIE_SVT_CODEC", "completion TLP cast failed"); return 0; end
-        if (route.completer_id != 0 && route.completer_id != cpl.completer_id) begin `uvm_error("PCIE_SVT_CODEC", "route completer_id mismatch"); return 0; end
-        if (route.completion_status != 0 && route.completion_status != cpl.cpl_status) begin `uvm_error("PCIE_SVT_CODEC", "route completion status mismatch"); return 0; end
+        if (route.completer_id_valid && route.completer_id != cpl.completer_id) begin `uvm_error("PCIE_SVT_CODEC", "route completer_id mismatch"); return 0; end
+        if (route.completion_status_valid && route.completion_status != cpl.cpl_status) begin `uvm_error("PCIE_SVT_CODEC", "route completion status mismatch"); return 0; end
         svt_tlp.tlp_type = svt_pcie_tlp::CPL; svt_tlp.completer_id = cpl.completer_id; svt_tlp.ln = (tlp.kind inside {TLP_CPL_LK,TLP_CPLD_LK});
         svt_tlp.completion_status = cpl.cpl_status; svt_tlp.byte_count_modified = cpl.bcm;
         svt_tlp.byte_count = cpl.byte_count; svt_tlp.lower_address = cpl.lower_addr;
@@ -79,7 +79,7 @@ class pcie_svt_tlp_codec;
                                        input pcie_svt_route_info route);
     pcie_tl_mem_tlp mem; pcie_tl_cfg_tlp cfg; pcie_tl_cpl_tlp cpl;
     if (svt_tlp == null) begin `uvm_error("PCIE_SVT_CODEC", "decode called with null SVT TLP"); tlp = null; return 0; end
-    if (route.requester_id != 0 && route.requester_id != svt_tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded requester_id disagrees with route"); tlp = null; return 0; end
+    if (route.requester_id_valid && route.requester_id != svt_tlp.requester_id) begin `uvm_error("PCIE_SVT_CODEC", "decoded requester_id disagrees with route"); tlp = null; return 0; end
     if (route.requester_tag != 0 && route.requester_tag != svt_tlp.tag) begin `uvm_error("PCIE_SVT_CODEC", "decoded tag disagrees with route"); tlp = null; return 0; end
     if (svt_tlp.tlp_type == svt_pcie_tlp::MEM_REQ) begin
       // 配置/完成请求必须使用 3DW；内存请求可使用 3DW 或 4DW。
@@ -112,14 +112,14 @@ class pcie_svt_tlp_codec;
     // completer/status 路由字段只对 Completion 有意义，不能让普通
     // Config/Memory 请求因为无关字段不同而被误拒绝。
     if ((svt_tlp.tlp_type == svt_pcie_tlp::CPL) &&
-        (route.completer_id != 0) &&
+        route.completer_id_valid &&
         (route.completer_id != svt_tlp.completer_id)) begin
       `uvm_error("PCIE_SVT_CODEC", "decoded completer_id disagrees with route")
       tlp = null;
       return 0;
     end
     if ((svt_tlp.tlp_type == svt_pcie_tlp::CPL) &&
-        (route.completion_status != 0) &&
+        route.completion_status_valid &&
         (route.completion_status != svt_tlp.completion_status)) begin
       `uvm_error("PCIE_SVT_CODEC", "decoded completion status disagrees with route")
       tlp = null;
