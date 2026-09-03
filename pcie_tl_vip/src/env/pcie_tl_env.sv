@@ -1022,8 +1022,11 @@ class pcie_tl_env extends uvm_env;
         end
 
         // Adapter mode (per-root RC; single + array EP adapters, all null-safe)
-        foreach (rc_adapters[r])
-            rc_adapters[r].mode = cfg.if_mode;
+        foreach (rc_adapters[r]) begin
+            // SVT forward 模式必须保持 SV_IF_MODE，monitor 才会把外部
+            // Completion 交回 RC driver；普通 TL-only 仍沿用 cfg.if_mode。
+            rc_adapters[r].mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
+        end
         if (ep_adapter != null)
             ep_adapter.mode = cfg.if_mode;
         foreach (ep_adapters[i])
