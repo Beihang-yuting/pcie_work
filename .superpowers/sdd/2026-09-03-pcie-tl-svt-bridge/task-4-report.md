@@ -7,8 +7,9 @@
   并保留 `$PCIE_SVT_ROOT`、`$DESIGNWARE_HOME`、`$HOST_MEM_ROOT` 环境变量。
 - 新增 `svt_pcie_integration/sim/pcie_tl_svt_bridge_1rc1ep_tb.sv`：建立 1RC
   x16 Serial HDL agent，选择 `PCIE_BACKEND_SVT_TL_FORWARD`，发布 Mapper 及
-  RC/EP application ID route（`0`/`1`），默认连接 electrical-idle
-  placeholder wrapper。
+  RC route（application ID `0`）；EP application ID `1` 仅作为未来真实 DUT/
+  显式 EP 扩展的别名，direct EP_X16 当前不会创建对应 active adapter。默认
+  连接 electrical-idle placeholder wrapper。
 - 更新 `svt_pcie_integration/sim/README.md`：记录精确 VCS 命令、环境前置条件和
   placeholder 只能证明 compile/elaboration 的边界。
 

@@ -73,6 +73,12 @@ endclass
 // 模块名沿用 bootstrap 中 `EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH` 的固定层次，
 // 否则 SVT loader 会找不到 global_shadow0。
 module pcie_svt_topology_top;
+  // SVT bootstrap 的 source-map include 负责导入 Unified VIP 的 UVM 类型和
+  // pciesvc_global_shadow 所需模型宏；该顺序与正式 topology top 保持一致。
+  `include "import_pcie_svt_uvm_pkgs.svi"
+  `include `SVC_SOURCE_MAP_SUITE_UTIL_V(pcie_svc,PCIE,latest,svc_util_parms)
+  `include `SVC_SOURCE_MAP_SUITE_MODEL_MODULE(pcie_svc,Include,latest,pciesvc_parms)
+
   int unsigned global_random_seed = 0;
   pciesvc_global_shadow #(.DISPLAY_NAME("global_shadow0.")) global_shadow0();
 

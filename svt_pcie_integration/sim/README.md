@@ -87,10 +87,15 @@ extension and is not enabled by the current topology policy.
 point.  It compiles the TL package first, then the SVT adapter declarations and
 `pcie_svt_topology_pkg`, followed by the existing Serial/reset interfaces,
 `pcie_svt_dut_wrapper`, and the dedicated testbench.  The test selects
-`PCIE_BACKEND_SVT_TL_FORWARD`, enables `PCIE_SVT_BRIDGE_TL_SVT`, publishes a
-`svt_pcie_tlp_mapper`, and reserves application IDs `0` (RC) and `1`
-(EP) in `pcie_svt_route_info`.  Serial VIF `primary_vif_0` is bound to the
-existing x16 HDL agent macro.  Unless `PCIE_TL_SVT_BRIDGE_USE_REAL_DUT` is
+`PCIE_BACKEND_SVT_TL_FORWARD` and sets the runtime policy field
+`global_cfg.svt_bridge_enable = 1'b1`, which the environment translates to
+`PCIE_SVT_BRIDGE_TL_SVT`.  It publishes a `svt_pcie_tlp_mapper` and reserves
+`svt_pcie_tlp_mapper`.  The direct `EP_X16` profile exposes only the RC-owned
+descriptor to this SVT environment (the EP is the DUT side), so application ID
+`0` is the active bridge route.  ID `1` is published only as an alias for a
+future real-DUT/explicit EP extension; it is not consumed by an active adapter
+in this direct example.  Serial VIF `primary_vif_0` is bound to the existing
+x16 HDL agent macro.  Unless `PCIE_TL_SVT_BRIDGE_USE_REAL_DUT` is
 defined, the wrapper drives electrical idle and therefore proves only compile
 and elaboration; it cannot prove LTSSM/link training or traffic.
 
