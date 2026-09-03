@@ -81,6 +81,40 @@ smaller than the window, and invalid function-count limits before elaboration.
 The default transport is Serial.  PIPE support remains a future transport
 extension and is not enabled by the current topology policy.
 
+## 1RC + 1EP TL/SVT bridge compile example
+
+`pcie_tl_svt_bridge_1rc1ep.f` is a minimal 1-RC/1-EP Serial bridge entry
+point.  It compiles the TL package first, then the SVT adapter declarations and
+`pcie_svt_topology_pkg`, followed by the existing Serial/reset interfaces,
+`pcie_svt_dut_wrapper`, and the dedicated testbench.  The test selects
+`PCIE_BACKEND_SVT_TL_FORWARD`, enables `PCIE_SVT_BRIDGE_TL_SVT`, publishes a
+`svt_pcie_tlp_mapper`, and reserves application IDs `0` (RC) and `1`
+(EP) in `pcie_svt_route_info`.  Serial VIF `primary_vif_0` is bound to the
+existing x16 HDL agent macro.  Unless `PCIE_TL_SVT_BRIDGE_USE_REAL_DUT` is
+defined, the wrapper drives electrical idle and therefore proves only compile
+and elaboration; it cannot prove LTSSM/link training or traffic.
+
+Run from this directory on the VCS host:
+
+```sh
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
+  -f pcie_tl_svt_bridge_1rc1ep.f \
+  -top pcie_svt_topology_top \
+  -o build/pcie_tl_svt_bridge_1rc1ep_simv \
+  -l build/pcie_tl_svt_bridge_1rc1ep_compile.log
+```
+
+The command requires a login shell with VCS and SVT R-2020.12 installed and
+the `PCIE_SVT_ROOT`, `DESIGNWARE_HOME`, and `HOST_MEM_ROOT` variables exported.
+No credentials are embedded in the filelist.  The VCS host (`10.11.10.53`) is
+reachable and exposes `vcs`, but its current login environment does not export
+`PCIE_SVT_ROOT`, `DESIGNWARE_HOME`, or `HOST_MEM_ROOT`; the required
+R-2020.12 SVT file locations therefore cannot be resolved.  The compile result
+is **not run (required SVT environment variables unavailable)**; source the
+site SVT setup that supplies those three variables, then rerun the exact
+command above for final elaboration evidence.
+
 ## DPU-common EP x16 example
 
 The optional DPU-aware example uses the companion filelist
