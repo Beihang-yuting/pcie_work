@@ -1,6 +1,7 @@
 package pcie_svt_topology_pkg;
   import uvm_pkg::*;
   import pcie_topology_pkg::*;
+  import pcie_tl_pkg::*;
   `include "import_pcie_svt_uvm_pkgs.svi"
   `include "uvm_macros.svh"
   `include "pcie_device_unified_vip_env.sv"
@@ -13,6 +14,8 @@ package pcie_svt_topology_pkg;
   `include "callbacks/pcie_svt_topology_ep_bar_sizing_callback.sv"
   `include "cfg/pcie_svt_topology_policy_cfg.sv"
   `include "adapter/pcie_svt_topology_adapter.sv"
+  `include "adapter/pcie_svt_adapter_types.sv"
+  `include "adapter/pcie_svt_tlp_codec.sv"
   `include "cfg/pcie_svt_cli_parser.sv"
   `include "cfg/pcie_svt_profile_factory.sv"
   `include "adapter/pcie_svt_peer_fixture_builder.sv"
