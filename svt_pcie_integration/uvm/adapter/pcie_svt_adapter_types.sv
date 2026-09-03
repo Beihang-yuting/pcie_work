@@ -18,7 +18,19 @@ typedef struct {
 
 function automatic pcie_svt_route_info pcie_svt_route_info_default();
   pcie_svt_route_info r;
-  r = '{default:0};
+
+  r.application_id = 0;
+  r.application_id_valid = 1'b0;
+  r.link_id = 0;
   r.link_name = "";
+  r.root_index = 0;
+  r.requester_id_valid = 1'b0;
+  r.requester_id = 0;
+  r.requester_tag_valid = 1'b0;
+  r.requester_tag = 0;
+  r.completer_id_valid = 1'b0;
+  r.completer_id = 0;
+  r.completion_status_valid = 1'b0;
+  r.completion_status = 0;
   return r;
 endfunction
