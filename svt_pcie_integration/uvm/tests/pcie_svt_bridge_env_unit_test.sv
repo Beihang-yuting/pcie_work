@@ -40,6 +40,7 @@ class pcie_svt_bridge_env_unit_test extends uvm_test;
       `uvm_fatal("SVT_BRIDGE_TEST", "bridge_mode was not copied")
 
     bridge_route_info_check();
+    descriptor_root_mapping_check();
 
     // The exact key is part of the integration contract and must not drift.
     bridge_enable = 1'b1;
@@ -62,5 +63,30 @@ class pcie_svt_bridge_env_unit_test extends uvm_test;
     route.link_name = "RC0_EP0";
     if (route.link_name != "RC0_EP0")
       `uvm_fatal("SVT_BRIDGE_TEST", "logical route link_name was lost")
+  endfunction
+
+  function void descriptor_root_mapping_check();
+    pcie_topology_cfg topology;
+    pcie_svt_topology_policy_cfg policy;
+    pcie_svt_topology_adapter topology_adapter;
+    pcie_svt_port_descriptor descriptors[$];
+    string errors[$];
+
+    // 反转物理 link 声明顺序，确认 bridge 发布应依赖 root_hierarchy，
+    // 而不是动态 descriptor 数组下标。
+    topology = pcie_topology_builder::build_ep_2x8(4);
+    topology.links.reverse();
+    policy = pcie_svt_topology_policy_cfg::type_id::create("root_policy");
+    policy.init_defaults();
+    policy.dut_node_ids.push_back("EP0");
+    policy.dut_node_ids.push_back("EP1");
+    topology_adapter = pcie_svt_topology_adapter::type_id::create(
+      "root_adapter");
+    topology_adapter.translate(topology, policy, descriptors, errors);
+    if ((errors.size() != 0) || (descriptors.size() != 2) ||
+        (descriptors[0].root_hierarchy != 0) ||
+        (descriptors[1].root_hierarchy != 1))
+      `uvm_fatal("SVT_BRIDGE_TEST",
+        "descriptor root hierarchy changed with link declaration order")
   endfunction
 endclass

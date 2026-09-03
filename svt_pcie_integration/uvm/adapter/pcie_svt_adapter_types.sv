@@ -14,5 +14,6 @@ typedef struct {
 function automatic pcie_svt_route_info pcie_svt_route_info_default();
   pcie_svt_route_info r;
   r = '{default:0};
+  r.link_name = "";
   return r;
 endfunction

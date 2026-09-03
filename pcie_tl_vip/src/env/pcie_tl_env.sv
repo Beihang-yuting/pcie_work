@@ -101,7 +101,12 @@ class pcie_tl_env extends uvm_env;
         int  n_mgr;         // manager-set count (>=1 so EP-only still has managers)
         int  tag_bit;       // physical VIP/DUT tag width selected by +TAG_BIT
         bit  ns_multi_ep;   // non-switch multi-EP (num_ep>1) -> ep_agents[] array
+        bit  bridge_required;
         super.build_phase(phase);
+
+        bridge_required = 1'b0;
+        void'(uvm_config_db#(bit)::get(
+            this, "", "pcie_svt_bridge_required", bridge_required));
 
         legacy_rc_cpl_ap = new("legacy_rc_cpl_ap", this);
 
@@ -178,10 +183,14 @@ class pcie_tl_env extends uvm_env;
         for (int r = 0; r < nu; r++) begin
             // 可选 SVT bridge 在 TL env 建树前注入，确保 Agent 持有同一适配器。
             if (!uvm_config_db#(pcie_tl_if_adapter)::get(
-                  this, "", $sformatf("pcie_svt_bridge_adapter_%0d", r),
-                  rc_adapters[r]))
+                  this, "", $sformatf("pcie_svt_bridge_rc_adapter_%0d", r),
+                  rc_adapters[r])) begin
+                if (bridge_required)
+                    `uvm_fatal("TL_BRIDGE_CFG", $sformatf(
+                        "SVT_TL_FORWARD requires RC bridge adapter root=%0d", r))
                 rc_adapters[r] = pcie_tl_if_adapter::type_id::create(
                     $sformatf("rc_adapter_%0d", r), this);
+            end
         end
         // Aliases -> [0] (managers always exist; rc_adapter only when a root exists)
         tag_mgr    = tag_mgrs[0];

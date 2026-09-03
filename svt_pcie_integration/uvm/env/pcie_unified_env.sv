@@ -252,6 +252,8 @@ class pcie_unified_env extends uvm_env;
           this, "tl_env", "topology_cfg", global_cfg.topology);
         uvm_config_db#(pcie_global_cfg)::set(
           this, "tl_env", "global_cfg", global_cfg);
+        uvm_config_db#(bit)::set(
+          this, "tl_env", "pcie_svt_bridge_required", 1'b1);
         tl_env = uvm_factory::get().create_component_by_name(
           "pcie_tl_custom_env", get_full_name(), "tl_env", this);
         if (tl_env == null)
