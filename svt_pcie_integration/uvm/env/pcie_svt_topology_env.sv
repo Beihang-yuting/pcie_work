@@ -229,10 +229,26 @@ class pcie_svt_topology_env extends pcie_device_unified_vip_env;
         // Route identity defaults to the translated descriptor.  A caller may
         // override application_id/requester metadata through the stable route
         // config-DB object while link and hierarchy remain topology-owned.
-        route = bridge_route_info;
+        route = pcie_svt_route_info_default();
         route.link_id = descriptors[i].slot_index;
         route.link_name = descriptors[i].link_id;
         route.root_index = descriptors[i].root_hierarchy;
+
+        // env 级通用 route 只有在未指定链路或名称精确匹配时才生效；
+        // 这样多链路场景不会把 RC0 的 application/tag 配置复制给其他端口。
+        if ((bridge_route_info.link_name == "") ||
+            (bridge_route_info.link_name == descriptors[i].link_id)) begin
+          route.application_id = bridge_route_info.application_id;
+          route.application_id_valid = bridge_route_info.application_id_valid;
+          route.requester_id = bridge_route_info.requester_id;
+          route.requester_id_valid = bridge_route_info.requester_id_valid;
+          route.requester_tag = bridge_route_info.requester_tag;
+          route.requester_tag_valid = bridge_route_info.requester_tag_valid;
+          route.completer_id = bridge_route_info.completer_id;
+          route.completer_id_valid = bridge_route_info.completer_id_valid;
+          route.completion_status = bridge_route_info.completion_status;
+          route.completion_status_valid = bridge_route_info.completion_status_valid;
+        end
 
         // Config DB 会沿层次继承；只有 link_name 为空或精确匹配当前链路时，
         // 才应用覆盖，避免 env 级 route 意外复制到所有多链路 adapter。
