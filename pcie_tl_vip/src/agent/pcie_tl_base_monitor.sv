@@ -18,6 +18,10 @@ class pcie_tl_base_monitor extends uvm_monitor;
     //--- Adapter reference ---
     pcie_tl_if_adapter         adapter;
 
+    // 外部 SVT bridge 模式下，Completion 会通过 analysis imp 交回 RC driver；
+    // 此时禁止 monitor 同时写全局 registry，避免 read-back payload 重复折叠。
+    bit external_completion_driver_enable = 1'b0;
+
     //--- Protocol check switches ---
     bit ordering_check_enable   = 1;
     bit fc_check_enable         = 1;
@@ -84,7 +88,8 @@ class pcie_tl_base_monitor extends uvm_monitor;
         // the requester monitor is where the returning Completion is observed.
         // Fold its payload/status onto the original request object via the global
         // registry. TLM mode folds via the env/driver path, so this is gated off.
-        if (adapter != null && adapter.mode == SV_IF_MODE &&
+        if (!external_completion_driver_enable &&
+            adapter != null && adapter.mode == SV_IF_MODE &&
             tlp.get_category() == TLP_CAT_COMPLETION) begin
             pcie_tl_cpl_tlp cpl;
             if ($cast(cpl, tlp)) pcie_rb_registry::note(cpl);

@@ -21,6 +21,9 @@ class pcie_tl_base_agent extends uvm_agent;
     //--- Adapter ---
     pcie_tl_if_adapter         adapter;
 
+    // 由环境在 SVT forward 模式下设置，传递给 monitor 的 Completion 路径。
+    bit external_completion_driver_enable = 1'b0;
+
     function new(string name = "pcie_tl_base_agent", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -57,6 +60,8 @@ class pcie_tl_base_agent extends uvm_agent;
         monitor.tag_mgr = tag_mgr;
         monitor.ord_eng = ord_eng;
         monitor.adapter = adapter;
+        monitor.external_completion_driver_enable =
+            external_completion_driver_enable;
 
         if (get_is_active() == UVM_ACTIVE) begin
             driver.fc_mgr    = fc_mgr;

@@ -392,6 +392,8 @@ class pcie_tl_env extends uvm_env;
             if (rc_agents[r].rc_driver != null)
                 rc_agents[r].monitor.tlp_ap.connect(
                     rc_agents[r].rc_driver.completion_analysis_imp);
+            if (bridge_required)
+                rc_agents[r].external_completion_driver_enable = 1'b1;
             v_seqr.rc_seqr_arr.push_back(rc_agents[r].sequencer);
         end
         if (rc_agents.size() > 0 && rc_agents[0] != null)
