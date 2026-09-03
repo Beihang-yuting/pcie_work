@@ -8,6 +8,10 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     //--- Completion timeout ---
     int  cpl_timeout_ns = 50000;  // 50us default
 
+    // SV_IF/bridge 模式下，Completion 由 monitor 从外部适配器收到；该
+    // analysis imp 将其重新交给 RC driver，复用既有 pending/tag 生命周期。
+    uvm_analysis_imp #(pcie_tl_tlp, pcie_tl_rc_driver) completion_analysis_imp;
+
     //--- Outstanding requests awaiting completion ---
     pcie_tl_tlp pending_cpl[bit [9:0]];  // tag -> request
 
@@ -37,6 +41,24 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     function new(string name = "pcie_tl_rc_driver", uvm_component parent = null);
         super.new(name, parent);
         foreach (intx_asserted[i]) intx_asserted[i] = 0;
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+
+        completion_analysis_imp = new("completion_analysis_imp", this);
+    endfunction
+
+    // monitor.tlp_ap 的统一回调；仅在 SV_IF 模式处理 Completion，避免
+    // TLM 环路中的既有 env 路径被重复消费。
+    virtual function void write(pcie_tl_tlp tlp);
+        pcie_tl_cpl_tlp cpl;
+
+        if ((adapter == null) || (adapter.mode != SV_IF_MODE) ||
+            (tlp == null) || (tlp.get_category() != TLP_CAT_COMPLETION))
+            return;
+        if ($cast(cpl, tlp))
+            void'(handle_completion(cpl));
     endfunction
 
     //=========================================================================

@@ -387,6 +387,11 @@ class pcie_tl_env extends uvm_env;
             if (scbs.size() > r && scbs[r] != null)
                 rc_agents[r].monitor.tlp_ap.connect(scbs[r].rc_imp);
             rc_agents[r].monitor.tlp_ap.connect(cov.analysis_export);
+            // 外部 SVT bridge 的 Completion 不经过 env loopback；将 monitor
+            // 观察到的 Completion 交回 RC driver，完成 pending/tag 清理。
+            if (rc_agents[r].rc_driver != null)
+                rc_agents[r].monitor.tlp_ap.connect(
+                    rc_agents[r].rc_driver.completion_analysis_imp);
             v_seqr.rc_seqr_arr.push_back(rc_agents[r].sequencer);
         end
         if (rc_agents.size() > 0 && rc_agents[0] != null)
