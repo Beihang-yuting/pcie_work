@@ -39,6 +39,7 @@ class pcie_tl_codec_regression_test extends uvm_test;
 
         check_completion_codec(0, 96'h0a880000_abcd0000_1357b724);
         check_completion_codec(1, 96'h4a880001_abcd0004_1357b724);
+        check_legal_at_default();
         check_clone_contract();
         phase.drop_objection(this);
     endtask
@@ -173,6 +174,37 @@ class pcie_tl_codec_regression_test extends uvm_test;
             {decoded_cpl.payload[0], decoded_cpl.payload[1],
              decoded_cpl.payload[2], decoded_cpl.payload[3]} !== 32'hdead_beef))
             `uvm_error("CODEC_CPLD_DECODE", "CplD payload changed during decode")
+    endfunction
+
+    // 合法普通内存 TLP 的 AT 默认必须为 00。AT 是 rand 字段，单纯在
+    // 声明处初始化为 00 并不能约束 randomize()；该回归反复随机化并
+    // 检查独立 soft 默认，防止 FULL_VIP 适配器再次收到随机 AT=01。ATS
+    // 专用 sequence 仍可用 hard inline constraint 覆盖 soft 默认为 10。
+    function void check_legal_at_default();
+        pcie_tl_mem_tlp req;
+
+        repeat (64) begin
+            req = pcie_tl_mem_tlp::type_id::create("legal_at_req");
+            if (!req.randomize() with {
+                    req.kind == TLP_MEM_RD;
+                    req.is_64bit == 1'b0;
+                    req.addr == 64'h0000_1000;
+                    req.length == 1;
+                    req.first_be == 4'hf;
+                    req.last_be == 4'h0;
+                    req.constraint_mode_sel == CONSTRAINT_LEGAL;
+                }) begin
+                `uvm_error("AT_DEFAULT", "合法内存 TLP randomize 失败")
+                return;
+            end
+            if (req.at !== 2'b00) begin
+                `uvm_error("AT_DEFAULT", $sformatf(
+                    "合法普通内存 TLP 随机得到 AT=%02b，预期 00", req.at))
+                return;
+            end
+        end
+        `uvm_info("AT_DEFAULT", "LEGAL_MEMORY_AT_DEFAULT_PASS samples=64",
+                  UVM_LOW)
     endfunction
 
     function void check_clone_contract();

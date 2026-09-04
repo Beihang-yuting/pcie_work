@@ -1,14 +1,12 @@
 //------------------------------------------------------------------------------
-// 生产 TL-root + SVT adapter 源文件列表。
-//
-// 该 filelist 只编译 TL 控制面和 SVT 编解码/Mapper 适配层，不再包含
-// 没有真实 SVT agent 的占位 test/top。真实 DUT 工程应将本列表作为源文件
-// 基础，并在自己的 filelist 中追加 DUT top、SVT HDL agent 和 test。
+// 正式 SVT agent + TL-root adapter 双向 Serial 门禁 filelist。
 //------------------------------------------------------------------------------
 
--timescale=1ns/1ps
+-sverilog
+-timescale=1ns/1fs
 
 +incdir+../rtl
++incdir+../tests
 +incdir+../uvm
 +incdir+../uvm/adapter
 +incdir+../../pcie_tl_vip/src
@@ -26,14 +24,16 @@
 +incdir+$HOST_MEM_ROOT/src
 +incdir+$PCIE_SVT_ROOT/sverilog/include
 +incdir+$PCIE_SVT_ROOT/examples/sverilog/tb_pcie_svt_uvm_unified_vip_sys/env
++incdir+$PCIE_SVT_ROOT/examples/sverilog/tb_pcie_svt_uvm_unified_vip_sys
 +incdir+$DESIGNWARE_HOME/vip/svt/common/R-2020.12/sverilog/include
 
 +define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME
 +define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
 +define+SVT_PCIE_ENABLE_10_BIT_TAGS
-+define+PCIE_SVT_AVAILABLE
-+define+PCIE_TOPO_EP_X16
-
++define+SVT_PCIE_ENABLE_MONITOR
++define+SVT_PCIE_ENABLE_GEN4
++define+EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH=pcie_tl_svt_formal_top.global_shadow0
++define+SVC_RANDOM_SEED_SCOPE=pcie_tl_svt_formal_top.global_random_seed
 +define+EXPERTIO_PCIESVC_INCLUDE_8G
 +define+EXPERTIO_PCIESVC_INCLUDE_16G
 
@@ -47,10 +47,6 @@ $HOST_MEM_ROOT/src/host_mem_manager.sv
 ../../pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
 ../../pcie_tl_vip/src/topology/pcie_topology_pkg.sv
 ../../pcie_tl_vip/src/pcie_tl_pkg.sv
-
-// 用户顶层负责在包含 svt_pcie.uvm.pkg 前定义 global shadow/seed 宏并加载
-// 官方 SVT package。这里不加载带有顶层层次假设的 bootstrap，避免 source-only
-// filelist 依赖任何项目占位 top。
-
-// SVT adapter package（仅适配层，不引入 topology env）。
+../rtl/pcie_svt_vip_bootstrap.sv
 ../uvm/adapter/pcie_svt_adapter_pkg.sv
+../rtl/pcie_tl_svt_formal_top.sv

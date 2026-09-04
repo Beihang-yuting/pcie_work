@@ -74,7 +74,20 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     // sequence started on the EP sequencer can read the data back.
     //=========================================================================
     virtual function void handle_completion(pcie_tl_cpl_tlp cpl);
+        pcie_tl_tlp request;
+
+        // EP requester 的 Completion 不经过 RC driver，因此这里同时完成
+        // read-back fold 和 tag 生命周期收尾。若是多片 Completion，则
+        // rb_note_completion 只有在最后一片到达后才会置 rb_done，此时才
+        // 释放 tag，保持与 RC driver 的行为一致。
+        if (cpl == null)
+            return;
+        if (tag_mgr != null)
+            request = tag_mgr.match_completion(cpl);
         rb_note_completion(cpl);
+        pcie_rb_registry::complete(cpl);
+        if ((request != null) && request.rb_done && (tag_mgr != null))
+            tag_mgr.free_tag(cpl.tag, cpl.requester_id[2:0]);
     endfunction
 
     virtual task handle_request(pcie_tl_tlp req);

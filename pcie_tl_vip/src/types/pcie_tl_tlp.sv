@@ -152,6 +152,32 @@ class pcie_tl_tlp extends uvm_sequence_item;
         (constraint_mode_sel == CONSTRAINT_LEGAL) -> tc == 0;
     }
 
+    // PCIe 的 AT 字段只有 00（未翻译）和 10（已翻译）是普通事务可用
+    // 的编码。01 表示 Translation Request，仅应由显式 ATS sequence
+    // 产生；11 为保留编码。此前 AT 虽然带有 00 的初始化值，但它仍是
+    // rand 字段，合法随机化时会被覆盖成四种取值之一，导致普通内存
+    // 事务偶发生成 AT=01/11。SVT FULL_VIP 只支持 00/10，这会使请求
+    // 在适配器编码阶段被拒绝。合法模式默认采用未翻译请求；使用 ATS
+    // 的 sequence 可以通过 hard inline constraint 显式覆盖这个 soft
+    // 默认并选择 AT=10。CONSTRAINT_ILLEGAL 仍保留给错误注入 sequence。
+    constraint c_legal_at {
+        // VCS W-2024.09 对“soft implication”在不同解析模式下兼容性不一。
+        // 这里使用标准的独立 soft 默认：普通合法流量得到 AT=00，而
+        // CONSTRAINT_ILLEGAL 仍未被硬性限制；ATS sequence 可用 hard inline
+        // constraint 覆盖该默认并选择 AT=10。
+        soft at == 2'b00;
+    }
+
+    // The EP bit is the PCIe Poisoned bit.  A normal legal transaction must
+    // leave it clear; error-injection sequences explicitly select
+    // CONSTRAINT_ILLEGAL and set inject_poisoned/ep_bit as needed.  Leaving
+    // this field unconstrained made ordinary read requests randomly appear as
+    // poisoned TLPs to the SVT checker, which correctly rejected no-data
+    // requests carrying EP=1.
+    constraint c_legal_ep_bit {
+        (constraint_mode_sel == CONSTRAINT_LEGAL) -> ep_bit == 1'b0;
+    }
+
     function new(string name = "pcie_tl_tlp");
         super.new(name);
         cq_route = pcie_tl_cq_route_default();

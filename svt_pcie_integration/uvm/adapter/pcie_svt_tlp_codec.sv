@@ -6,14 +6,29 @@ class pcie_svt_tlp_codec;
     pcie_tl_mem_tlp mem; pcie_tl_cfg_tlp cfg; pcie_tl_cpl_tlp cpl;
     if (tlp == null) begin `uvm_error("PCIE_SVT_CODEC", "encode called with null TL TLP"); return 0; end
     svt_tlp = new("svt_encoded_tlp");
+
+    // Mapper 依靠 TLP 内携带的 application_id 将请求与用户应用端口
+    // 建立映射。适配器虽然按 application_id 选择了 TX export，但如果
+    // 不同步填写该字段，SVT 会把请求当成内部默认应用（通常为 0），
+    // 后续 Completion 无法回路由到本项目的 TL requester。
+    svt_tlp.application_id = route.application_id;
     svt_tlp.traffic_class = tlp.tc;
     svt_tlp.th = tlp.th; svt_tlp.td = tlp.td; svt_tlp.ep = tlp.ep_bit;
     svt_tlp.attr_relaxed_ordering = tlp.attr[0];
     svt_tlp.attr_id_order = tlp.attr[1]; svt_tlp.attr_no_snoop = tlp.attr[2];
-    svt_tlp.at = svt_pcie_tlp::UNTRANSLATED;
-    // SVT 仅暴露两种 AT；01 无法无损表示，明确拒绝避免静默丢失。
-    if (tlp.at == 2'b01) begin `uvm_error("PCIE_SVT_CODEC", "AT=01 unsupported by SVT"); svt_tlp=null; return 0; end
-    if (tlp.at == 2'b10) svt_tlp.at = svt_pcie_tlp::TRANSLATED;
+    // SVT 仅暴露两种 AT；01 是 Translation Request，11 是保留编码，
+    // 二者都无法由当前 adapter 无损表示。对这两种值显式报错，避免
+    // 误把保留编码静默当作普通未翻译请求。
+    case (tlp.at)
+      2'b00: svt_tlp.at = svt_pcie_tlp::UNTRANSLATED;
+      2'b10: svt_tlp.at = svt_pcie_tlp::TRANSLATED;
+      default: begin
+        `uvm_error("PCIE_SVT_CODEC", $sformatf(
+          "AT=%02b unsupported by SVT", tlp.at))
+        svt_tlp = null;
+        return 0;
+      end
+    endcase
     if (tlp.inject_ecrc_err || tlp.inject_lcrc_err || tlp.inject_poisoned || tlp.violate_ordering || tlp.field_bitmask != 0) begin
       `uvm_error("PCIE_SVT_CODEC", "TL error-injection metadata unsupported by SVT codec"); svt_tlp=null; return 0;
     end

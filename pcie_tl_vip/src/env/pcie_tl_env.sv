@@ -67,6 +67,19 @@ class pcie_tl_env extends uvm_env;
     // verification consumers without changing the legacy transport path.
     uvm_analysis_port #(pcie_tl_tlp) legacy_rc_cpl_ap;
 
+    // FULL_VIP/Serial bridge 下，EP monitor 收到的请求不能再通过本环境
+    // 的 TLM loopback FIFO 转发。这里为每个 EP monitor 建立 analysis FIFO，
+    // run_phase 会把 FIFO 中的请求交给对应的 pcie_tl_ep_driver。
+    // 该数组只在 bridge_required=1 且 EP agent 存在时创建，TL-only 旧路径
+    // 不会额外创建组件，也不会改变原有时序。
+    uvm_tlm_analysis_fifo #(pcie_tl_tlp) bridge_ep_rx_fifos[];
+
+    // FULL_VIP/Serial bridge 下，EP 发往 RC 的请求也必须有一个独立入口。
+    // RC monitor 仍然把 Completion 交给 rc_driver.completion_analysis_imp；
+    // 这个 FIFO 只消费 EP-originated Memory/Config/IO request，并调用 RC
+    // driver 的 responder 生成反向 Completion。TL-only 模式不创建该数组。
+    uvm_tlm_analysis_fifo #(pcie_tl_tlp) bridge_rc_rx_fifos[];
+
     // 该状态跨越 build/connect/apply_config 三个阶段，不能声明为局部变量。
     bit bridge_required;
 
@@ -187,9 +200,10 @@ class pcie_tl_env extends uvm_env;
             if (!uvm_config_db#(pcie_tl_if_adapter)::get(
                   this, "", $sformatf("pcie_svt_bridge_rc_adapter_%0d", r),
                   rc_adapters[r])) begin
-                if (bridge_required)
-                    `uvm_fatal("TL_BRIDGE_CFG", $sformatf(
-                        "SVT_TL_FORWARD requires RC bridge adapter root=%0d", r))
+                // 适配器允许由工厂覆盖生成（例如 SVT adapter）。因此即使
+                // bridge_required=1，也不能要求调用方预先传入一个实例；
+                // 统一走 factory create，SVT adapter 再于 connect 阶段绑定
+                // 正式 Mapper。
                 rc_adapters[r] = pcie_tl_if_adapter::type_id::create(
                     $sformatf("rc_adapter_%0d", r), this);
             end
@@ -211,9 +225,6 @@ class pcie_tl_env extends uvm_env;
                 // 未注入时仍保持原有 TL-only 工厂行为。
                 if (!uvm_config_db#(pcie_tl_if_adapter)::get(
                       this, "", "pcie_svt_bridge_ep_adapter_0", ep_adapter)) begin
-                    if (bridge_required)
-                        `uvm_fatal("TL_BRIDGE_CFG",
-                            "SVT_TL_FORWARD requires EP bridge adapter")
                     ep_adapter = pcie_tl_if_adapter::type_id::create(
                         "ep_adapter", this);
                 end
@@ -249,9 +260,6 @@ class pcie_tl_env extends uvm_env;
                 if (!uvm_config_db#(pcie_tl_if_adapter)::get(
                       this, "", $sformatf("pcie_svt_bridge_ep_adapter_%0d", i),
                       ep_adapters[i])) begin
-                    if (bridge_required)
-                        `uvm_fatal("TL_BRIDGE_CFG", $sformatf(
-                            "SVT_TL_FORWARD requires EP bridge adapter index=%0d", i))
                     ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
                         $sformatf("ep_adapter_%0d", i), this);
                 end
@@ -293,9 +301,6 @@ class pcie_tl_env extends uvm_env;
                 if (!uvm_config_db#(pcie_tl_if_adapter)::get(
                       this, "", $sformatf("pcie_svt_bridge_ep_adapter_%0d", i),
                       ep_adapters[i])) begin
-                    if (bridge_required)
-                        `uvm_fatal("TL_BRIDGE_CFG", $sformatf(
-                            "SVT_TL_FORWARD requires DSP bridge adapter index=%0d", i))
                     ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
                         $sformatf("ep_adapter_%0d", i), this);
                 end
@@ -311,6 +316,32 @@ class pcie_tl_env extends uvm_env;
         end
 
         cov = pcie_tl_coverage_collector::type_id::create("cov", this);
+
+        // FULL_VIP bridge 的 EP 请求入口。数组长度与实际 EP agent 一一
+        // 对应：普通 direct/multi-EP 使用 num_ep，switch 使用 DS port 数。
+        // FIFO 必须在 build_phase 创建，避免 connect_phase 动态创建 UVM 对象。
+        if (bridge_required && cfg.ep_agent_enable) begin
+            int bridge_ep_count;
+            bridge_ep_count = (cfg.switch_enable && (cfg.switch_cfg != null)) ?
+                              cfg.switch_cfg.num_ds_ports : cfg.num_ep;
+            if (bridge_ep_count > 0) begin
+                bridge_ep_rx_fifos = new[bridge_ep_count];
+                foreach (bridge_ep_rx_fifos[i]) begin
+                    bridge_ep_rx_fifos[i] = new(
+                        $sformatf("bridge_ep_rx_fifo_%0d", i), this);
+                end
+            end
+        end
+
+        // RC ingress FIFO 与实际 USP 数量一致。多 Root/Switch 场景下每个
+        // RC monitor 必须保持独立 FIFO，防止不同 Root 的请求互相消费。
+        if (bridge_required && cfg.rc_agent_enable && (nu > 0)) begin
+            bridge_rc_rx_fifos = new[nu];
+            foreach (bridge_rc_rx_fifos[i]) begin
+                bridge_rc_rx_fifos[i] = new(
+                    $sformatf("bridge_rc_rx_fifo_%0d", i), this);
+            end
+        end
 
         // 6. Virtual sequencer
         v_seqr = pcie_tl_virtual_sequencer::type_id::create("v_seqr", this);
@@ -356,6 +387,9 @@ class pcie_tl_env extends uvm_env;
                 ep_agents[i].bw_shaper = bw_shaper;
                 ep_agents[i].codec     = codec;
                 ep_agents[i].adapter   = ep_adapters[i];
+                // Bridge 模式下，EP Completion 由环境 FIFO 交给 EP driver；
+                // 关闭 monitor 内置的全局 registry fold，避免 payload 重复。
+                ep_agents[i].external_completion_driver_enable = bridge_required;
                 ep_agents[i].inject_shared_components();
                 if (ep_agents[i].ep_driver != null) begin
                     ep_agents[i].ep_driver.mps_bytes       = int'(cfg.max_payload_size);
@@ -380,6 +414,7 @@ class pcie_tl_env extends uvm_env;
             ep_agent.bw_shaper = bw_shaper;
             ep_agent.codec     = codec;
             ep_agent.adapter   = ep_adapter;
+            ep_agent.external_completion_driver_enable = bridge_required;
             ep_agent.inject_shared_components();
             if (ep_agent.ep_driver != null) begin
                 ep_agent.ep_driver.mps_bytes = int'(cfg.max_payload_size);
@@ -424,6 +459,10 @@ class pcie_tl_env extends uvm_env;
                 rc_agents[r].external_completion_driver_enable = 1'b1;
             if (bridge_required)
                 rc_agents[r].monitor.external_completion_driver_enable = 1'b1;
+            if (bridge_required && (bridge_rc_rx_fifos.size() > r) &&
+                (bridge_rc_rx_fifos[r] != null))
+                rc_agents[r].monitor.tlp_ap.connect(
+                    bridge_rc_rx_fifos[r].analysis_export);
             v_seqr.rc_seqr_arr.push_back(rc_agents[r].sequencer);
         end
         if (rc_agents.size() > 0 && rc_agents[0] != null)
@@ -438,6 +477,10 @@ class pcie_tl_env extends uvm_env;
                 if (scbs.size() > si && scbs[si] != null)
                     ep_agents[i].monitor.tlp_ap.connect(scbs[si].ep_imp);
                 ep_agents[i].monitor.tlp_ap.connect(cov.analysis_export);
+                if (bridge_required && (bridge_ep_rx_fifos.size() > i) &&
+                    (bridge_ep_rx_fifos[i] != null))
+                    ep_agents[i].monitor.tlp_ap.connect(
+                        bridge_ep_rx_fifos[i].analysis_export);
                 v_seqr.ep_seqr_arr.push_back(ep_agents[i].sequencer);
             end
             if (ep_agents[0] != null)
@@ -446,6 +489,10 @@ class pcie_tl_env extends uvm_env;
             if (scb != null)
                 ep_agent.monitor.tlp_ap.connect(scb.ep_imp);
             ep_agent.monitor.tlp_ap.connect(cov.analysis_export);
+            if (bridge_required && (bridge_ep_rx_fifos.size() > 0) &&
+                (bridge_ep_rx_fifos[0] != null))
+                ep_agent.monitor.tlp_ap.connect(
+                    bridge_ep_rx_fifos[0].analysis_export);
             v_seqr.ep_seqr_arr.push_back(ep_agent.sequencer);
             v_seqr.ep_seqr = ep_agent.sequencer;
         end
@@ -475,6 +522,7 @@ class pcie_tl_env extends uvm_env;
                 ep_agents[i].bw_shaper = bw_shaper;
                 ep_agents[i].codec     = codec;
                 ep_agents[i].adapter   = ep_adapters[i];
+                ep_agents[i].external_completion_driver_enable = bridge_required;
                 ep_agents[i].inject_shared_components();
                 if (ep_agents[i].ep_driver != null) begin
                     ep_agents[i].ep_driver.mps_bytes        = int'(cfg.max_payload_size);
@@ -492,6 +540,10 @@ class pcie_tl_env extends uvm_env;
                 if (scbs.size() > owner && scbs[owner] != null)
                     ep_agents[i].monitor.tlp_ap.connect(scbs[owner].ep_imp);
                 ep_agents[i].monitor.tlp_ap.connect(cov.analysis_export);
+                if (bridge_required && (bridge_ep_rx_fifos.size() > i) &&
+                    (bridge_ep_rx_fifos[i] != null))
+                    ep_agents[i].monitor.tlp_ap.connect(
+                        bridge_ep_rx_fifos[i].analysis_export);
                 v_seqr.ep_seqr_arr.push_back(ep_agents[i].sequencer);
             end
         end
@@ -553,7 +605,64 @@ class pcie_tl_env extends uvm_env;
     // Run Phase: TLM loopback bridge
     //=========================================================================
     task run_phase(uvm_phase phase);
-        if (cfg.if_mode == TLM_MODE && rc_agent != null) begin
+        // FULL_VIP bridge 的 Serial/PIPE 传输由 SVT HDL interconnect 完成；
+        // 这里仅补上“EP monitor -> EP driver”的业务层入口。它与 TLM
+        // loopback 互斥，避免同一请求被重复响应。
+        if (bridge_required && cfg.ep_auto_response &&
+            (bridge_ep_rx_fifos.size() > 0)) begin
+            if (cfg.switch_enable && (sw != null)) begin
+                fork
+                    for (int i = 0; i < bridge_ep_rx_fifos.size(); i++) begin
+                        automatic int idx = i;
+                        fork
+                            bridge_ep_request_loop_index(idx);
+                        join_none
+                    end
+                join_none
+            end
+            else if (ep_agents.size() > 0) begin
+                fork
+                    for (int i = 0; i < bridge_ep_rx_fifos.size(); i++) begin
+                        automatic int idx = i;
+                        if ((idx < ep_agents.size()) &&
+                            (ep_agents[idx] != null)) begin
+                            fork
+                                bridge_ep_request_loop_index(idx);
+                            join_none
+                        end
+                    end
+                join_none
+            end
+            else if (ep_agent != null) begin
+                fork
+                    bridge_ep_request_loop_single();
+                join_none
+            end
+        end
+
+        // 外部 FULL_VIP transport 的反向请求路径：EP requester 产生的
+        // Memory Read/Write 到达 RC monitor 后，由 RC driver 的统一内存
+        // responder 生成 Completion，再经 RC adapter 返回 SVT Serial。
+        // Completion 本身已由 completion_analysis_imp 处理，因此该循环
+        // 明确跳过 completion 类 TLP，避免重复匹配和释放 tag。
+        if (bridge_required && cfg.rc_agent_enable &&
+            (bridge_rc_rx_fifos.size() > 0)) begin
+            fork
+                for (int r = 0; r < bridge_rc_rx_fifos.size(); r++) begin
+                    automatic int idx = r;
+                    fork
+                        bridge_rc_request_loop_index(idx);
+                    join_none
+                end
+            join_none
+        end
+
+        // SVT bridge 模式由 pcie_svt_if_adapter 直接驱动外部 SVT
+        // transport。此时不能再启动本环境的 TLM loopback，否则会有一条
+        // 永远等待 rc_adapter.tlm_tx_fifo 的“幽灵”路径，并且可能与
+        // Serial/PIPE 返回事务竞争同一个 adapter FIFO。
+        if ((cfg.if_mode == TLM_MODE) && !bridge_required &&
+            (rc_agent != null)) begin
             if (cfg.switch_enable && sw != null) begin
                 // Switch mode: RC[r] <-> Switch <-> EP[N]
                 fork
@@ -592,6 +701,82 @@ class pcie_tl_env extends uvm_env;
                     tlm_loopback_rc_to_ep();
                     tlm_loopback_ep_to_rc();
                 join_none
+            end
+        end
+    endtask
+
+    // Direct/single-EP bridge request dispatcher.
+    protected task bridge_ep_request_loop_single();
+        pcie_tl_tlp tlp;
+        forever begin
+            bridge_ep_rx_fifos[0].get(tlp);
+            if ((ep_agent != null) && (ep_agent.ep_driver != null) &&
+                (tlp != null) &&
+                (tlp.get_category() == TLP_CAT_COMPLETION)) begin
+                pcie_tl_cpl_tlp cpl;
+                if ($cast(cpl, tlp))
+                    ep_agent.ep_driver.handle_completion(cpl);
+            end
+            else if ((ep_agent != null) && (ep_agent.ep_driver != null) &&
+                     (tlp != null) &&
+                     (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
+                                        TLP_CFG_RD0, TLP_CFG_WR0,
+                                        TLP_CFG_RD1, TLP_CFG_WR1,
+                                        TLP_IO_RD, TLP_IO_WR})) begin
+                `uvm_info("ENV_BRIDGE", $sformatf(
+                    "FULL_VIP EP request -> ep_driver: %s",
+                    tlp.convert2string()), UVM_HIGH)
+                ep_agent.ep_driver.handle_request(tlp);
+            end
+        end
+    endtask
+
+    // Indexed dispatcher used by non-switch multi-EP and switch DS ports.
+    protected task bridge_ep_request_loop_index(int idx);
+        pcie_tl_tlp tlp;
+        forever begin
+            bridge_ep_rx_fifos[idx].get(tlp);
+            if ((idx < ep_agents.size()) && (ep_agents[idx] != null) &&
+                (ep_agents[idx].ep_driver != null) && (tlp != null) &&
+                (tlp.get_category() == TLP_CAT_COMPLETION)) begin
+                pcie_tl_cpl_tlp cpl;
+                if ($cast(cpl, tlp))
+                    ep_agents[idx].ep_driver.handle_completion(cpl);
+            end
+            else if ((idx < ep_agents.size()) && (ep_agents[idx] != null) &&
+                     (ep_agents[idx].ep_driver != null) && (tlp != null) &&
+                     (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
+                                        TLP_CFG_RD0, TLP_CFG_WR0,
+                                        TLP_CFG_RD1, TLP_CFG_WR1,
+                                        TLP_IO_RD, TLP_IO_WR})) begin
+                `uvm_info("ENV_BRIDGE", $sformatf(
+                    "FULL_VIP EP[%0d] request -> ep_driver: %s",
+                    idx, tlp.convert2string()), UVM_HIGH)
+                ep_agents[idx].ep_driver.handle_request(tlp);
+            end
+        end
+    endtask
+
+    // Consume requests arriving at one RC from an external SVT transport.
+    // The responder intentionally runs in the environment task context so the
+    // RC driver can use its normal tag/memory/completion implementation.
+    protected task bridge_rc_request_loop_index(int idx);
+        pcie_tl_tlp tlp;
+        forever begin
+            bridge_rc_rx_fifos[idx].get(tlp);
+            if ((idx < rc_agents.size()) && (rc_agents[idx] != null) &&
+                (rc_agents[idx].rc_driver != null) && (tlp != null) &&
+                (tlp.get_category() != TLP_CAT_COMPLETION) &&
+                (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
+                                   TLP_CFG_RD0, TLP_CFG_WR0,
+                                   TLP_CFG_RD1, TLP_CFG_WR1,
+                                   TLP_IO_RD, TLP_IO_WR,
+                                   TLP_ATOMIC_FETCHADD, TLP_ATOMIC_SWAP,
+                                   TLP_ATOMIC_CAS})) begin
+                `uvm_info("ENV_BRIDGE", $sformatf(
+                    "FULL_VIP RC[%0d] request -> rc_driver: %s",
+                    idx, tlp.convert2string()), UVM_HIGH)
+                rc_agents[idx].rc_driver.handle_request(tlp);
             end
         end
     endtask
@@ -1060,10 +1245,10 @@ class pcie_tl_env extends uvm_env;
             rc_adapters[r].mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
         end
         if (ep_adapter != null)
-            ep_adapter.mode = cfg.if_mode;
+            ep_adapter.mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
         foreach (ep_adapters[i])
             if (ep_adapters[i] != null)
-                ep_adapters[i].mode = cfg.if_mode;
+                ep_adapters[i].mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
 
         // Config space init (per-root)
         foreach (cfg_mgrs[r]) begin

@@ -6,8 +6,8 @@
 // global configuration without depending on Synopsys SVT libraries.
 //------------------------------------------------------------------------------
 
-// Selects which protocol implementation is created by pcie_unified_env.
-// The value is policy only; it does not change the static HDL elaboration.
+// Selects which transport policy is consumed by the TL-root integration.
+// The value is policy only; it does not change static HDL elaboration.
 typedef enum {
   PCIE_BACKEND_TL_ONLY,
   PCIE_BACKEND_SVT_REAL_DUT,

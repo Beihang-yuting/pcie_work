@@ -1,30 +1,27 @@
 //------------------------------------------------------------------------------
-// Compile-time limit for project-owned SVT HDL slots.
+// SVT HDL 静态实例上限。
 //
-// This is intentionally different from Synopsys' SVT_PCIE_MAX_NUM_LINKS.  The
-// project macro controls statically elaborated agent slots; runtime UVM policy
-// may enable fewer links but cannot create more slots.
+// TL-only 仿真不会包含本文件；只有真实 SVT Serial/PIPE 适配顶层需要它。
+// 用户可在编译命令行以 PCIE_SVT_ENV_MAX_NUM_LINKS 覆盖默认值，避免为
+// 未启用的拓扑实例化多余 HDL agent。
 //------------------------------------------------------------------------------
-`ifndef PCIE_SVT_ENV_REQUIRED_HDL_AGENTS
+`ifndef PCIE_SVT_ENV_MAX_NUM_LINKS
   `ifdef PCIE_TOPO_EP_X16
-    `define PCIE_SVT_ENV_BASE_HDL_AGENTS 1
+    `define PCIE_SVT_ENV_MAX_NUM_LINKS 1
   `elsif PCIE_TOPO_EP_2X8
-    `define PCIE_SVT_ENV_BASE_HDL_AGENTS 2
+    `define PCIE_SVT_ENV_MAX_NUM_LINKS 2
   `elsif PCIE_TOPO_SWITCH_1X16_4X4
-    `define PCIE_SVT_ENV_BASE_HDL_AGENTS 5
+    `define PCIE_SVT_ENV_MAX_NUM_LINKS 5
   `else
-    `define PCIE_SVT_ENV_BASE_HDL_AGENTS 5
-  `endif
-  `ifdef PCIE_USE_SVT_PEER
-    `define PCIE_SVT_ENV_REQUIRED_HDL_AGENTS (2 * `PCIE_SVT_ENV_BASE_HDL_AGENTS)
-  `else
-    `define PCIE_SVT_ENV_REQUIRED_HDL_AGENTS `PCIE_SVT_ENV_BASE_HDL_AGENTS
+    `define PCIE_SVT_ENV_MAX_NUM_LINKS 1
   `endif
 `endif
 
-// Pull in the shared maximums after computing the SVT-specific requirement.
-// This preserves automatic doubling when PCIE_USE_SVT_PEER is compiled.
-`include "pcie_unified_limits.svh"
+// 兼容旧宏名称；新代码统一使用 PCIE_SVT_ENV_MAX_NUM_LINKS。
+`ifndef PCIE_SVT_ENV_REQUIRED_HDL_AGENTS
+  `define PCIE_SVT_ENV_REQUIRED_HDL_AGENTS `PCIE_SVT_ENV_MAX_NUM_LINKS
+`endif
 
-// The common header supplies the maximum-slot default.  The required count
-// remains separate because peer mode may need twice as many static agents.
+`ifndef PCIE_SVT_ENV_MAX_HDL_AGENTS
+  `define PCIE_SVT_ENV_MAX_HDL_AGENTS `PCIE_SVT_ENV_MAX_NUM_LINKS
+`endif

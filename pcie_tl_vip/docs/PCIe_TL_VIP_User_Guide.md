@@ -379,6 +379,7 @@ uvm_sequence_item
 | `td` | `bit` | TLP Digest (ECRC 存在标志) |
 | `ep_bit` | `bit` | Poisoned 标志 |
 | `attr` | `bit [2:0]` | 属性: \[0\]=RO, \[1\]=IDO, \[2\]=NS |
+| `at` | `bit [1:0]` | 地址转换类型: `00`=未翻译、`10`=已翻译；合法模式默认 `00`，ATS sequence 可显式覆盖为 `10` |
 | `length` | `bit [9:0]` | 数据长度 (DW)，0 表示 1024 DW |
 | `requester_id` | `bit [15:0]` | 请求者 BDF |
 | `tag` | `bit [9:0]` | 标签 (最多 10-bit) |

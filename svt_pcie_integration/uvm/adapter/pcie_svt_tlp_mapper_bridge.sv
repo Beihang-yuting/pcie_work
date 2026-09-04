@@ -101,3 +101,36 @@ class pcie_svt_tlp_mapper_bridge extends uvm_component;
     tlp = rx_queue.pop_front();
   endtask
 endclass
+
+//------------------------------------------------------------------------------
+// 用户 application Mapper 扩展。
+//
+// SVT 内建 Mapper 只在内部 application 上创建端口。用户端口必须在 Mapper
+// 自身 build_phase 内注册，不能由 adapter 在 connect_phase 动态创建 UVM
+// component，否则会触发 UVM 的 ILLCRT 生命周期错误。
+//------------------------------------------------------------------------------
+class pcie_svt_user_tlp_mapper extends svt_pcie_tlp_mapper;
+  `uvm_component_utils(pcie_svt_user_tlp_mapper)
+
+  // 100~199 为本项目预留的用户 application 区间。
+  int unsigned user_application_id = 100;
+
+  function new(string name = "pcie_svt_user_tlp_mapper",
+               uvm_component parent = null);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+
+    // 端口在 Mapper build 阶段创建，确保进入 connect_phase 前已经完成
+    // UVM 树注册；若官方版本已经创建则直接复用，避免重复对象。
+    if (!rx_tlp_out_port.exists(user_application_id))
+      rx_tlp_out_port[user_application_id] = new(
+        $sformatf("rx_tlp_out_port_%0d", user_application_id), this);
+
+    if (!tx_tlp_in_export.exists(user_application_id))
+      tx_tlp_in_export[user_application_id] = new(
+        $sformatf("tx_tlp_in_export_%0d", user_application_id), this);
+  endfunction
+endclass

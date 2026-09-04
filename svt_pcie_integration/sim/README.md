@@ -1,179 +1,148 @@
-# SVT PCIe unified topology simulation
+# TL-root / SVT adapter
 
-This directory contains the active SVT integration entry point.  The project
-uses the Synopsys SVT PCIe R-2020.12 Unified VIP in Serial mode and keeps
-topology, device policy, BAR policy, and backend selection in the common
-`pcie_global_cfg` management layer.
+本目录只保留正式 SVT transport adapter 的编译入口。生产控制面是
+`pcie_tl_env`；SVT 不再提供第二套 topology、配置空间或 traffic env。
 
-## Active build contract
+## 编译入口
 
-Compile from this directory with:
+当前有两个可直接运行的 SVT 验证入口：
+
+- `pcie_tl_svt_formal.f`：本项目 TL-root + SVT FULL_VIP 双向 Serial 门禁；
+- `pcie_svt_peer_traffic.f`：官方 SVT RC/EP peer-only Serial 自检。
+
+`pcie_tl_svt_adapter.f` 现在是 source-only 适配层 filelist。它只包含
+`pcie_tl_env`、SVT adapter package 和官方 SVT 支持源码，不再包含没有真实
+SVT agent 的占位 test/top。接入真实 DUT 时，应在用户工程自己的 filelist
+中引用这些源文件，并追加 DUT wrapper、SVT HDL agent、Serial/PIPE 连接和
+用户 test。
+
+已删除的 `pcie_tl_svt_adapter_*` 占位测试只验证 factory/queue-only 对象是否
+创建，既没有真实 SVT agent，也没有实际 TLP 或物理链路，不再作为回归入口。
+
+真实 DUT 工程使用 source-only 列表时，需要自行提供顶层，例如：
+
+```text
+-f /path/to/pcie_work/svt_pcie_integration/sim/pcie_tl_svt_adapter.f
+/path/to/user/pcie_real_dut_top.sv
+/path/to/user/pcie_real_dut_test.sv
+```
+
+本目录内的专用 formal/peer filelist 中的相对路径以该 `sim` 目录为基准；
+从仓库根目录直接执行会把 `../rtl` 解析到错误位置并产生
+“Source file cannot be opened”。
+
+运行前在 VCS 主机登录 shell 中设置 `HOST_MEM_ROOT`、`PCIE_SVT_ROOT` 和
+`DESIGNWARE_HOME`。真实项目应将 filelist 中的示例顶层替换为自己的 HDL
+top，并保留 `pcie_svt_adapter_pkg`、官方 `svt_pcie_device_agent` 以及
+Serial lane 适配宏。
+
+## 官方 SVT 双向 Serial 自检
+
+`pcie_svt_peer_traffic.f` 是独立的 test-only 自检入口，用于确认
+R-2020.12 官方 RC/EP agent、16-lane Serial interconnect 和默认 DriverApp
+本身可用。该入口不包含 `pcie_tl_env`，因此不能替代 TL→Mapper 往返验证。
 
 ```sh
+cd svt_pcie_integration/sim
+export PCIE_SVT_ROOT=/home/ubuntu/synopsys/designware_vip_R-2020.12/vip/svt/pcie_svt/R-2020.12
+export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
+export HOST_MEM_ROOT=/path/to/host_mem
+mkdir -p build/peer_traffic
 vcs -full64 -sverilog -ntb_opts uvm-1.2 \
   +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
-  +define+PCIE_TOPO_EP_X16 \
-  -f pcie_svt_topology.f \
-  -top pcie_svt_topology_top \
-  -o build/simv -l build/compile.log
+  -f pcie_svt_peer_traffic.f -top pcie_svt_peer_traffic_top \
+  -o build/peer_traffic/simv
+./build/peer_traffic/simv +UVM_TESTNAME=pcie_svt_peer_traffic_test \
+  -l build/peer_traffic/run.log
 ```
 
-本目录的 SVT filelist 已内置 `-timescale=1ns/1ps`。这是必要的
-VCS 选项：SVT R-2020.12 的 source map 含有显式 `` `timescale``，而 TL
-package 通常没有；统一默认时间单位可避免 compilation-unit timescale
-冲突。若自行重写 filelist，请保留该选项。
+日志中应同时看到 `SvtTestEpilog: Passed`、`UVM_ERROR : 0` 和
+`UVM_FATAL : 0`。VCS 编译阶段较慢时不要对同一个 build 目录并发启动多个
+编译进程，否则会互相覆盖 `simv.daidir`。
 
-The installed SVT environment must provide `svt_pcie.uvm.pkg`, the Unified VIP
-environment example include directory, and the VCS/PLI support files.  Use a
-login shell on the VCS host so `VCS_HOME`, `PCIE_SVT_ROOT`, and the license
-environment are available.
+## TL→SVT FULL_VIP Serial→TL 双向门禁
 
-Select exactly one compile-time topology:
+`pcie_tl_svt_formal.f` 是双向集成测试入口。它在同一个 UVM test 中创建
+官方 `pcie_device_unified_vip_env`（仅提供正式 RC/EP agent 和 Serial
+transport）以及本项目的 `pcie_tl_env`（唯一事务控制面）。这里使用
+`FULL_VIP` 后端：正式 active agent 不创建 `tlp_mapper`，而是由 adapter
+将 TL 事务送入 `pcie_agent.tlp_seqr`。接收方向使用 SVT 的公开边界：Root
+优先使用 TL monitor，active monitor 不存在时退回
+`svt_pcie_tl::pre_tlp_out_put`；Endpoint 使用
+`svt_pcie_target_app::post_rx_tlp_get` 捕获下行请求。这样 Endpoint 请求
+交给本项目 EP driver 生成 Completion，Completion 再沿 SVT Serial 返回
+本项目 RC driver。
 
-```text
-PCIE_TOPO_EP_X16
-PCIE_TOPO_EP_2X8
-PCIE_TOPO_SWITCH_1X16_4X4
+```sh
+cd svt_pcie_integration/sim
+export PCIE_SVT_ROOT=/home/ubuntu/synopsys/designware_vip_R-2020.12/vip/svt/pcie_svt/R-2020.12
+export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
+export HOST_MEM_ROOT=/path/to/host_mem
+mkdir -p build/tl_svt_formal
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  -f pcie_tl_svt_formal.f -top pcie_tl_svt_formal_top \
+  -o build/tl_svt_formal/simv -l build/tl_svt_formal/compile.log
+./build/tl_svt_formal/simv -l build/tl_svt_formal/run.log
 ```
 
-The maximum statically elaborated HDL slot count may be overridden with
-`PCIE_SVT_ENV_MAX_HDL_AGENTS`; the runtime policy limit is controlled by
-`PCIE_SVT_ENV_MAX_NUM_LINKS`.  These project-private macros do not override
-Synopsys' `SVT_PCIE_MAX_NUM_LINKS`.
+通过标志为 `PCIE_TL_SVT_TLP_PASS`；同时应检查日志中的 SVT Serial
+链路进入 L0，且 `UVM_ERROR/UVM_FATAL` 均为 0。正式门禁还会检查
+`RC_EP_WRITE_READBACK_PASS`、`EP_RC_READBACK_PASS` 和
+`EP_RC_WRITE_PASS`：分别覆盖 RC→EP 写后读回、EP→RC 读 Root host
+memory，以及 EP→RC posted write 回读 Root host memory。这样既确认
+Completion 返回，也确认反向 posted 请求确实落入 RC 的统一内存，而不是
+只在 adapter mailbox 中出现。真实 DUT 集成时保留同样的 `pcie_tl_env`、
+factory override 和 `svt_agent_path` 配置即可。
 
-## Runtime stages
+### Transport-only 的 SVT shadow 配置检查
 
-The active test layer is based on `pcie_device_base_test` and
-`pcie_unified_env`.  The stage sequence preserves this order:
+当前 FULL_VIP 门禁由 `pcie_tl_env` 统一管理配置空间和 BDF；SVT 只承担
+DL/PL/Serial transport，因此不会为 TL sequence 动态产生的 requester
+function 自动建立 shadow configuration entry。测试在
+`pcie_tl_svt_formal_test.sv` 中将 Root/Endpoint 的
+`pcie_cfg.tl_cfg.enable_shadow_cfg_lookup` 设为 0，并保留回归断言，避免
+`ReceiveTLP: ... no cfg ptr tbl entry` warning 干扰 transport 验证。
 
-```text
-link bring-up -> configuration-space/BAR initialization -> enumeration/traffic
-```
+如果后续要验证 SVT 自身的 shadow 配置一致性，应改为给每个实际 BDF 注册
+对应的 SVT shadow function entry，再重新打开该字段；不能把 transport-only
+的关闭策略当成配置空间完整性检查。
 
-The current topology test entry points are listed in `pcie_svt_topology.f`.
-Scenario tests can override `build_global_cfg()` to select backend, enable
-links, assign BDFs, and customize BAR descriptors.
+### AT 字段约束
 
-Enumeration and BAR allocation are also data-driven.  The profile creates
-`pcie_svt_topology_policy_cfg.enum_cfg` with these defaults:
+`pcie_tl_tlp.at` 是随机字段，声明时的 `2'b00` 初值不会限制
+`randomize()`。为避免普通 Memory TLP 被随机编码成 SVT 不接受的
+`AT=01`（Translation Request）。当前实现对 AT 使用标准独立 soft 默认
+`soft at == 2'b00`，因此普通序列默认发出未翻译请求；该 soft 约束不会把
+`CONSTRAINT_ILLEGAL` 锁死，后续 ATS 专用 sequence 可以用 hard inline
+constraint 显式选择 `AT=10`，而不影响现有 TL-only 错误注入模式。
 
-```text
-pref_mem_base_addr       = 0x0000_0001_0000_0000
-pref_mem_limit_addr      = 0x0000_0001_0fff_ffff
-pref_mem_window_stride   = 0x0000_0000_1000_0000 (256 MiB per root)
-bus_number/device_number = 1/0
-```
+## 集成边界
 
-The six `policy_cfg.ep_bars[]` descriptors remain the source of BAR aperture,
-type, Prefetchable bit, and initial BAR address.  A test can override the
-enumeration object before the base test builds `env`, for example:
+测试在创建 TL env 前安装：
 
 ```systemverilog
-pcie_svt_enum_cfg enum_override;
-enum_override = pcie_svt_enum_cfg::type_id::create("enum_override");
-enum_override.pref_mem_base_addr = 64'h0000_0002_0000_0000;
-enum_override.pref_mem_limit_addr = 64'h0000_0002_0fff_ffff;
-enum_override.pref_mem_window_stride = 64'h0000_0000_2000_0000;
-uvm_config_db#(pcie_svt_enum_cfg)::set(this, "", "enum_cfg", enum_override);
+pcie_tl_if_adapter::type_id::set_type_override(
+  pcie_svt_if_adapter::get_type());
 ```
 
-The adapter deep-copies this object into each active link descriptor.  The
-enumeration sequence then derives the per-root window from
-`pref_mem_*_for(root_hierarchy)`, so no address constant is embedded in the
-sequence.  `pcie_svt_enum_cfg.validate()` rejects reversed windows, a stride
-smaller than the window, and invalid function-count limits before elaboration.
+正式 SVT agent 由用户顶层或官方 unified env 创建。`svt_agent_path` 通过
+config DB 发布正式 `svt_pcie_device_agent` 的全路径；FULL_VIP 后端不要求
+`tlp_mapper`，adapter 直接使用官方 TL sequencer 和 callback。若用户选择
+兼容的 `MAPPER_APP` 后端，才需要通过 `svt_agent`/`svt_agent_path` 绑定
+正式 Mapper。TL sequence 继续负责 link policy、Config/BAR、枚举和 Memory
+traffic；adapter 只做 TL/SVT 编解码和 transport 转接。
 
-The default transport is Serial.  PIPE support remains a future transport
-extension and is not enabled by the current topology policy.
+`pcie_svt_hdl_agent_macros.svh`、`pcie_svt_serial_port_if.sv` 和
+`pcie_svt_serial_adapter.sv` 提供 Serial HDL 边界。DUT wrapper、时钟、复位、
+SerDes/PIPE 物理连接由用户 top 完成。当前只承诺 Serial；PIPE 作为后续
+独立适配器扩展。
 
-### 已验证的双侧 Serial link test
-
-`pcie_svt_peer_test` 通过独立 filelist `pcie_svt_peer_selfcheck.f` 编译，并作为双向 TL/SVT
-对接前的正式 link 门禁。它在同一顶层创建 primary RC 和 peer EP 两个
-`pcie_svt_topology_env`，通过 `PCIE_SVT_CONNECT_SERIAL_PEERS` 互连，先
-执行两侧 CFG_INIT/REFRESH_CFG，再执行双侧 DL/PL enable 和 LTSSM 检查。
-验证命令为：
+## 静态契约检查
 
 ```sh
-vcs -full64 -sverilog -ntb_opts uvm-1.2 \
-  -f pcie_svt_peer_selfcheck.f -top pcie_svt_topology_top \
-  -o build/peer_x16/simv -l build/peer_x16/compile.log
-./build/peer_x16/simv -no_save \
-  +UVM_TESTNAME=pcie_svt_peer_test \
-  +PCIE_TOPOLOGY=EP_X16 +PCIE_GEN=4 +PCIE_LINK_ONLY
+./svt_pcie_integration/sim/check_tl_svt_bridge_contract.sh
+git diff --check
 ```
 
-在 53 号机 VCS W-2024.09-SP1 + SVT R-2020.12 上，1RC+1EP/x16/Serial
-运行结果为 `RUN_STATUS=0`、`UVM_ERROR=0`、`UVM_FATAL=0`，两侧均报告
-`LTSSM: Link training completed`、`Speed is 16Gb/s`、`Link width is 16`，
-并输出 `PCIE_SVT_LINK_PASS`。该 test 是环境级 link 验证；真实 DUT 接入
-时只需替换 peer EP 的 HDL/Serial 连接，保留相同 test 和 sequence。
-
-## Production TL-root SVT adapter entry point
-
-生产集成使用独立 filelist `pcie_tl_svt_adapter.f`。它只编译
-`pcie_tl_env`、`pcie_svt_adapter_pkg` 和门禁 test，不依赖旧的
-`pcie_unified_env`、`pcie_svt_topology_env` 或 peer self-check。测试类
-`pcie_tl_svt_adapter_base_test` 在 env 创建前通过 UVM factory 将
-`pcie_tl_if_adapter` 覆盖为 `pcie_svt_if_adapter`，因此所有 RC/EP 链路都
-共享同一个 TL-root 控制面。
-
-在 53 号机（登录 shell）上可先做编译/elaboration 门禁：
-
-```sh
-mkdir -p build/tl_svt_adapter
-vcs -full64 -sverilog -ntb_opts uvm-1.2 \
-  +define+UVM_DISABLE_AUTO_ITEM_RECORDING \
-  -f pcie_tl_svt_adapter.f -top pcie_tl_svt_adapter_tb_top \
-  -o build/tl_svt_adapter/simv -l build/tl_svt_adapter/compile.log
-./build/tl_svt_adapter/simv -no_save \
-  +UVM_TESTNAME=pcie_tl_svt_adapter_link_test \
-  -l build/tl_svt_adapter/run.log
-```
-
-当前门禁不创建正式 `svt_pcie_device_agent`，因此 adapter 会输出
-compile-only warning，但不会发送实际 TLP。真实 DUT 顶层应创建并配置正式
-SVT agent，然后通过 config_db 在相应 adapter 路径发布 `svt_agent`（或直接
-发布 `pcie_svt_mapper`）。加入 `+PCIE_SVT_REQUIRE_MAPPER` 后，若 Mapper
-未绑定，connect_phase 会立即报出明确的 UVM_FATAL，避免误把占位环境当成
-真实链路验证。
-
-## DPU-common EP x16 example
-
-The optional DPU-aware example uses the companion filelist
-`pcie_dpu_ep_x16.f`, so native SVT builds do not acquire a hard dependency on
-`dpu-common`:
-
-```sh
-vcs -full64 -sverilog -ntb_opts uvm-1.2 \
-  +define+PCIE_TOPO_EP_X16 \
-  -f pcie_dpu_ep_x16.f -top pcie_svt_topology_top \
-  -o build/dpu_ep_x16_simv -l build/dpu_ep_x16_compile.log
-```
-
-The profile is selected at runtime without changing DPU authoring data:
-
-```sh
-./build/dpu_ep_x16_simv +UVM_TESTNAME=pcie_dpu_ep_x16_test \
-  +PCIE_BACKEND=SVT_REAL_DUT +PCIE_GEN=4 +PCIE_DPU_COMPILE_ONLY
-```
-
-`+PCIE_BACKEND=TL_ONLY +PCIE_DPU_CONTROLLED_EXECUTOR` runs the controlled TL
-plan smoke against the generic TL Endpoint.  The controlled executor is only
-for a protocol-only environment; a real DPU RTL register model should omit it
-and use the transport executor directly.
-
-## RTL connection boundary
-
-`pcie_svt_topology_env_top.sv` and the reset/serial interfaces provide the
-project boundary for a real DUT.  Users supply the DUT wrapper, SerDes or PIPE wiring,
-clock/reset conversion, and any board-specific connections.  The environment
-owns policy translation, configuration-space initialization, enumeration, and
-traffic sequencing.
-
-## Removed legacy paths
-
-The former TL proxy, passive-sidecar, and switch-proxy implementation has been
-removed.  It was not a real DUT data path and is not part of the active unified
-environment.  Historical design notes remain under `docs/superpowers/` for
-reference only; they are not build inputs.
+检查会确认 adapter package、公开 Mapper 端口和 TL-only filelist 隔离，
+避免旧 topology/unified 文件被重新带回生产路径。

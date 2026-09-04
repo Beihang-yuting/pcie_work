@@ -176,11 +176,13 @@ endclass
 ### 3.6 TL/SVT Serial bridge（新的集成入口）
 
 需要让 TL VIP 继续负责配置、枚举和事务层策略，同时把 Serial/协议链路交给
-Synopsys SVT 时，使用仓库提供的专用入口：
+Synopsys SVT 时，使用仓库提供的 source-only 基础列表：
 `svt_pcie_integration/sim/pcie_tl_svt_adapter.f`。该 filelist 按依赖顺序
-编译 TL package、独立 SVT adapter/codec package 和最小门禁 test，不引入第二
-套 topology env。最小 1-RC + 1-EP 示例中的
-关键配置如下（中文注释刻意保留，便于复制到项目 test）：
+编译 TL package 和独立 SVT adapter/codec package，不包含占位 test/top，也不引入
+第二套 topology env。对于 active FULL_VIP，SVT 不创建 `tlp_mapper`；adapter
+通过官方 TL sequencer 发送，并通过 TL callback/Target App callback 接收。
+若使用 SVT Application/RTL Agent，才选择兼容的 Mapper 后端。最小 1-RC +
+1-EP 示例中的关键配置如下（中文注释刻意保留，便于复制到项目 test）：
 
 ```systemverilog
 // TL 仍是唯一控制面；SVT 仅承载 Mapper 之后的协议/Serial 数据面。
@@ -189,15 +191,17 @@ cfg.if_mode = SV_IF_MODE;
 pcie_tl_if_adapter::type_id::set_type_override(
   pcie_svt_if_adapter::get_type());
 
-// Mapper 是 SVT R-2020.12 的公开 TLM 边界，不要连接私有 Serial 信号。
-// 正式 SVT device agent 创建 tlp_mapper 后，按 adapter 实例发布句柄。
+// FULL_VIP 不需要创建孤立 Mapper；按 adapter 实例发布正式 Device Agent
+// 路径，adapter 会在 connect_phase 绑定其公开 TL sequencer/callback。
 uvm_config_db#(svt_pcie_device_agent)::set(this, "env.rc_adapter",
   "svt_agent", official_rc_agent);
 ```
 
-适配器公开的事务合同仍是 `pcie_tl_if_adapter::send/receive`；每条活动链路通过
-`pcie_svt_route_info.application_id` 绑定 Mapper 的 TX/RX 端口（示例保留 `0`
-给 RC、`1` 给 EP）。从该入口启动 VCS 时，需在登录 shell 中提供
+适配器公开的事务合同仍是 `pcie_tl_if_adapter::send/receive`。MAPPER_APP
+后端每条活动链路通过 `pcie_svt_route_info.application_id` 绑定 Mapper 的
+TX/RX 端口；FULL_VIP 后端的发送入口是官方 `tlp_seqr`，接收入口是公开
+callback。SVT 规定 0~99 为 Synopsys 内部应用保留值，本项目 adapter 默认
+使用用户 application `100`（多端口场景可递增使用 101、102……）。从该入口启动 VCS 时，需在登录 shell 中提供
 `PCIE_SVT_ROOT`、`DESIGNWARE_HOME` 和 `HOST_MEM_ROOT`，完整命令及 placeholder
 DUT 说明见 `svt_pcie_integration/sim/README.md` 的 Production TL-root 小节。
 
@@ -206,8 +210,8 @@ DUT 说明见 `svt_pcie_integration/sim/README.md` 的 Production TL-root 小节
 | 保证继续有效 | 不属于本阶段保证 |
 |--------------|------------------|
 | `pcie_tl_env`、`pcie_tl_custom_env`、TL package 和现有 TL sequence API | 真实 DUT 的 LTSSM/link-up、速率协商和电气时序 |
-| `pcie_tl_vip/sim/filelist.f` 及原生 `pcie_svt_topology.f` 内容与入口 | PIPE transport、Switch bridge 及多链路运行时行为 |
-| `svt_pcie_integration/rtl` 下 legacy SVT wrapper、HDL agent 宏和 Serial 接口文件 | 直接调用 SVT 私有 Mapper/Serial 成员 |
+| `pcie_tl_vip/sim/filelist.f` 及 TL package/API | PIPE transport、SVT 物理速率和真实 DUT LTSSM |
+| `svt_pcie_integration/sim/pcie_tl_svt_adapter.f` 的公开 adapter 契约 | 直接调用 SVT 私有 Mapper/Serial 成员 |
 
 旧 TL-only 或 legacy SVT 测试不需要增加 bridge define，也不会因为该入口而自动
 加载 SVT adapter。桥接 filelist 是隔离的新增入口；若未提供公开 Mapper/VIF，环境
@@ -304,22 +308,15 @@ endfunction
 
 ---
 
-## 9. SVT/DPU 统一管理层边界
+## 9. SVT/DPU 边界
 
-当前仓库已经提供可选的 SVT/DPU 管理层，继承边界为：
+SVT adapter 不创建第二套环境；所有配置空间、BDF/BAR、枚举和 traffic 仍由
+`pcie_tl_env` 控制。`pcie_dpu_integration` 是可选的数据转换包：它把
+`dpu-common` 冻结的设备和资源快照投影到原生 TL policy，不依赖 Synopsys SVT。
+项目集成可在创建 TL env 前使用该 policy，再按需安装 SVT adapter 工厂覆盖。
 
-```systemverilog
-class pcie_svt_topology_env extends pcie_device_unified_vip_env;
-    // SVT topology adapter owns descriptors, VIFs, status, and agent registration.
-endclass
-```
-
-在需要由 `dpu-common` 统一产生 BDF/BAR/功能资源时，使用
-`pcie_dpu_device_base_test` 和 `pcie_dpu_system_pkg`。系统环境先解析并冻结
-DPU snapshot，再通过 `pcie_dpu_cfg_adapter` 投影到 `pcie_global_cfg`，最后只
-创建一个 TL 或 SVT 子环境。SVT 运行顺序是 cfg-init → link-up → enumeration
-→ DPU bootstrap/VIO plans → traffic；Serial 是当前支持的传输，PIPE 仍是预留
-扩展。
+SVT R-2020.12 安装和官方示例仍是本机依赖，不把产品源码复制进仓库。真实
+Serial/PIPE 物理连接、时钟和复位由用户 HDL top 提供。
 
 Synopsys R-2020.12 安装和官方 `tb_pcie_svt_uvm_unified_vip_sys` 示例仍是本机
 依赖，不把产品源码复制进仓库。placeholder wrapper 的 compile/elaboration
