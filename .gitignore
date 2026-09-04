@@ -1,0 +1,14 @@
+# Local linked worktrees created for isolated implementation sessions.
+.worktrees/
+
+# VCS-generated simulation products.
+simv*
+csrc/
+build/
+DVEfiles/
+ucli.key
+*.daidir/
+*.vpd
+*.vcd
+*.fsdb
+*.log
