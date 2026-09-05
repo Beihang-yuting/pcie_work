@@ -12,6 +12,9 @@ class pcie_dpu_system_cfg extends uvm_object;
   dpu_device_cfg device_cfg;
   dpu_resource_placement_cfg placement_cfg;
   pcie_dpu_attachment_cfg attachments;
+  // PCIe-side physical ownership: dpu-common domains are mapped to concrete
+  // RC Roots here, never inferred from Host/PF/VF array order.
+  pcie_dpu_root_binding_cfg root_bindings;
   pcie_global_cfg pcie_policy;
 
   // Optional register executor supplied by a project-specific TL test.
@@ -30,6 +33,7 @@ class pcie_dpu_system_cfg extends uvm_object;
     device_cfg = null;
     placement_cfg = null;
     attachments = null;
+    root_bindings = null;
     pcie_policy = null;
     executor = null;
     rc_index = 0;
@@ -57,6 +61,22 @@ class pcie_dpu_system_cfg extends uvm_object;
       attachments.validate(attachment_errors);
       foreach (attachment_errors[index])
         errors.push_back({"attachment: ", attachment_errors[index]});
+    end
+    if (root_bindings == null)
+      errors.push_back("PCIe Root/domain binding configuration is null");
+    else if ((pcie_policy != null) && (pcie_policy.topology != null)) begin
+      int root_count;
+      string root_errors[$];
+
+      root_count = 0;
+      foreach (pcie_policy.topology.nodes[node_index]) begin
+        if ((pcie_policy.topology.nodes[node_index] != null) &&
+            (pcie_policy.topology.nodes[node_index].kind == PCIE_TOPO_NODE_RC))
+          root_count++;
+      end
+      root_bindings.validate(root_count, root_errors);
+      foreach (root_errors[index])
+        errors.push_back({"Root binding: ", root_errors[index]});
     end
     if (pcie_policy == null) begin
       errors.push_back("PCIe physical/backend policy is null");

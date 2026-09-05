@@ -70,6 +70,79 @@ filelists remain usable without a Synopsys installation.  A project-specific
 system environment can apply that projected policy before constructing the
 same `pcie_tl_env`; no unified or backend-selection environment is required.
 
+`dpu_common` 只描述逻辑 Host、Segment、PF/VF、BDF 和 BAR。Host 不是 RC、EP
+或 Switch，也不携带 Root/link 属性；这些物理关系必须在 `pcie_work` 侧
+显式声明。这样同一份 DPU snapshot 可以被 TL-only、SVT Serial 或后续 PIPE
+后端复用，而不会把 PCIe 物理假设反向写入 DPU 配置仓库。
+
+### DPU snapshot 到 PCIe policy
+
+典型调用顺序如下，`freeze()` 成功后 snapshot 是 BDF/BAR 的唯一权威来源：
+
+```systemverilog
+dpu_device_snapshot snapshot;
+pcie_dpu_root_binding_cfg root_cfg;
+pcie_global_cfg projected;
+string errors[$];
+
+// snapshot 由 dpu_common resolver 产生并冻结；这里不重新分配 BDF/BAR。
+root_cfg = pcie_dpu_root_binding_cfg::type_id::create("root_cfg");
+string why;
+void'(root_cfg.bind_domain_to_root(0, 0, 0, why)); // Host0/Segment0 -> Root0
+
+if (!adapter.project_with_root_bindings(
+        snapshot, resource_snapshot, topology_cfg, attachments,
+        root_cfg, projected, errors)) begin
+    // 创建 pcie_tl_env 前处理 errors；错误不能延迟到运行期。
+end
+```
+
+`pcie_dpu_root_binding_cfg` 检查逻辑域到 Root 的唯一性、Root 数量和
+snapshot 中实际使用的 Host/Segment 是否一致。PF/VF 到 Endpoint/link 的
+物理挂接由 `pcie_dpu_attachment_cfg` 单独负责；因此“Host 数量”不会被
+错误地当成“RC 数量”。
+
+投影出的 `pcie_device_cfg.root_index` 不只是审计字段：当调用方把
+`pcie_global_cfg` 发布给 `pcie_tl_custom_env` 时，custom env 会按 direct
+链路或 Switch DSP 的物理顺序生成 `ep_root_by_index[]`，随后由继承的
+`pcie_tl_env` 用该 Root 选择对应的 tag/FC/ordering/config manager。这样
+即使 DPU function 的声明顺序与链路顺序不同，EP 仍不会误用另一条 Root
+的资源；Switch DSP 的 Root 元数据若与 `dsp_owner[]` 不一致会在 build 阶段
+直接报错。
+
+### 多 Root 共享 Host memory
+
+启用统一内存时，Root-specific manager 也要显式绑定。下面的例子对应
+Root0 → Host0、Root1 → Host1、Root2 → Host0：
+
+```systemverilog
+pcie_tl_env_config cfg;
+host_mem_manager host0_mem, host1_mem;
+string why;
+
+cfg = pcie_tl_env_config::type_id::create("cfg");
+cfg.use_unified_mem = 1'b1;
+host0_mem = new("host0_mem"); host0_mem.set_host_id(0);
+host1_mem = new("host1_mem"); host1_mem.set_host_id(1);
+
+void'(cfg.bind_host_memory(0, 0, host0_mem, why));
+void'(cfg.bind_host_memory(1, 1, host1_mem, why));
+void'(cfg.bind_host_memory(2, 0, host0_mem, why));
+```
+
+多 Root 下每个 Root 都必须有显式绑定，不能回退到单一
+`config_db("host_mem")`，也不能由环境偷偷创建私有 manager。相同 manager
+被多个 Root 引用时，PREMAP backing memory 在一次环境中只分配一次；已经由
+VIO/DPU 初始化的 manager 也不会被 `pcie_tl_env` 重新 `init_region()`。
+单 Root 仍兼容旧的 `config_db("host_mem")` 注入；如果单 Root 使用显式
+绑定，则显式绑定优先。EP 的 `dev_mem[i]` 仍可独立通过
+`config_db("dev_mem_i")` 注入。
+
+`pcie_work` 可以完全脱离 `dpu_common` 使用：直接创建
+`pcie_tl_env_config`/`pcie_tl_env` 即可。集成 DPU 时只需额外编译
+`pcie_dpu_integration`，设置 `DPU_COMMON_ROOT` 指向独立仓库根目录，并在
+创建 TL 环境前执行 snapshot → policy 投影；两种使用方式互不污染。
+
 ## Supported boundaries
 
 - Existing `pcie_tl_vip` classes, sequences, and TL filelists remain stable.

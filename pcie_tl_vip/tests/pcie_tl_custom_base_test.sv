@@ -160,3 +160,58 @@ class pcie_tl_custom_cfg_precedence_test extends pcie_tl_custom_base_test;
         end
     endfunction
 endclass
+
+//------------------------------------------------------------------------------
+// custom-env Root 映射回归。
+//
+// 验证生产编排路径：global_cfg 携带 DPU 风格 Root 元数据，
+// pcie_tl_custom_env 按物理链路顺序转换，继承的 pcie_tl_env 再将每个
+// Endpoint 连接到指定 Root。
+//------------------------------------------------------------------------------
+class pcie_tl_custom_root_mapping_test extends pcie_tl_custom_base_test;
+    `uvm_component_utils(pcie_tl_custom_root_mapping_test)
+
+    pcie_global_cfg global_cfg;
+
+    function new(string name = "pcie_tl_custom_root_mapping_test",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function bit configure_topology(output pcie_topology_cfg result);
+        result = pcie_topology_builder::build_ep_2x8(4);
+        return 1'b1;
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+        pcie_topology_cfg source;
+
+        // custom environment 创建前发布 global_cfg；EP 元数据故意反转两条
+        // 物理 Root 链路，用来验证映射而不是数组顺序生效。
+        source = pcie_topology_builder::build_ep_2x8(4);
+        global_cfg = pcie_global_cfg::type_id::create("global_cfg");
+        global_cfg.build_default_for_topology(source);
+        global_cfg.devices[1].root_index_valid = 1'b1;
+        global_cfg.devices[1].root_index = 1;
+        global_cfg.devices[3].root_index_valid = 1'b1;
+        global_cfg.devices[3].root_index = 0;
+        uvm_config_db#(pcie_global_cfg)::set(
+            this, "env", "global_cfg", global_cfg);
+
+        super.build_phase(phase);
+    endfunction
+
+    virtual function void end_of_elaboration_phase(uvm_phase phase);
+        super.end_of_elaboration_phase(phase);
+        if ((env == null) || (env.ep_agents.size() != 2)) begin
+            `uvm_error("ROOT_MAP", "custom env did not create two EP agents")
+            return;
+        end
+        if (env.ep_agents[0].fc_mgr != env.fc_mgrs[1])
+            `uvm_error("ROOT_MAP",
+                       "custom EP0 did not use mapped Root1 manager")
+        if (env.ep_agents[1].fc_mgr != env.fc_mgrs[0])
+            `uvm_error("ROOT_MAP",
+                       "custom EP1 did not use mapped Root0 manager")
+    endfunction
+endclass

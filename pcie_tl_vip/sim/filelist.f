@@ -42,6 +42,8 @@ $HOST_MEM_ROOT/src/host_mem_manager.sv
 ../tests/pcie_tl_advanced_test.sv
 ../tests/pcie_tl_unified_mem_test.sv
 ../tests/pcie_tl_switch_unified_mem_test.sv
+../tests/pcie_tl_multi_root_unified_mem_binding_test.sv
+../tests/pcie_tl_root_mapping_test.sv
 ../tests/pcie_tl_multi_root_route_test.sv
 ../tests/pcie_tl_cross_root_isolation_test.sv
 ../tests/pcie_tl_uneven_ownership_test.sv

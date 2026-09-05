@@ -161,11 +161,11 @@ class pcie_tl_tlp extends uvm_sequence_item;
     // 的 sequence 可以通过 hard inline constraint 显式覆盖这个 soft
     // 默认并选择 AT=10。CONSTRAINT_ILLEGAL 仍保留给错误注入 sequence。
     constraint c_legal_at {
-        // VCS W-2024.09 对“soft implication”在不同解析模式下兼容性不一。
-        // 这里使用标准的独立 soft 默认：普通合法流量得到 AT=00，而
-        // CONSTRAINT_ILLEGAL 仍未被硬性限制；ATS sequence 可用 hard inline
-        // constraint 覆盖该默认并选择 AT=10。
-        soft at == 2'b00;
+        // 用一个合法的 soft 布尔表达式表达条件默认值：LEGAL 模式默认
+        // AT=00，ILLEGAL 模式的表达式恒为真，因此不会被该约束限制。
+        // ATS sequence 仍可用 hard inline constraint 覆盖 soft 默认并选择
+        // AT=10；避免使用“-> soft ...”这一非标准约束写法。
+        soft ((constraint_mode_sel != CONSTRAINT_LEGAL) || (at == 2'b00));
     }
 
     // The EP bit is the PCIe Poisoned bit.  A normal legal transaction must

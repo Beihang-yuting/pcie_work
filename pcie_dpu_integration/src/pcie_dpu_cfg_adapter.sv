@@ -33,6 +33,44 @@ class pcie_dpu_cfg_adapter extends uvm_object;
            (link.downstream_node_id == node_id);
   endfunction
 
+  protected function int root_count(pcie_topology_cfg topology);
+    int count;
+
+    count = 0;
+    if (topology == null)
+      return 0;
+    foreach (topology.nodes[index]) begin
+      if ((topology.nodes[index] != null) &&
+          (topology.nodes[index].kind == PCIE_TOPO_NODE_RC))
+        count++;
+    end
+    return count;
+  endfunction
+
+  protected function void apply_root_bindings(
+      pcie_global_cfg global_cfg,
+      pcie_dpu_root_binding_cfg root_bindings,
+      output string errors[$]);
+    errors.delete();
+    if ((global_cfg == null) || (root_bindings == null)) begin
+      errors.push_back("global policy and Root binding cfg must be non-null");
+      return;
+    end
+
+    foreach (global_cfg.devices[index]) begin
+      pcie_device_cfg device;
+      int unsigned root_index;
+
+      device = global_cfg.devices[index];
+      if ((device == null) ||
+          !root_bindings.find_root(device.domain_host_id,
+                                   device.domain_segment_id, root_index))
+        continue;
+      device.root_index_valid = 1'b1;
+      device.root_index = root_index;
+    end
+  endfunction
+
   protected function bit map_bar(
       pcie_device_cfg device,
       dpu_bar_pair_lease_t lease,
@@ -269,6 +307,49 @@ class pcie_dpu_cfg_adapter extends uvm_object;
     if (errors.size() != 0)
       return 1'b0;
     global_cfg = candidate;
+    return 1'b1;
+  endfunction
+
+  // Root-aware entry point.  The legacy project() API intentionally remains
+  // unchanged for users that do not consume dpu-common; DPU-aware callers use
+  // this method so missing or duplicated physical Root bindings fail before
+  // any protocol environment is created.
+  function bit project_with_root_bindings(
+      dpu_device_snapshot device_snapshot,
+      dpu_resource_snapshot resource_snapshot,
+      pcie_topology_cfg topology,
+      pcie_dpu_attachment_cfg attachments,
+      pcie_dpu_root_binding_cfg root_bindings,
+      output pcie_global_cfg global_cfg,
+      output string errors[$]);
+    string binding_errors[$];
+    string apply_errors[$];
+    int expected_root_count;
+
+    global_cfg = null;
+    errors.delete();
+    expected_root_count = root_count(topology);
+    if (root_bindings == null) begin
+      errors.push_back("DPU-aware projection requires explicit Root bindings");
+      return 1'b0;
+    end
+    root_bindings.validate_for_snapshot(
+      device_snapshot, expected_root_count, binding_errors);
+    foreach (binding_errors[index])
+      errors.push_back({"Root binding: ", binding_errors[index]});
+    if (errors.size() != 0)
+      return 1'b0;
+
+    if (!project(device_snapshot, resource_snapshot, topology, attachments,
+                 global_cfg, errors))
+      return 1'b0;
+    apply_root_bindings(global_cfg, root_bindings, apply_errors);
+    foreach (apply_errors[index])
+      errors.push_back(apply_errors[index]);
+    if (errors.size() != 0) begin
+      global_cfg = null;
+      return 1'b0;
+    end
     return 1'b1;
   endfunction
 endclass

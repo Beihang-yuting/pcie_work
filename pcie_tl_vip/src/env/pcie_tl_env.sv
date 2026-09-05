@@ -54,6 +54,9 @@ class pcie_tl_env extends uvm_env;
 
     //--- Unified Memory handles (host_mem_api base; populated from config_db when use_unified_mem=1) ---
     host_mem_api    host_mem;
+    // Resolved RC Root -> shared Host manager handles.  The array is sized to
+    // the actual RC count; no fixed HDL/VIP maximum is introduced here.
+    host_mem_api    host_mem_by_root[];
     host_mem_api    dev_mem[16];
 
     // BDF-indexed device contexts are only built when global device policy is
@@ -103,6 +106,14 @@ class pcie_tl_env extends uvm_env;
                 ordinal++;
             end
         end
+    endfunction
+
+    // Return the Root selected for one dynamically created Endpoint agent.
+    // The custom topology environment fills ep_root_by_index using physical
+    // link/DSP order; the config object also supports the legacy direct path
+    // where root_index metadata is stored on device_cfgs itself.
+    function int configured_ep_root_index(int ep_index, int fallback_root);
+        return cfg.configured_ep_root_index(ep_index, fallback_root);
     endfunction
 
     function new(string name = "pcie_tl_env", uvm_component parent = null);
@@ -373,7 +384,12 @@ class pcie_tl_env extends uvm_env;
         //     (shared managers); otherwise the single direct-mode / switch-dangling agent.
         if (!cfg.switch_enable && ep_agents.size() > 0) begin
             foreach (ep_agents[i]) begin
-                int mi = (i < fc_mgrs.size()) ? i : 0;  // per-pair managers (RC[i]<->EP[i]); shared [0] if fewer roots
+                int mi;
+                mi = configured_ep_root_index(i, i);
+                if ((mi < 0) || (mi >= fc_mgrs.size()))
+                    `uvm_fatal("ROOT_MAP", $sformatf(
+                        "EP%0d maps to invalid Root%0d (Root count=%0d)",
+                        i, mi, fc_mgrs.size()))
                 if (ep_agents[i] == null) continue;
                 ep_agents[i].fc_mgr    = fc_mgrs[mi];
                 ep_agents[i].tag_mgr   = tag_mgrs[mi];
@@ -510,6 +526,13 @@ class pcie_tl_env extends uvm_env;
         if (cfg.switch_enable && sw != null) begin
             for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
                 int owner = cfg.switch_cfg.dsp_owner[i];   // owning USP/root index
+                int mapped_owner;
+                mapped_owner = configured_ep_root_index(i, owner);
+                if (mapped_owner != owner)
+                    `uvm_fatal("ROOT_MAP", $sformatf(
+                        "Switch DSP%0d maps to Root%0d but dsp_owner requires Root%0d",
+                        i, mapped_owner, owner))
+                owner = mapped_owner;
                 ep_agents[i].fc_mgr    = sw.dsp[i].fc_mgr;
                 ep_agents[i].tag_mgr   = tag_mgrs[owner];
                 ep_agents[i].ord_eng   = ord_engs[owner];
@@ -561,22 +584,82 @@ class pcie_tl_env extends uvm_env;
             rc_agents[r].rc_driver.use_unified_mem = cfg.use_unified_mem;
         end
 
-        // 10. Unified-memory distribution: correct per-agent handles from config_db
-        //     Gated by use_unified_mem (default 0) — OFF path leaves mem=null (unchanged)
+        // 10. Unified-memory distribution.  DPU-aware multi-Root callers must
+        // bind every Root explicitly in cfg.host_mem_by_root.  Only the legacy
+        // single-Root path may obtain host_mem from config-db.
         if (cfg.use_unified_mem) begin
             int nep;
+            string memory_errors[$];
+            // Track handles rather than Host IDs: two independent managers may
+            // legally expose the same logical ID in a test, while one shared
+            // manager can be referenced by several Roots.  PREMAP must allocate
+            // once per object identity, not once per array slot.
+            host_mem_api premap_managers[$];
             nep = (cfg.switch_enable && cfg.switch_cfg != null)
                   ? cfg.switch_cfg.num_ds_ports
                   : (cfg.ep_agent_enable ? cfg.num_ep : 0);
 
-            // RC ← host_mem
-            if (uvm_config_db#(host_mem_api)::get(this, "", "host_mem", host_mem)) begin
-                host_mem.init_region(64'h0, 64'hFFFF_FFFF,
-                                     cfg.mem_alloc_mode, cfg.mem_granule);
-                if (cfg.mem_access_mode == PCIE_TL_MEM_PREMAP)
-                    void'(host_mem.alloc(cfg.premap_size, cfg.mem_granule));
-                if (rc_agent != null && rc_agent.rc_driver != null)
-                    rc_agent.rc_driver.mem = host_mem;
+            void'(cfg.validate_host_memory_bindings(rc_agents.size(),
+                                                     memory_errors));
+            foreach (memory_errors[index])
+                `uvm_fatal("HOST_MEM_BIND", memory_errors[index])
+
+            host_mem_by_root = new[rc_agents.size()];
+            for (int unsigned root = 0; root < rc_agents.size(); root++) begin
+                host_mem_api manager;
+
+                // Explicit bindings take precedence.  A single Root remains
+                // compatible with the historic config-db injection contract.
+                if (cfg.host_mem_by_root.exists(root)) begin
+                    manager = cfg.host_mem_by_root[root];
+                end else if ((rc_agents.size() == 1) &&
+                             uvm_config_db#(host_mem_api)::get(
+                               this, "", "host_mem", manager)) begin
+                    // legacy fallback
+                end else begin
+                    manager = null;
+                end
+                host_mem_by_root[root] = manager;
+
+                if (manager == null) begin
+                    if (rc_agents[root] != null)
+                        `uvm_fatal("HOST_MEM_BIND", $sformatf(
+                          "RC Root%0d has no Host memory manager", root))
+                    continue;
+                end
+                if (manager.get_host_id() !=
+                    ((cfg.host_mem_by_root.exists(root)) ?
+                     cfg.host_id_by_root[root] : manager.get_host_id()))
+                    `uvm_fatal("HOST_MEM_BIND", $sformatf(
+                      "RC Root%0d Host memory manager ID mismatch", root))
+
+                // An already initialized shared manager belongs to another
+                // subsystem and must not be reset or reinitialized here.
+                if (!manager.is_initialized()) begin
+                    manager.init_region(64'h0, 64'hFFFF_FFFF,
+                                        cfg.mem_alloc_mode, cfg.mem_granule);
+                end
+                if (!manager.is_initialized())
+                    `uvm_fatal("HOST_MEM_BIND", $sformatf(
+                      "RC Root%0d Host memory manager initialization failed",
+                      root))
+                if (cfg.mem_access_mode == PCIE_TL_MEM_PREMAP) begin
+                    bit already_premapped;
+                    already_premapped = 1'b0;
+                    foreach (premap_managers[previous]) begin
+                        if (premap_managers[previous] == manager)
+                            already_premapped = 1'b1;
+                    end
+                    if (!already_premapped) begin
+                        void'(manager.alloc(cfg.premap_size, cfg.mem_granule));
+                        premap_managers.push_back(manager);
+                    end
+                end
+                if ((rc_agents[root] != null) &&
+                    (rc_agents[root].rc_driver != null))
+                    rc_agents[root].rc_driver.mem = manager;
+                if (root == 0)
+                    host_mem = manager;
             end
 
             // EP[i] ← dev_mem[i]
@@ -584,10 +667,28 @@ class pcie_tl_env extends uvm_env;
                 host_mem_api dm;
                 if (uvm_config_db#(host_mem_api)::get(this, "",
                                                        $sformatf("dev_mem_%0d", i), dm)) begin
-                    dm.init_region(64'h0, 64'hFFFF_FFFF,
-                                   cfg.mem_alloc_mode, cfg.mem_granule);
-                    if (cfg.mem_access_mode == PCIE_TL_MEM_PREMAP)
-                        void'(dm.alloc(cfg.premap_size, cfg.mem_granule));
+                    // EP/device memory remains independently injectable, but
+                    // follows the same no-reinit and one-PREMAP-per-manager
+                    // rules as RC Host memory when a caller shares a handle.
+                    if (!dm.is_initialized()) begin
+                        dm.init_region(64'h0, 64'hFFFF_FFFF,
+                                       cfg.mem_alloc_mode, cfg.mem_granule);
+                    end
+                    if (!dm.is_initialized())
+                        `uvm_fatal("DEV_MEM_BIND", $sformatf(
+                          "EP%0d device memory manager initialization failed", i))
+                    if (cfg.mem_access_mode == PCIE_TL_MEM_PREMAP) begin
+                        bit already_premapped;
+                        already_premapped = 1'b0;
+                        foreach (premap_managers[previous]) begin
+                            if (premap_managers[previous] == dm)
+                                already_premapped = 1'b1;
+                        end
+                        if (!already_premapped) begin
+                            void'(dm.alloc(cfg.premap_size, cfg.mem_granule));
+                            premap_managers.push_back(dm);
+                        end
+                    end
                     dev_mem[i] = dm;
                     if (i < ep_agents.size()) begin
                         if (ep_agents[i] != null && ep_agents[i].ep_driver != null)

@@ -321,3 +321,67 @@ Serial/PIPE 物理连接、时钟和复位由用户 HDL top 提供。
 Synopsys R-2020.12 安装和官方 `tb_pcie_svt_uvm_unified_vip_sys` 示例仍是本机
 依赖，不把产品源码复制进仓库。placeholder wrapper 的 compile/elaboration
 只能证明环境和 HDL slot contract 正确，不能替代真实 RTL 建链验证。
+
+### 9.1 dpu_common 作为可选配置源
+
+`dpu_common` 是独立仓库，负责逻辑 Host/Segment、PF/VF、BDF、BAR 和
+resource snapshot；它不定义 RC、EP、Switch、Root、link、lane 或
+Serial/PIPE。没有 DPU 依赖时，原有 `pcie_tl_vip` filelist 和测试完全可以
+单独编译运行。
+
+集成 DPU 时，把独立仓库根目录传给 DPU-aware filelist：
+
+```bash
+export DPU_COMMON_ROOT=/path/to/dpu_common
+export HOST_MEM_ROOT=/path/to/host_mem
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  -f pcie_dpu_integration/sim/pcie_dpu_integration.f \
+  -top pcie_dpu_cfg_adapter_tb_top
+```
+
+调用方先使用 `dpu_common` resolver 得到冻结 snapshot，再调用
+`pcie_dpu_cfg_adapter::project_with_root_bindings()`。该适配器只把 snapshot
+中的 BDF/BAR 投影为 TL device policy，不重新分配地址资源。Host/Segment 到
+PCIe Root 的绑定使用 `pcie_dpu_root_binding_cfg` 显式完成，例如：
+
+```systemverilog
+pcie_dpu_root_binding_cfg root_cfg;
+string why;
+root_cfg = pcie_dpu_root_binding_cfg::type_id::create("root_cfg");
+if (!root_cfg.bind_domain_to_root(0, 0, 0, why))
+  `uvm_fatal("ROOT_BIND", why)
+```
+
+适配层会拒绝重复 Root、缺失 Root、Root 数量与绑定数量不一致，以及
+snapshot 未冻结等情况。PF/VF 到实际 EP/link 的关系由
+`pcie_dpu_attachment_cfg` 另行指定，不从 Host 数量或数组下标推断。
+
+投影后的 `pcie_device_cfg.root_index` 会由 `pcie_tl_custom_env` 按物理
+direct link/DSP 顺序转换为 `ep_root_by_index[]`。继承的 `pcie_tl_env` 据此
+选择每个 EP 使用的 Root manager；如果同一物理 EP 上的多个 PF/VF 给出
+冲突 Root，或 Switch DSP 的 Root 与 `dsp_owner[]` 不一致，环境会在 build
+阶段立即报错。
+
+### 9.2 统一 Host memory 绑定
+
+启用 `cfg.use_unified_mem=1` 时，多 Root 必须显式绑定每个 Root 的
+`host_mem_api` manager。Root0 → Host0、Root1 → Host1、Root2 → Host0 的
+配置如下：
+
+```systemverilog
+host_mem_manager host0, host1;
+string why;
+host0 = new("host0"); host0.set_host_id(0);
+host1 = new("host1"); host1.set_host_id(1);
+
+void'(cfg.bind_host_memory(0, 0, host0, why));
+void'(cfg.bind_host_memory(1, 1, host1, why));
+void'(cfg.bind_host_memory(2, 0, host0, why));
+```
+
+绑定时会检查 manager 非空、`host_id` 匹配和 Root 唯一性；环境创建前还会
+检查每个活动 Root 都有绑定且数量完全一致。相同 manager 被多个 Root 使用
+时，PREMAP backing memory 只分配一次；已经初始化的 manager 不会被环境再次
+初始化。单 Root 没有显式绑定时仍兼容历史的
+`uvm_config_db#(host_mem_api)::set(..., "host_mem", manager)`；单 Root
+显式绑定优先于该 fallback。EP `dev_mem[i]` 仍是独立注入点。

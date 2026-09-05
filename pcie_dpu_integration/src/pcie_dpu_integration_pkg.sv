@@ -12,6 +12,7 @@ package pcie_dpu_integration_pkg;
   import pcie_topology_pkg::*;
   `include "uvm_macros.svh"
   `include "pcie_dpu_attachment_cfg.sv"
+  `include "pcie_dpu_root_binding_cfg.sv"
   `include "pcie_dpu_cfg_adapter.sv"
   `include "pcie_dpu_reg_executor_base.sv"
   `include "pcie_dpu_system_cfg.sv"

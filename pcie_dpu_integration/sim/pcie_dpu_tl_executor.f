@@ -1,4 +1,5 @@
-+incdir+$DPU_COMMON_ROOT/dpu_common/src
+// DPU_COMMON_ROOT 指向独立 dpu_common 仓库根目录，而不是其父目录。
++incdir+$DPU_COMMON_ROOT/src
 +incdir+$HOST_MEM_ROOT/src
 +incdir+../../pcie_tl_vip/src
 +incdir+../../pcie_tl_vip/src/types
@@ -15,7 +16,7 @@
 +incdir+../src
 +incdir+../tests
 
-$DPU_COMMON_ROOT/dpu_common/src/dpu_resource_pkg.sv
+$DPU_COMMON_ROOT/src/dpu_resource_pkg.sv
 $HOST_MEM_ROOT/src/host_mem_pkg.sv
 ../../pcie_tl_vip/src/pcie_tl_if.sv
 ../../pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv

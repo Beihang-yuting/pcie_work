@@ -133,14 +133,20 @@ class pcie_dpu_cfg_adapter_unit_test extends uvm_test;
     pcie_global_cfg global_cfg;
     pcie_topology_cfg topology;
     pcie_dpu_attachment_cfg attachments;
+    pcie_dpu_root_binding_cfg root_bindings;
     dpu_device_snapshot snapshot;
     string errors[$];
+    string why;
     bit [15:0] expected_bdf;
 
     phase.raise_objection(this);
     adapter = pcie_dpu_cfg_adapter::type_id::create("adapter");
     topology = make_topology();
     attachments = make_attachments();
+    root_bindings = pcie_dpu_root_binding_cfg::type_id::create(
+      "root_bindings");
+    require(root_bindings.bind_domain_to_root(0, 3, 0, why),
+            {"add Root binding: ", why});
     expected_bdf = 16'h2340;
 
     snapshot = make_snapshot();
@@ -173,6 +179,33 @@ class pcie_dpu_cfg_adapter_unit_test extends uvm_test;
             global_cfg.devices[1].link_id == "RC0_EP0",
             "physical attachment was not carried into device policy");
 
+    global_cfg = null;
+    errors.delete();
+    require(adapter.project_with_root_bindings(
+              snapshot, null, topology, attachments, root_bindings,
+              global_cfg, errors),
+            "Root-aware frozen snapshot projection failed");
+    require(global_cfg.devices[1].root_index_valid &&
+            (global_cfg.devices[1].root_index == 0),
+            "Root/domain binding was not projected onto DPU device");
+
+    // 拓扑可以保留一个尚未承载 DPU function 的空 Root。只要该 Root
+    // 仍有显式逻辑域绑定，快照校验不应把“快照域数量较少”误判为错误。
+    begin
+      pcie_dpu_root_binding_cfg empty_root_bindings;
+
+      empty_root_bindings = pcie_dpu_root_binding_cfg::type_id::create(
+        "empty_root_bindings");
+      require(empty_root_bindings.bind_domain_to_root(0, 3, 0, why),
+              {"bind populated Root: ", why});
+      require(empty_root_bindings.bind_domain_to_root(9, 9, 1, why),
+              {"bind empty Root: ", why});
+      errors.delete();
+      empty_root_bindings.validate_for_snapshot(snapshot, 2, errors);
+      require(errors.size() == 0,
+              "a legal empty Root was rejected by snapshot validation");
+    end
+
     snapshot = dpu_device_snapshot::type_id::create("unfrozen");
     global_cfg = null;
     errors.delete();
@@ -191,6 +224,16 @@ class pcie_dpu_cfg_adapter_unit_test extends uvm_test;
             "missing physical attachment was accepted");
     require(global_cfg == null && errors.size() != 0,
             "missing attachment created backend policy");
+
+    root_bindings = pcie_dpu_root_binding_cfg::type_id::create("missing_root");
+    global_cfg = null;
+    errors.delete();
+    require(!adapter.project_with_root_bindings(
+              snapshot, null, topology, make_attachments(), root_bindings,
+              global_cfg, errors),
+            "missing Root/domain binding was accepted");
+    require(global_cfg == null && errors.size() != 0,
+            "missing Root binding created backend policy");
 
     snapshot = make_snapshot(1'b1);
     global_cfg = null;

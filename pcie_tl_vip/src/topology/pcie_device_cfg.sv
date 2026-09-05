@@ -29,6 +29,10 @@ class pcie_device_cfg extends uvm_object;
   // them to disambiguate identical BDF values.
   int unsigned domain_host_id;
   int unsigned domain_segment_id;
+  // Optional PCIe-side Root association.  dpu-common does not own this field;
+  // it is filled only by the pcie_work adapter after explicit domain binding.
+  bit root_index_valid;
+  int unsigned root_index;
 
   // Optional DPU ownership labels.  Strings keep this package independent of
   // dpu_resource_pkg while still allowing an adapter to carry the mapping.
@@ -113,6 +117,8 @@ class pcie_device_cfg extends uvm_object;
     bdf                = source.bdf;
     domain_host_id     = source.domain_host_id;
     domain_segment_id  = source.domain_segment_id;
+    root_index_valid   = source.root_index_valid;
+    root_index         = source.root_index;
     physical_node_id   = source.physical_node_id;
     link_id            = source.link_id;
     function_key_name  = source.function_key_name;
