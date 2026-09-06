@@ -14,7 +14,7 @@
 
 ## 执行环境
 
-- 远程 VCS:`ryan@10.11.10.61:2222`(pw `Ryan@2025`),`source /home/ryan/set-env.sh`。远程 pcie_tl_vip:`/home/ryan/pcie_work/pcie_tl_vip`(只有 docs/src/tests,**无 sim 构建**)。host_mem 远程:`/home/ryan/shm_work/host_mem`(已含 host_mem_api)。
+- 远程 VCS：`ryan@10.11.10.61:2222`（登录凭据仅通过交互方式提供），`source /home/ryan/set-env.sh`。远程 pcie_tl_vip：`/home/ryan/pcie_work/pcie_tl_vip`（只有 docs/src/tests，**无 sim 构建**）。host_mem 远程：`/home/ryan/shm_work/host_mem`（已含 host_mem_api）。
 - 本地 `/home/ubuntu/ryan/pcie_work/pcie_tl_vip`(git 仓 root 为 `/home/ubuntu/ryan/pcie_work`,分支 `feat/unified-memory-sync`)。同步改动文件用 scp 到远程对应路径(本地 `/home/ubuntu/ryan/...`→远程 `/home/ryan/...`)。
 - 提交:每 Task 末一次,分支 `feat/unified-memory-sync`。
 

@@ -251,7 +251,8 @@ class pcie_tl_svt_formal_link_test extends uvm_test;
     tl_cfg.scb_enable = 1'b0;
     tl_cfg.infinite_credit = 1'b1;
     // 为 EP→RC 的 DMA 读提供一个真实的 Root memory backend。PREMAP
-    // 首先在地址 0 建立一块 64-KB 分配，测试随后从该窗口读取已知模式。
+    // 会预留一个有界 backing block；由于 Host allocator 默认可随机放置，
+    // 测试在 run_phase 中从同一 manager 取得实际地址后再发起 DMA。
     tl_cfg.use_unified_mem = 1'b1;
     tl_cfg.mem_access_mode = PCIE_TL_MEM_PREMAP;
     tl_cfg.premap_size = 32'h0001_0000;
@@ -368,14 +369,24 @@ class pcie_tl_svt_formal_link_test extends uvm_test;
     begin
       pcie_tl_rw_seq ep_rd_seq;
       byte seed_data[];
+      bit [63:0] read_addr;
 
       seed_data = new[16];
       foreach (seed_data[i]) seed_data[i] = 8'h50 + i;
-      root_mem.write_mem(64'h0, seed_data);
+
+      // Host memory uses the allocator's placement policy (random by
+      // default), so address zero is not guaranteed to belong to the PREMAP
+      // block.  Obtain a real allocation from the same manager that the RC
+      // responder uses; this models the address a DPU/VIO descriptor would
+      // carry in a real test.
+      read_addr = root_mem.alloc(seed_data.size(), 16);
+      if (read_addr == '1)
+        `uvm_fatal("SVT_FORMAL", "无法为 EP→RC 读分配 Host memory 地址")
+      root_mem.write_mem(read_addr, seed_data);
 
       ep_rd_seq = pcie_tl_rw_seq::type_id::create("formal_ep_read");
       ep_rd_seq.op = PCIE_RW_READ;
-      ep_rd_seq.addr = 64'h0;
+      ep_rd_seq.addr = read_addr;
       ep_rd_seq.byte_len = seed_data.size();
       ep_rd_seq.rb_timeout_ns = 100_000;
       ep_rd_seq.start(tl_env.v_seqr.ep_seqr);
@@ -390,6 +401,7 @@ class pcie_tl_svt_formal_link_test extends uvm_test;
             seed_data[i]))
       end
       `uvm_info("SVT_FORMAL", "EP_RC_READBACK_PASS bytes=16", UVM_NONE)
+      root_mem.free(read_addr);
     end
 
     // EP→RC Posted Write，验证反向请求不仅能读 Root host memory，也能
@@ -402,9 +414,15 @@ class pcie_tl_svt_formal_link_test extends uvm_test;
       byte write_back[];
       bit [63:0] write_addr;
 
-      write_addr = 64'h0000_0000_0000_0100;
       write_data = new[16];
       foreach (write_data[i]) write_data[i] = 8'hC0 + i;
+
+      // Posted writes must target an allocated range as well.  Using an
+      // allocator-derived address keeps this check valid for both random and
+      // deterministic Host memory placement policies.
+      write_addr = root_mem.alloc(write_data.size(), 16);
+      if (write_addr == '1)
+        `uvm_fatal("SVT_FORMAL", "无法为 EP→RC 写分配 Host memory 地址")
 
       ep_wr_seq = pcie_tl_rw_seq::type_id::create("formal_ep_write");
       ep_wr_seq.op = PCIE_RW_WRITE;
@@ -426,6 +444,7 @@ class pcie_tl_svt_formal_link_test extends uvm_test;
             write_data[i]))
       end
       `uvm_info("SVT_FORMAL", "EP_RC_WRITE_PASS bytes=16", UVM_NONE)
+      root_mem.free(write_addr);
     end
 
     phase.drop_objection(this);

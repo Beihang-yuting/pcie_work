@@ -143,10 +143,10 @@ and filelist registration.
 Use `sshpass` without embedding credentials in Git configuration:
 
 ```bash
-sshpass -p '123' ssh -o StrictHostKeyChecking=accept-new ubuntu@10.11.10.53 \
+ssh -o StrictHostKeyChecking=accept-new ubuntu@10.11.10.53 \
   "bash -lc 'test -n \"\$VCS_HOME\" || command -v vcs; mkdir -p /tmp/pcie-virtio-fix-20260812'"
 git archive --format=tar HEAD | gzip -c | \
-  sshpass -p '123' ssh ubuntu@10.11.10.53 \
+  ssh ubuntu@10.11.10.53 \
   "bash -lc 'tar -xzf - -C /tmp/pcie-virtio-fix-20260812'"
 ```
 

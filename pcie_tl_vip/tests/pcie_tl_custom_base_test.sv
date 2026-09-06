@@ -6,7 +6,9 @@ import pcie_tl_pkg::*;
 class pcie_tl_custom_base_test extends uvm_test;
     `uvm_component_utils(pcie_tl_custom_base_test)
 
-    pcie_tl_custom_env env;
+    // 拓扑测试现在直接使用正式 pcie_tl_env。
+    // 拓扑解析由正式环境自身完成，测试不再依赖第二套环境类型。
+    pcie_tl_env env;
     pcie_topology_cfg topology_cfg;
     pcie_tl_env_config tl_policy_cfg;
 
@@ -121,7 +123,7 @@ class pcie_tl_custom_base_test extends uvm_test;
             this, "env", "topology_cfg", topology_cfg);
         uvm_config_db#(pcie_tl_env_config)::set(
             this, "env", "tl_policy_cfg", tl_policy_cfg);
-        env = pcie_tl_custom_env::type_id::create("env", this);
+        env = pcie_tl_env::type_id::create("env", this);
     endfunction
 endclass
 
@@ -149,7 +151,7 @@ class pcie_tl_custom_cfg_precedence_test extends pcie_tl_custom_base_test;
     virtual function void end_of_elaboration_phase(uvm_phase phase);
         super.end_of_elaboration_phase(phase);
         if ((env == null) || (env.cfg == null)) begin
-            `uvm_error("TOPO_CFG", "custom env did not build a native cfg")
+            `uvm_error("TOPO_CFG", "pcie_tl_env did not build a native cfg")
         end
         else if ((env.cfg != tl_policy_cfg) || env.cfg.switch_enable ||
                  (env.cfg.num_rc != 2) || (env.cfg.num_ep != 2)) begin
@@ -162,11 +164,10 @@ class pcie_tl_custom_cfg_precedence_test extends pcie_tl_custom_base_test;
 endclass
 
 //------------------------------------------------------------------------------
-// custom-env Root 映射回归。
+// pcie_tl_env Root 映射回归。
 //
 // 验证生产编排路径：global_cfg 携带 DPU 风格 Root 元数据，
-// pcie_tl_custom_env 按物理链路顺序转换，继承的 pcie_tl_env 再将每个
-// Endpoint 连接到指定 Root。
+// pcie_tl_env 按物理链路顺序转换，并将每个 Endpoint 连接到指定 Root。
 //------------------------------------------------------------------------------
 class pcie_tl_custom_root_mapping_test extends pcie_tl_custom_base_test;
     `uvm_component_utils(pcie_tl_custom_root_mapping_test)
@@ -186,7 +187,7 @@ class pcie_tl_custom_root_mapping_test extends pcie_tl_custom_base_test;
     virtual function void build_phase(uvm_phase phase);
         pcie_topology_cfg source;
 
-        // custom environment 创建前发布 global_cfg；EP 元数据故意反转两条
+        // pcie_tl_env 创建前发布 global_cfg；EP 元数据故意反转两条
         // 物理 Root 链路，用来验证映射而不是数组顺序生效。
         source = pcie_topology_builder::build_ep_2x8(4);
         global_cfg = pcie_global_cfg::type_id::create("global_cfg");
@@ -204,7 +205,7 @@ class pcie_tl_custom_root_mapping_test extends pcie_tl_custom_base_test;
     virtual function void end_of_elaboration_phase(uvm_phase phase);
         super.end_of_elaboration_phase(phase);
         if ((env == null) || (env.ep_agents.size() != 2)) begin
-            `uvm_error("ROOT_MAP", "custom env did not create two EP agents")
+            `uvm_error("ROOT_MAP", "pcie_tl_env did not create two EP agents")
             return;
         end
         if (env.ep_agents[0].fc_mgr != env.fc_mgrs[1])

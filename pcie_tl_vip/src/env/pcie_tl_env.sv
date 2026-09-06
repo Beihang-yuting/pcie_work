@@ -8,6 +8,16 @@ class pcie_tl_env extends uvm_env;
     //--- Configuration ---
     pcie_tl_env_config     cfg;
 
+    // 拓扑配置是可选的编排入口。存在 topology_cfg 时，环境在创建任何
+    // agent 之前把后端无关拓扑转换成原生 pcie_tl_env_config；没有该
+    // 对象时，继续走历史的直接 cfg 注入路径。
+    pcie_topology_cfg      topology_cfg;
+    pcie_tl_topology_adapter topology_adapter;
+
+    // 标记本次 build 是否由 topology_cfg 产生 native cfg。该标记用于
+    // 阻止后续历史 cfg lookup 把刚完成的拓扑转换结果覆盖掉。
+    protected bit          topology_cfg_active;
+
     //--- Agents ---
     pcie_tl_rc_agent       rc_agent;     // alias -> rc_agents[0]
     pcie_tl_ep_agent       ep_agent;
@@ -108,8 +118,154 @@ class pcie_tl_env extends uvm_env;
         end
     endfunction
 
+    // 将 global/device policy 中的 Root 元数据映射到 TL EP agent 顺序。
+    // 一个物理 Endpoint 可以拥有多个 PF/VF 记录，但这些记录必须属于
+    // 同一个 Root，否则同一 agent 的 flow-control/config manager 归属会
+    // 产生歧义。
+    protected function void derive_ep_root_bindings(
+        pcie_tl_env_config policy_cfg,
+        output string errors[$]);
+        int endpoint_count;
+        int root_count;
+
+        errors.delete();
+        if (policy_cfg == null)
+            return;
+
+        endpoint_count = policy_cfg.switch_enable &&
+                         (policy_cfg.switch_cfg != null) ?
+                         policy_cfg.switch_cfg.num_ds_ports : policy_cfg.num_ep;
+        root_count = policy_cfg.switch_enable &&
+                     (policy_cfg.switch_cfg != null) ?
+                     policy_cfg.switch_cfg.num_usp : policy_cfg.num_rc;
+
+        for (int ep_index = 0; ep_index < endpoint_count; ep_index++) begin
+            string node_id;
+            bit found_root;
+            int mapped_root;
+            int expected_root;
+
+            node_id = policy_cfg.switch_enable ?
+                      ((ep_index < topology_adapter.switch_ep_node_ids.size()) ?
+                       topology_adapter.switch_ep_node_ids[ep_index] : "") :
+                      ((ep_index < topology_adapter.direct_ep_node_ids.size()) ?
+                       topology_adapter.direct_ep_node_ids[ep_index] : "");
+            found_root = 1'b0;
+            mapped_root = 0;
+
+            foreach (policy_cfg.device_cfgs[device_index]) begin
+                pcie_device_cfg device;
+
+                device = policy_cfg.device_cfgs[device_index];
+                if ((device == null) || (device.role != PCIE_DEVICE_EP))
+                    continue;
+                if (!((device.device_id == node_id) ||
+                      ((device.physical_node_id != "") &&
+                       (device.physical_node_id == node_id))))
+                    continue;
+                if (!device.root_index_valid)
+                    continue;
+
+                if (!found_root) begin
+                    found_root = 1'b1;
+                    mapped_root = int'(device.root_index);
+                end
+                else if (mapped_root != int'(device.root_index)) begin
+                    errors.push_back($sformatf(
+                        "EP%0d physical node '%s' has conflicting Root metadata",
+                        ep_index, node_id));
+                end
+            end
+
+            if (!found_root)
+                continue;
+            if ((mapped_root < 0) || (mapped_root >= root_count)) begin
+                errors.push_back($sformatf(
+                    "EP%0d maps to invalid Root%0d (Root count=%0d)",
+                    ep_index, mapped_root, root_count));
+                continue;
+            end
+
+            if (policy_cfg.switch_enable &&
+                (policy_cfg.switch_cfg != null)) begin
+                expected_root = policy_cfg.switch_cfg.dsp_owner[ep_index];
+                if (mapped_root != expected_root)
+                    errors.push_back($sformatf(
+                        "Switch DSP%0d maps to Root%0d but dsp_owner requires Root%0d",
+                        ep_index, mapped_root, expected_root));
+            end
+
+            begin
+                string why;
+                if (!policy_cfg.bind_ep_root(ep_index, mapped_root, why))
+                    errors.push_back({"EP Root mapping failed: ", why});
+            end
+        end
+    endfunction
+
+    // 统一处理 graph-driven 配置。该阶段只负责把 topology/global policy
+    // 投影成 native cfg；真正的 agent、manager、memory 初始化仍由下面的
+    // pcie_tl_env build/connect 流程完成，因此不会产生第二个环境层次。
+    protected function bit prepare_topology_cfg(output string errors[$]);
+        pcie_tl_env_config translated_cfg;
+        pcie_tl_env_config policy_cfg;
+        pcie_global_cfg global_cfg;
+
+        errors.delete();
+        topology_cfg_active = 1'b0;
+        if (!uvm_config_db#(pcie_topology_cfg)::get(
+                this, "", "topology_cfg", topology_cfg))
+            return 1'b1;
+        if (topology_cfg == null) begin
+            errors.push_back("non-null topology_cfg is required");
+            return 1'b0;
+        end
+
+        topology_cfg.validate(errors);
+        if (errors.size() != 0)
+            return 1'b0;
+
+        topology_adapter = pcie_tl_topology_adapter::type_id::create(
+            "topology_adapter");
+        translated_cfg = topology_adapter.translate(topology_cfg, errors);
+        if ((translated_cfg == null) || (errors.size() != 0))
+            return 1'b0;
+
+        if (!uvm_config_db#(pcie_tl_env_config)::get(
+                this, "", "tl_policy_cfg", policy_cfg) ||
+            (policy_cfg == null)) begin
+            policy_cfg = pcie_tl_env_config::type_id::create(
+                "default_tl_policy_cfg");
+        end
+
+        if (uvm_config_db#(pcie_global_cfg)::get(
+                this, "", "global_cfg", global_cfg) &&
+            (global_cfg != null)) begin
+            policy_cfg.device_cfgs.delete();
+            foreach (global_cfg.devices[i])
+                policy_cfg.device_cfgs.push_back(global_cfg.devices[i]);
+        end
+
+        // policy_cfg 保留 flow-control、scoreboard、memory 等行为配置；
+        // topology translation 只覆盖决定 native agent 数量/交换结构的字段。
+        policy_cfg.rc_agent_enable = translated_cfg.rc_agent_enable;
+        policy_cfg.ep_agent_enable = translated_cfg.ep_agent_enable;
+        policy_cfg.num_rc = translated_cfg.num_rc;
+        policy_cfg.num_ep = translated_cfg.num_ep;
+        policy_cfg.switch_enable = translated_cfg.switch_enable;
+        policy_cfg.switch_cfg = translated_cfg.switch_cfg;
+
+        derive_ep_root_bindings(policy_cfg, errors);
+        if (errors.size() != 0)
+            return 1'b0;
+
+        cfg = policy_cfg;
+        topology_cfg_active = 1'b1;
+        return 1'b1;
+    endfunction
+
     // Return the Root selected for one dynamically created Endpoint agent.
-    // The custom topology environment fills ep_root_by_index using physical
+    // The topology preparation above fills ep_root_by_index using physical
     // link/DSP order; the config object also supports the legacy direct path
     // where root_index metadata is stored on device_cfgs itself.
     function int configured_ep_root_index(int ep_index, int fallback_root);
@@ -128,7 +284,20 @@ class pcie_tl_env extends uvm_env;
         int  n_mgr;         // manager-set count (>=1 so EP-only still has managers)
         int  tag_bit;       // physical VIP/DUT tag width selected by +TAG_BIT
         bit  ns_multi_ep;   // non-switch multi-EP (num_ep>1) -> ep_agents[] array
+        string topology_errors[$];
+
         super.build_phase(phase);
+
+        // 拓扑编排必须早于“Get or create config”，否则 native 路径会先
+        // 创建默认 1RC+1EP，导致 graph 配置无法覆盖实际 agent 数量。
+        if (!prepare_topology_cfg(topology_errors)) begin
+            string message;
+            message = "";
+            foreach (topology_errors[i])
+                message = {message, (i == 0) ? "" : "; ", topology_errors[i]};
+            `uvm_fatal("TOPO_ENV", message)
+            return;
+        end
 
         bridge_required = 1'b0;
         void'(uvm_config_db#(bit)::get(
@@ -137,7 +306,8 @@ class pcie_tl_env extends uvm_env;
         legacy_rc_cpl_ap = new("legacy_rc_cpl_ap", this);
 
         // 1. Get or create config
-        if (!uvm_config_db#(pcie_tl_env_config)::get(this, "", "cfg", cfg)) begin
+        if (!topology_cfg_active &&
+            !uvm_config_db#(pcie_tl_env_config)::get(this, "", "cfg", cfg)) begin
             cfg = pcie_tl_env_config::type_id::create("cfg");
             `uvm_info("ENV", "No config found in config_db, using defaults", UVM_MEDIUM)
         end

@@ -63,7 +63,7 @@ All simulation runs execute on `ubuntu@10.11.10.53` in the existing remote
 tree. Stage without deleting remote build directories:
 
 ```bash
-sshpass -p 123 rsync -az \
+rsync -az \
   --exclude '.git' --exclude 'sim/build*' \
   /home/ryan/.config/superpowers/worktrees/pcie_work/svt-topology-env-rewrite/ \
   ubuntu@10.11.10.53:/home/ubuntu/pcie-svt-topology.7mYKzi/
@@ -72,7 +72,7 @@ sshpass -p 123 rsync -az \
 Open a login shell for every build or run:
 
 ```bash
-sshpass -p 123 ssh ubuntu@10.11.10.53
+ssh ubuntu@10.11.10.53
 bash -lic 'cd /home/ubuntu/pcie-svt-topology.7mYKzi/svt_pcie_integration/sim; exec bash -i'
 export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
 export PCIE_SVT_ROOT="$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12"

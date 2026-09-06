@@ -145,7 +145,7 @@ class pcie_tl_custom_profile_test extends pcie_tl_custom_base_test;
         endpoint_count = 0;
 
         if ((env == null) || (env.cfg == null)) begin
-            traffic_error("custom environment or native config is null");
+            traffic_error("pcie_tl_env or native config is null");
             structure_ok = 0;
         end
         else if (env.cfg.switch_enable) begin

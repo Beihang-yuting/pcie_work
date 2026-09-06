@@ -5,11 +5,13 @@
 `pcie_tl_env` is the only production PCIe environment.  It owns topology,
 configuration-space images, BAR allocation, BDF assignment, enumeration,
 completions, Memory traffic, and all project sequences.  Existing users may
-continue to instantiate `pcie_tl_env` directly or use the topology-aware
-`pcie_tl_custom_env` wrapper.
+continue to instantiate `pcie_tl_env` directly.  Graph-driven users publish a
+`pcie_topology_cfg` plus an optional policy object before creating the same
+`pcie_tl_env`; the environment performs the translation before it creates any
+agent.
 
 ```text
-pcie_tl_env / pcie_tl_custom_env
+pcie_tl_env
         |
         +-- pcie_tl_if_adapter                 (TL-only default)
         |
@@ -35,9 +37,10 @@ uvm_config_db#(pcie_tl_env_config)::set(this, "env", "cfg", cfg);
 env = pcie_tl_env::type_id::create("env", this);
 ```
 
-For graph-driven topologies, publish `pcie_topology_cfg` and a policy object
-under `env`, then instantiate `pcie_tl_custom_env`.  The wrapper translates
-the graph once and passes the resulting native policy to `pcie_tl_env`.
+For graph-driven topologies, publish `pcie_topology_cfg` and an optional
+`pcie_tl_env_config` policy under `env`, then instantiate `pcie_tl_env`.  The
+same environment validates and translates the graph once before creating its
+native agents.  Native `cfg` injection remains valid when no graph is supplied.
 
 ## Optional SVT adapter
 
@@ -103,9 +106,9 @@ snapshot 中实际使用的 Host/Segment 是否一致。PF/VF 到 Endpoint/link 
 错误地当成“RC 数量”。
 
 投影出的 `pcie_device_cfg.root_index` 不只是审计字段：当调用方把
-`pcie_global_cfg` 发布给 `pcie_tl_custom_env` 时，custom env 会按 direct
-链路或 Switch DSP 的物理顺序生成 `ep_root_by_index[]`，随后由继承的
-`pcie_tl_env` 用该 Root 选择对应的 tag/FC/ordering/config manager。这样
+`pcie_global_cfg` 发布给 `pcie_tl_env` 时，环境会按 direct 链路或 Switch
+DSP 的物理顺序生成 `ep_root_by_index[]`，随后用该 Root 选择对应的
+tag/FC/ordering/config manager。这样
 即使 DPU function 的声明顺序与链路顺序不同，EP 仍不会误用另一条 Root
 的资源；Switch DSP 的 Root 元数据若与 `dsp_owner[]` 不一致会在 build 阶段
 直接报错。
@@ -148,6 +151,8 @@ VIO/DPU 初始化的 manager 也不会被 `pcie_tl_env` 重新 `init_region()`�
 - Existing `pcie_tl_vip` classes, sequences, and TL filelists remain stable.
 - SVT R-2020.12 Serial integration is available through the dedicated adapter
   filelist; PIPE is reserved for a later adapter implementation.
-- Removed SVT topology/peer wrappers were test scaffolding, not production
-  control paths.  Real-DUT integration should provide its own HDL top while
-  reusing the adapter package and official SVT agent interfaces.
+- The former `pcie_tl_custom_env` topology wrapper has been removed.  Its
+  validation/translation behavior now belongs to `pcie_tl_env`, so there is
+  only one production TL environment.  Real-DUT integration should provide
+  its own HDL top while reusing the adapter package and official SVT agent
+  interfaces.

@@ -62,7 +62,6 @@ package pcie_tl_pkg;
     `include "env/pcie_tl_scoreboard.sv"
     `include "env/pcie_tl_coverage_collector.sv"
     `include "env/pcie_tl_env.sv"
-    `include "env/pcie_tl_custom_env.sv"
 
     //--- Sequences: Base ---
     `include "seq/base/pcie_tl_mem_rd_seq.sv"

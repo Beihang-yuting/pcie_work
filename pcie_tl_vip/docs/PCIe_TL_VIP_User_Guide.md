@@ -261,7 +261,9 @@ endclass
 
 ### 3.4 拓扑驱动的 TLM 测试
 
-新测试可通过 `pcie_tl_custom_base_test` 选择预定义拓扑。以下每行表示一组完整的拓扑参数，其中 `4|5` 表示必须明确选择 Gen4 或 Gen5：
+拓扑测试可通过 `pcie_tl_custom_base_test` 选择预定义拓扑；该测试名为保持
+已有回归命令兼容而保留，环境本身统一使用 `pcie_tl_env`。以下每行表示一组
+完整的拓扑参数，其中 `4|5` 表示必须明确选择 Gen4 或 Gen5：
 
 ```text
 +PCIE_TOPOLOGY=EP_X16 +PCIE_GEN=4|5
@@ -314,6 +316,12 @@ pcie_tl_vip/
 |   |   |-- pcie_tl_switch_fabric.sv    # 路由引擎 (地址/ID/消息路由)
 |   |   +-- pcie_tl_switch.sv           # Switch 顶层 (转发循环)
 |   |
+|   |-- topology/
+|   |   |-- pcie_topology_pkg.sv        # 拓扑对象、Builder 和全局配置
+|   |   |-- pcie_topology_cfg.sv        # RC/EP/Switch 图配置
+|   |   |-- pcie_topology_builder.sv    # 预定义及程序化拓扑构造
+|   |   +-- pcie_global_cfg.sv          # 后端无关的设备/BDF/BAR policy
+|   |
 |   |-- agent/
 |   |   |-- pcie_tl_base_driver.sv  # 基类驱动 (7 步管线)
 |   |   |-- pcie_tl_base_monitor.sv # 基类监控 (6 项协议检查)
@@ -331,7 +339,7 @@ pcie_tl_vip/
 |   |   +-- pcie_tl_coverage_collector.sv # 覆盖率收集 (6 个 covergroup)
 |   |
 |   +-- seq/
-|       |-- base/                   # 11 个基础 Sequence
+|       |-- base/                   # 12 个基础 Sequence
 |       |-- constraints/            # 3 种约束模式 (Legal/Illegal/Corner)
 |       |-- scenario/               # 8 个场景 Sequence
 |       +-- virtual/                # 4 个虚拟 Sequence
@@ -346,7 +354,8 @@ pcie_tl_vip/
     +-- PCIe_TL_VIP_User_Guide.md   # 本文档
 ```
 
-**统计:** 53 个源文件, 10 种 TLP 类型, 7 个共享组件, 22 个 Sequence, 27 个 Test
+**当前工作树统计:** `src/` 74 个源文件，`tests/` 31 个测试文件，
+`seq/` 27 个 Sequence 源文件；具体 TLP 类和共享组件以目录中的实际文件为准。
 
 ---
 
@@ -825,6 +834,9 @@ RC tx_fifo -> EP rx_fifo (环境转发)
 ### 8.4 Switch 模式
 
 当 `cfg.switch_enable = 1` 时，env 创建 PCIe Switch + 多个 EP Agent:
+
+Switch 的配置、端口、Fabric 和转发实现由 `pcie_tl_pkg` 统一包含，用户只需
+编译并导入该 package；仓库不再提供需要单独编译的 Switch package。
 
 ```systemverilog
 // 测试中配置 Switch

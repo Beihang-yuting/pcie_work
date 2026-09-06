@@ -132,15 +132,16 @@ cfg.switch_enable   = 0;   // switch 关；开则 num_rc/num_ep 被忽略（取 
 
 > 句柄 `env.rc_agents[i]` / `env.ep_agents[i]`（`[0]` 别名单数）。出激励：`env.rc_agents[i].sequencer`。详见 User Guide §8.5。
 
-### 3.5 公共拓扑对象与自定义环境
+### 3.5 公共拓扑对象与统一环境
 
-新集成可把公共拓扑对象和事务层 policy 分开注入，再创建 `pcie_tl_custom_env`：
+新集成可把公共拓扑对象和事务层 policy 分开注入，再创建统一的
+`pcie_tl_env`：
 
 ```systemverilog
 class my_topology_test extends uvm_test;
     `uvm_component_utils(my_topology_test)
 
-    pcie_tl_custom_env env;
+    pcie_tl_env env;
     pcie_topology_cfg topology_cfg;
     pcie_tl_env_config tl_policy_cfg;
 
@@ -162,16 +163,21 @@ class my_topology_test extends uvm_test;
             this, "env", "topology_cfg", topology_cfg);
         uvm_config_db#(pcie_tl_env_config)::set(
             this, "env", "tl_policy_cfg", tl_policy_cfg);
-        env = pcie_tl_custom_env::type_id::create("env", this);
+        env = pcie_tl_env::type_id::create("env", this);
     endfunction
 endclass
 ```
 
-`pcie_tl_custom_env` 在调用继承的 `build_phase` 之前验证并翻译整个拓扑。`tl_policy_cfg` 继续拥有 flow control、scoreboard、timeout、unified memory 等所有非拓扑字段；自定义环境只覆盖 native 环境所需的六个拓扑字段。合并后的同一个 policy 对象通过 root-context、当前环境完整实例名的精确 `cfg` scope 注入，因此继承的 `pcie_tl_env` build 使用它作为权威配置，且不会泄漏到兄弟环境。
+`pcie_tl_env` 在创建任何 agent 之前验证并翻译整个拓扑。`tl_policy_cfg`
+继续拥有 flow control、scoreboard、timeout、unified memory 等所有非拓扑
+字段；环境只覆盖 native agent 所需的六个拓扑字段。合并后的同一个 policy
+对象通过当前环境实例的精确 `cfg` scope 使用，因此不会泄漏到兄弟环境。
 
 当前 TL 后端可在 TLM 模式验证 RC 到 EP 的下行 Memory Write/Read 数据往返，以及 EP 到 RC 的上行 Memory Read Completion；Switch 模式逐个经过 DSP 地址窗口和对应 EP。这些结果只证明事务层路由和数据行为，不证明 Serial/PIPE link-up、LTSSM 或任何物理速率协商。
 
-现有测试无需迁移：它们仍可直接创建 `pcie_tl_env`，并使用原生 `pcie_tl_env_config`/`pcie_tl_switch_config`。
+现有测试仍可直接创建 `pcie_tl_env`，并使用原生
+`pcie_tl_env_config`/`pcie_tl_switch_config`；拓扑测试也使用同一个环境，
+不再存在第二个环境类型。
 
 ### 3.6 TL/SVT Serial bridge（新的集成入口）
 
@@ -209,7 +215,7 @@ DUT 说明见 `svt_pcie_integration/sim/README.md` 的 Production TL-root 小节
 
 | 保证继续有效 | 不属于本阶段保证 |
 |--------------|------------------|
-| `pcie_tl_env`、`pcie_tl_custom_env`、TL package 和现有 TL sequence API | 真实 DUT 的 LTSSM/link-up、速率协商和电气时序 |
+| `pcie_tl_env`、TL package 和现有 TL sequence API | 真实 DUT 的 LTSSM/link-up、速率协商和电气时序 |
 | `pcie_tl_vip/sim/filelist.f` 及 TL package/API | PIPE transport、SVT 物理速率和真实 DUT LTSSM |
 | `svt_pcie_integration/sim/pcie_tl_svt_adapter.f` 的公开 adapter 契约 | 直接调用 SVT 私有 Mapper/Serial 成员 |
 
@@ -356,8 +362,8 @@ if (!root_cfg.bind_domain_to_root(0, 0, 0, why))
 snapshot 未冻结等情况。PF/VF 到实际 EP/link 的关系由
 `pcie_dpu_attachment_cfg` 另行指定，不从 Host 数量或数组下标推断。
 
-投影后的 `pcie_device_cfg.root_index` 会由 `pcie_tl_custom_env` 按物理
-direct link/DSP 顺序转换为 `ep_root_by_index[]`。继承的 `pcie_tl_env` 据此
+投影后的 `pcie_device_cfg.root_index` 会由 `pcie_tl_env` 按物理 direct
+link/DSP 顺序转换为 `ep_root_by_index[]`。环境据此
 选择每个 EP 使用的 Root manager；如果同一物理 EP 上的多个 PF/VF 给出
 冲突 Root，或 Switch DSP 的 Root 与 `dsp_owner[]` 不一致，环境会在 build
 阶段立即报错。
