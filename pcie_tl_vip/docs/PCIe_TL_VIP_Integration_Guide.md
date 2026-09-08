@@ -187,6 +187,13 @@ Synopsys SVT 时，使用仓库提供的 source-only 基础列表：
 编译 TL package 和独立 SVT adapter/codec package，不包含占位 test/top，也不引入
 第二套 topology env。对于 active FULL_VIP，SVT 不创建 `tlp_mapper`；adapter
 通过官方 TL sequencer 发送，并通过 TL callback/Target App callback 接收。
+
+注意：adapter package 导入的 `svt_uvm_pkg`/`svt_pcie_uvm_pkg` 必须先由用户
+在同一次 VCS 编译中加载。请在 `-f pcie_tl_svt_adapter.f` 之前编译一个
+定义 `EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH`、`SVC_RANDOM_SEED_SCOPE` 并
+include `svt_pcie.uvm.pkg` 的用户 prefix 源文件；仅在该 `-f` 之后追加
+用户 top 不满足包的编译顺序。完整 prefix 示例见
+`svt_pcie_integration/sim/README.md`。
 若使用 SVT Application/RTL Agent，才选择兼容的 Mapper 后端。最小 1-RC +
 1-EP 示例中的关键配置如下（中文注释刻意保留，便于复制到项目 test）：
 
@@ -202,6 +209,12 @@ pcie_tl_if_adapter::type_id::set_type_override(
 uvm_config_db#(svt_pcie_device_agent)::set(this, "env.rc_adapter",
   "svt_agent", official_rc_agent);
 ```
+
+每个静态 `svt_pcie_single_port_device_agent_hdl` 必须在 HDL 的静态
+`initial` 块调用一次 `update_if_variables`，由官方 SVT 发布
+`link_<link_id>_vif_<port_id>`；SVT RC 使用 port `4'h0`，SVT EP 使用
+`4'h1`。该 key 必须与 `pcie_link_cfg.vif_key` 完全一致，且不能把这一步
+延后到 UVM class/function。
 
 适配器公开的事务合同仍是 `pcie_tl_if_adapter::send/receive`。MAPPER_APP
 后端每条活动链路通过 `pcie_svt_route_info.application_id` 绑定 Mapper 的

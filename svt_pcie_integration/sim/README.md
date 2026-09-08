@@ -19,13 +19,62 @@ SVT agent 的占位 test/top。接入真实 DUT 时，应在用户工程自己�
 已删除的 `pcie_tl_svt_adapter_*` 占位测试只验证 factory/queue-only 对象是否
 创建，既没有真实 SVT agent，也没有实际 TLP 或物理链路，不再作为回归入口。
 
-真实 DUT 工程使用 source-only 列表时，需要自行提供顶层，例如：
+`pcie_svt_adapter_pkg.sv` 会导入官方 `svt_uvm_pkg` 和
+`svt_pcie_uvm_pkg`。因此在编译这个 source-only 列表前，用户必须先编译
+官方 `svt_pcie.uvm.pkg`，并在第一次 include 前定义与自己顶层层次相符的
+`EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH` 和 `SVC_RANDOM_SEED_SCOPE`。该列表
+不自动 include 官方 package，是因为它无法猜测用户的 global shadow/seed
+实例路径；把用户 top 仅追加在 `-f` 列表之后也不能满足 package 的编译顺序。
+
+推荐创建一个用户自有的 package-prefix 源文件（下面的层次名仅为示例），
+并把它放在 `-f` 之前：
+
+```systemverilog
+// user_svt_pkg_prefix.sv -- 由用户工程维护
+`define EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH my_pcie_top.global_shadow0
+`define SVC_RANDOM_SEED_SCOPE                my_pcie_top.global_random_seed
+`include "svt_pcie.uvm.pkg"
+```
+
+随后真实 DUT 工程可按如下顺序编译 source-only 列表：
 
 ```text
+/path/to/user/user_svt_pkg_prefix.sv
 -f /path/to/pcie_work/svt_pcie_integration/sim/pcie_tl_svt_adapter.f
 /path/to/user/pcie_real_dut_top.sv
 /path/to/user/pcie_real_dut_test.sv
 ```
+
+这里的四行应按顺序作为 VCS 输入（例如直接追加在 `vcs` 命令行中）；如果
+工程统一使用外层 filelist，请把 prefix 源文件列在外层 filelist 的
+`-f pcie_tl_svt_adapter.f` 之前。
+
+如果用户顶层本身负责 include 官方 package，也必须把该源文件（或一个只
+包含 package 的 prefix）列在本列表之前，并保证宏已定义；不要依赖列表末尾
+的 test/top 反向提供 package。
+
+### 真实 DUT VIF 发布
+
+每个静态 `svt_pcie_single_port_device_agent_hdl`（包括 link macro 展开的
+实例）都必须在 HDL 中调用一次官方 `update_if_variables` task。该调用必须
+位于静态模块 `initial` 块，不能从 UVM class/function 中调用。例如，SVT
+作为 Root Complex 时使用 port ID `4'h0`，SVT 作为 Endpoint 时使用 `4'h1`：
+
+```systemverilog
+initial begin
+  svt_side0_spd.update_if_variables(
+    svt_is_root ? 4'h0 : 4'h1,
+    8'h00,                 // link_id；与 pcie_link_cfg.link_id 对应
+    "uvm_test_top", "uvm_test_top");
+end
+```
+
+`update_if_variables` 会通过官方 config DB 发布
+`link_<link_id>_vif_<port_id>`（上例为 `link_0_vif_0` 或
+`link_0_vif_1`）。该字符串必须原样填入对应
+`pcie_link_cfg.vif_key`，否则 backend 会在 build 阶段报告找不到
+`svt_pcie_vif`。如果用户采用不同的 UVM 根层次，应同步替换 task 的两个
+parent-hierarchy 参数和 config-DB 查找路径。
 
 本目录内的专用 formal/peer filelist 中的相对路径以该 `sim` 目录为基准；
 从仓库根目录直接执行会把 `../rtl` 解析到错误位置并产生
@@ -82,8 +131,14 @@ mkdir -p build/tl_svt_formal
 vcs -full64 -sverilog -ntb_opts uvm-1.2 \
   -f pcie_tl_svt_formal.f -top pcie_tl_svt_formal_top \
   -o build/tl_svt_formal/simv -l build/tl_svt_formal/compile.log
-./build/tl_svt_formal/simv -l build/tl_svt_formal/run.log
+./build/tl_svt_formal/simv \
+  +UVM_TESTNAME=pcie_tl_svt_formal_link_test \
+  -l build/tl_svt_formal/run.log
 ```
+
+`pcie_tl_svt_formal_test.sv` 是源文件名，实际注册到 UVM factory 的测试类
+名是 `pcie_tl_svt_formal_link_test`；运行命令应使用后者。省略
+`+UVM_TESTNAME` 也可以，因为 formal top 会把同一个类设为默认测试。
 
 通过标志为 `PCIE_TL_SVT_TLP_PASS`；同时应检查日志中的 SVT Serial
 链路进入 L0，且 `UVM_ERROR/UVM_FATAL` 均为 0。正式门禁还会检查
@@ -94,12 +149,20 @@ Completion 返回，也确认反向 posted 请求确实落入 RC 的统一内存
 只在 adapter mailbox 中出现。真实 DUT 集成时保留同样的 `pcie_tl_env`、
 factory override 和 `svt_agent_path` 配置即可。
 
+FULL_VIP 使用 `pcie_tl_env` 的 TL/SVT adapter 作为事务控制入口，因此
+`ENV_BRIDGE_DIAG` 中的 “entered SV_IF_MODE without vif” 是预期诊断：该
+路径不使用旧的 `pcie_tl_if` streaming VIF，而是直接绑定正式 SVT agent 的
+`tlp_seqr` 和公开 callback。它不是缺少 SVT Unified VIF；若需要旧式 TL
+interface streaming，应使用 TL-only/SV interface backend，并为 adapter
+注入 `virtual pcie_tl_if`。
+
 ### Transport-only 的 SVT shadow 配置检查
 
 当前 FULL_VIP 门禁由 `pcie_tl_env` 统一管理配置空间和 BDF；SVT 只承担
 DL/PL/Serial transport，因此不会为 TL sequence 动态产生的 requester
 function 自动建立 shadow configuration entry。测试在
-`pcie_tl_svt_formal_test.sv` 中将 Root/Endpoint 的
+`pcie_tl_svt_formal_test.sv`（其中的
+`pcie_tl_svt_formal_link_test`）将 Root/Endpoint 的
 `pcie_cfg.tl_cfg.enable_shadow_cfg_lookup` 设为 0，并保留回归断言，避免
 `ReceiveTLP: ... no cfg ptr tbl entry` warning 干扰 transport 验证。
 
@@ -136,6 +199,54 @@ traffic；adapter 只做 TL/SVT 编解码和 transport 转接。
 `pcie_svt_serial_adapter.sv` 提供 Serial HDL 边界。DUT wrapper、时钟、复位、
 SerDes/PIPE 物理连接由用户 top 完成。当前只承诺 Serial；PIPE 作为后续
 独立适配器扩展。
+
+### SVT backend 配置映射
+
+`pcie_svt_backend_cfg` 是 SVT 专用配置对象，由 `pcie_tl_env` 在创建
+Device Agent 前消费。常用字段示例：
+
+```systemverilog
+pcie_svt_backend_cfg svt_cfg;
+svt_cfg = pcie_svt_backend_cfg::type_id::create("svt_cfg");
+svt_cfg.default_max_gen       = 4;
+svt_cfg.direct_gen4_enable    = 1'b1; // 允许 Gen1 直接加速到 Gen4
+svt_cfg.fast_link_training    = 1'b1;
+svt_cfg.eq_mode               = 1;    // 1=Full, 2=Bypass, 3=No-Eq, 0=自动
+svt_cfg.enable_transaction_log = 1'b1;
+svt_cfg.transaction_log_filename = "pcie_xact.log";
+uvm_config_db#(pcie_svt_backend_cfg)::set(
+  this, "env", "pcie_svt_backend_cfg", svt_cfg);
+```
+
+`eq_mode` 会映射到官方 `set_link_eq_attribute_values()` 的第一个参数；
+第二个参数是 SVT 特有的 `enable_direct_speed_up_from_2_5g_to_16g`，由
+`direct_gen4_enable || fast_link_training` 控制，不能用
+`full_equalization_required` 代替。`link_timeout` 会换算成 ns，同时写入
+`pcie_cfg.tl_cfg.completion_timeout_ns`、
+`pcie_cfg.tl_cfg.credit_starvation_timeout_ns`（RX/monitor 预算）以及
+`driver_cfg[0].completion_timeout_ns`（active Driver App 的真正 CTO）。
+
+`svt_verbosity` 通过 UVM 公共的
+`set_report_verbosity_level_hier()` 应用到自动创建的 Device Agent。
+
+以下字段目前没有 R-2020.12 对应的安全公开映射，backend 会在创建 agent
+之前直接报错（默认值仍保持向后兼容）：
+
+- `target_app_enable=0`：Device Configuration 要求至少一个 Target App，且
+  当前 TL-owned bridge 必须保留 Target App 以接收并抑制默认响应；
+- `target_auto_response=1`：Completion 由 `pcie_tl_env` 统一处理，不能让
+  SVT 内建 Target App 并行响应；
+- `enable_svt_monitor=1`：passive monitor 必须是独立的
+  `is_active=0/enable_monitor=1` agent；
+- `full_equalization_required=0`：请使用 `enable_equalization/eq_mode`；
+- 非默认的 `cfg_timeout`、`enum_timeout`、`traffic_timeout`：它们是 TL
+  编排 sequence 的阶段预算，不是 SVT configuration 字段，当前 backend
+  不会伪造写入私有成员。
+
+日志开关分别映射到 SVT 的 transaction、symbol、PL-history、Ctrl-SKP、
+MBI 和 FLIT logging 字段。backend 创建的是 active Device Agent；需要纯
+观察时，请在 test 中另建一个 `is_active=0` 且 `enable_monitor=1` 的 SVT
+agent。
 
 ## 静态契约检查
 

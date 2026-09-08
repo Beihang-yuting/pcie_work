@@ -47,6 +47,13 @@ native agents.  Native `cfg` injection remains valid when no graph is supplied.
 将 `svt_pcie_integration/sim/pcie_tl_svt_adapter.f` 作为 source-only 基础
 filelist 引入用户工程，并在创建 `env` 前安装 factory override：
 
+该列表中的 adapter package 会导入官方 `svt_uvm_pkg`/`svt_pcie_uvm_pkg`，
+所以必须先在同一次 VCS 编译中定义用户自己的
+`EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH`、`SVC_RANDOM_SEED_SCOPE` 并 include
+`svt_pcie.uvm.pkg`，再展开本列表。用户顶层若负责这一步，必须把其源文件
+放在 `-f pcie_tl_svt_adapter.f` 之前；不能只把顶层追加在列表末尾。可复制
+的 prefix 示例和完整顺序见 `svt_pcie_integration/sim/README.md`。
+
 ```systemverilog
 pcie_tl_if_adapter::type_id::set_type_override(
   pcie_svt_if_adapter::get_type());
@@ -58,6 +65,12 @@ must be the handle from `svt_pcie_device_agent.tlp_mapper`; creating an
 isolated `svt_pcie_tlp_mapper` is unsupported because it has no service
 sequencer.  Serial lane wiring, clocks, resets, and DUT connections remain a
 top-level responsibility.
+
+每个静态 `svt_pcie_single_port_device_agent_hdl` 还必须在 HDL 静态
+`initial` 块调用 `update_if_variables`，由官方 API 发布
+`link_<link_id>_vif_<port_id>`。SVT RC 使用 port `4'h0`，SVT EP 使用
+`4'h1`；对应的 key 必须与 `pcie_link_cfg.vif_key` 完全一致，否则 backend
+会在 build 阶段报告缺少 Unified VIF。
 
 该 source-only filelist 不包含可独立运行的占位 test/top；用户必须追加自己
 的 DUT top、SVT HDL agent、Serial/PIPE 物理连接和 test。桥接层不会自动启动
