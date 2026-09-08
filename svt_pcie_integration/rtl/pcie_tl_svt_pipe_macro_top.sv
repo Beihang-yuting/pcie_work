@@ -35,16 +35,28 @@ module pcie_tl_svt_pipe_macro_top;
 
   // 两个 SVT agent 均通过通用 DECLARE 宏声明（PIPE 模式展开）：
   // RC 侧 is_root=1（spipe/MPIPE=0），EP 侧 is_root=0（mpipe/MPIPE=1）。
+  // 默认 x4；+define+PCIE_SVT_PIPE_MACRO_X16 切换 x16 宽度门禁。
+`ifdef PCIE_SVT_PIPE_MACRO_X16
+  `PCIE_SVT_DECLARE_HDL_AGENT_X16(svt_rc0, "SVT_RC0.", 1'b0, 1'b0,
+                                  common_pwr_on_reset, 1, 0)
+  `PCIE_SVT_DECLARE_HDL_AGENT_X16(svt_ep0, "SVT_EP0.", 1'b0, 1'b0,
+                                  common_pwr_on_reset, 0, 1)
+`else
   `PCIE_SVT_DECLARE_HDL_AGENT_X4(svt_rc0, "SVT_RC0.", 1'b0, 1'b0,
                                  common_pwr_on_reset, 1, 0)
   `PCIE_SVT_DECLARE_HDL_AGENT_X4(svt_ep0, "SVT_EP0.", 1'b0, 1'b0,
                                  common_pwr_on_reset, 0, 1)
+`endif
 
   // 向量化端口对拼：宏展开已生成 svt_rc0_pipe / svt_ep0_pipe，一条
   // CROSS 宏即完成全部 per-lane + 公共信号互连（a=spipe/RC 的 port，
   // b=mpipe/EP 的 port）。真实 DUT 场景把 CROSS 换成 DUT 与单个
   // <name>_pipe 的向量连线即可。
+`ifdef PCIE_SVT_PIPE_MACRO_X16
+  `PCIE_SVT_PIPE_PORT_CROSS_X16(svt_rc0_pipe, svt_ep0_pipe)
+`else
   `PCIE_SVT_PIPE_PORT_CROSS_X4(svt_rc0_pipe, svt_ep0_pipe)
+`endif
 
   // pipe_if.reset 是 logic 单驱动，归顶层：每实例一条 assign。
   assign svt_rc0_spd.vip_port_if.pipe_if.reset = common_pwr_on_reset;
