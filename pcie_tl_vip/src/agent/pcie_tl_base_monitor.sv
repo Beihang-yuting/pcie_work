@@ -181,7 +181,10 @@ class pcie_tl_base_monitor extends uvm_monitor;
         if (!$cast(mem, tlp)) return 1;  // not a mem TLP, skip
 
         byte_len = (tlp.length == 0) ? 4096 : tlp.length * 4;
-        start_addr = mem.addr;
+        // Memory request headers carry a DWORD-aligned address.  A byte-level
+        // sequence may retain its original low address bits in the object, so
+        // normalize before checking the full wire span.
+        start_addr = pcie_tl_mem_wire_addr(mem);
         end_addr   = start_addr + byte_len - 1;
 
         if (start_addr[63:12] != end_addr[63:12]) begin

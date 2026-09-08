@@ -67,6 +67,7 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     protected function void um_write(bit [63:0] a, bit [7:0] data[], bit [3:0] fbe, bit [3:0] lbe);
         int total_dw = (data.size() + 3) / 4;
         int idx = 0;
+        bit [63:0] wire_addr = {a[63:2], 2'b00};
         for (int dw = 0; dw < total_dw; dw++) begin
             bit [3:0] be = (dw == 0) ? fbe :
                            (dw == total_dw - 1 && total_dw > 1) ? lbe : 4'hF;
@@ -76,7 +77,7 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
                         byte one[];
                         one = new[1];
                         one[0] = byte'(data[idx]);
-                        mem.write_mem(a + idx, one);
+                        mem.write_mem(wire_addr + idx, one);
                     end
                     idx++;
                 end
@@ -122,29 +123,45 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     // Mirrors ep_driver's handle_mem_read logic exactly
     //=========================================================================
     protected task send_mem_completion(pcie_tl_mem_tlp r, tlp_kind_e k);
-        int total_byte_count;
-        int remaining;
+        int total_wire_bytes;
+        int remaining_wire_bytes;
+        int remaining_valid_bytes;
+        int wire_offset;
         bit [63:0] cur_addr;
 
-        total_byte_count = (r.length == 0) ? 4096 : r.length * 4;
-        remaining = total_byte_count;
-        cur_addr  = r.addr;
+        total_wire_bytes      = pcie_tl_mem_dw_count(r) * 4;
+        remaining_wire_bytes  = total_wire_bytes;
+        remaining_valid_bytes = pcie_tl_mem_valid_bytes(r);
+        wire_offset            = 0;
+        cur_addr               = pcie_tl_mem_wire_addr(r);
 
-        while (remaining > 0) begin
+        while (remaining_wire_bytes > 0) begin
             pcie_tl_cpl_tlp cpl;
             int chunk;
             int bytes_to_rcb;
             int len_dw;
-            bit [7:0] um_data[];
+            int valid_in_chunk;
+            int first_valid;
+            bit [63:0] first_valid_addr;
 
             // Every Completion must end at or before the next RCB boundary.
             bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
             if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
             chunk = mps_bytes;
             if (bytes_to_rcb < chunk) chunk = bytes_to_rcb;
-            if (chunk > remaining) chunk = remaining;
+            if (chunk > remaining_wire_bytes) chunk = remaining_wire_bytes;
 
-            len_dw = (chunk + 3) / 4;
+            // Completion length is DWORD based.  Keep the transport payload
+            // DWORD padded and use BE only to decide which lanes are read.
+            chunk = (chunk / 4) * 4;
+            if (chunk == 0) chunk = remaining_wire_bytes;
+
+            len_dw           = chunk / 4;
+            valid_in_chunk   = pcie_tl_mem_valid_bytes_in_range(
+                r, wire_offset, chunk);
+            first_valid      = pcie_tl_mem_first_valid_in_range(
+                r, wire_offset, chunk);
+            first_valid_addr = cur_addr + first_valid;
 
             cpl = pcie_tl_cpl_tlp::type_id::create("rc_cpl");
             cpl.kind         = k;
@@ -160,17 +177,27 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
             cpl.completer_id = 16'h0000;  // RC BDF
             cpl.cpl_status   = CPL_STATUS_SC;
             cpl.bcm          = 0;
-            cpl.byte_count   = remaining[11:0];
-            cpl.lower_addr   = cur_addr[6:0];
+            cpl.byte_count   = remaining_valid_bytes[11:0];
+            cpl.lower_addr   = first_valid_addr[6:0];
             cpl.payload      = new[chunk];
+            foreach (cpl.payload[i]) cpl.payload[i] = 8'h00;
 
-            um_read(cur_addr, chunk, um_data);
-            for (int i = 0; i < chunk; i++) cpl.payload[i] = um_data[i];
+            // Read only enabled lanes so a partial-BE request cannot cross an
+            // exact host-memory allocation boundary.
+            for (int i = 0; i < chunk; i++) begin
+                if (pcie_tl_mem_lane_enabled(r, wire_offset + i)) begin
+                    byte rd[];
+                    mem.read_mem(cur_addr + i, 1, rd);
+                    if (rd.size() == 1) cpl.payload[i] = rd[0];
+                end
+            end
 
             send_tlp(cpl);
 
-            cur_addr  += chunk;
-            remaining -= chunk;
+            cur_addr              += chunk;
+            wire_offset           += chunk;
+            remaining_wire_bytes  -= chunk;
+            remaining_valid_bytes -= valid_in_chunk;
         end
     endtask
 
@@ -299,20 +326,24 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
 
         // Fold payload/status back onto the request object for seq read-back.
         rb_note_completion(cpl);
-        pcie_rb_registry::complete(cpl);
 
         // TLP_CPL intentionally has no data (for example, successful Config
         // and IO writes) and is terminal. Keep byte accumulation only for
         // successful CplD traffic so a short data read cannot release its tag.
-        terminal = !cpl.has_data() || (cpl.cpl_status != CPL_STATUS_SC);
-        if (!terminal) begin
+        terminal = req.rb_done;
+        if (cpl.has_data() && (cpl.cpl_status == CPL_STATUS_SC)) begin
             if (!cpl_byte_trackers.exists(cpl.tag)) begin
                 cpl_byte_tracker_t t;
-                t.total_bytes    = (req.length == 0) ? 4096 : req.length * 4;
+                pcie_tl_mem_tlp mem_req;
+                if ($cast(mem_req, req))
+                    t.total_bytes = pcie_tl_mem_valid_bytes(mem_req);
+                else
+                    t.total_bytes = (req.length == 0) ? 4096 : req.length * 4;
                 t.received_bytes = 0;
                 cpl_byte_trackers[cpl.tag] = t;
             end
-            cpl_byte_trackers[cpl.tag].received_bytes += cpl.payload.size();
+            // rb_note_completion() has already compacted disabled wire lanes.
+            cpl_byte_trackers[cpl.tag].received_bytes = req.rb_data.size();
         end
 
         `uvm_info("RC_DRV", $sformatf("Completion matched: tag=0x%03h status=%s bytes=%0d/%0d",
@@ -324,10 +355,8 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
 
         // Free on a terminal no-data/error Completion, or only after every
         // byte of a successful CplD request has arrived.
-        if (terminal ||
-            (cpl_byte_trackers.exists(cpl.tag) &&
-             cpl_byte_trackers[cpl.tag].received_bytes >=
-             cpl_byte_trackers[cpl.tag].total_bytes)) begin
+        if (terminal) begin
+            pcie_rb_registry::complete(cpl);
             cpl_byte_trackers.delete(cpl.tag);
             if (pending_cpl.exists(cpl.tag))
                 pending_cpl.delete(cpl.tag);

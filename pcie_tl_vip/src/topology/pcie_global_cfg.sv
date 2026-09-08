@@ -32,10 +32,242 @@ class pcie_global_cfg extends uvm_object;
   pcie_link_cfg links[$];
   pcie_device_cfg devices[$];
 
+  // 所有 backend 共用的规范物理链路顺序。直连链路按 link_id 字典序
+  // 排序（与 TL topology adapter 一致），Switch USP/DSP 链路按物理端口
+  // 号索引。policy 队列刻意保持声明顺序以兼容静态 HDL slot/VIF 元数
+  // 据；下面这些数组才是角色序号的唯一权威来源。
+  string direct_link_ids[$];
+  string switch_usp_link_ids[];
+  string switch_dsp_link_ids[];
+
   `uvm_object_utils(pcie_global_cfg)
 
+  // 构造函数：仅透传名字。
   function new(string name = "pcie_global_cfg");
     super.new(name);
+  endfunction
+
+  // 按稳定物理 link ID 查找策略记录的下标；找不到返回 -1。返回原始
+  // 对象（而非拷贝）使后续 backend 覆盖对所有策略消费者可见。
+  function int find_link_index(string link_id);
+    if (link_id == "")
+      return -1;
+    foreach (links[i]) begin
+      if ((links[i] != null) && (links[i].link_id == link_id))
+        return i;
+    end
+    return -1;
+  endfunction
+
+  function pcie_link_cfg find_link(string link_id);
+    int index;
+
+    index = find_link_index(link_id);
+    if (index < 0)
+      return null;
+    return links[index];
+  endfunction
+
+  // 返回权威拓扑图中是否仍存在该 ID 对应的启用边。policy 的 `enabled`
+  // 是运行期选择位，不得改变物理槽位序号；槽位是否存在由图上的位
+  // 控制。
+  function bit topology_link_enabled(string link_id);
+    if ((topology == null) || (link_id == ""))
+      return 1'b0;
+    foreach (topology.links[i]) begin
+      if ((topology.links[i] != null) &&
+          (topology.links[i].link_id == link_id))
+        return topology.links[i].enabled;
+    end
+    return 1'b0;
+  endfunction
+
+  // 按 link_id 返回权威拓扑图中的边记录；不存在时返回 null。
+  function pcie_topology_link_cfg find_topology_link(string link_id);
+    if ((topology == null) || (link_id == ""))
+      return null;
+    foreach (topology.links[i]) begin
+      if ((topology.links[i] != null) &&
+          (topology.links[i].link_id == link_id))
+        return topology.links[i];
+    end
+    return null;
+  endfunction
+
+  // 从当前运行期策略重建按角色排序的 ID 表。查询方法都会调用它，因为
+  // 调用者可能在图翻译之后禁用链路。缺失的 Switch 端口保持空位并由
+  // 拓扑校验诊断；声明顺序永远不作为隐式回退。
+  function void refresh_link_order();
+    pcie_topology_node_cfg switch_node;
+    pcie_link_cfg direct_links[$];
+    pcie_link_cfg swap_link;
+
+    direct_link_ids.delete();
+    switch_usp_link_ids = new[0];
+    switch_dsp_link_ids = new[0];
+    switch_node = null;
+
+    if (topology != null) begin
+      foreach (topology.nodes[i]) begin
+        if ((topology.nodes[i] != null) &&
+            (topology.nodes[i].kind == PCIE_TOPO_NODE_SWITCH)) begin
+          switch_node = topology.nodes[i];
+          break;
+        end
+      end
+    end
+
+    if (switch_node == null) begin
+      if (topology != null) begin
+        // 物理槽位是否存在由图定义。即使场景随后禁用了某条策略记
+        // 录，也要在规范表中保留其槽位；否则禁用 link 0 会让 link 1
+        // 被悄悄重新编号。
+        foreach (topology.links[i]) begin
+          pcie_link_cfg policy_link;
+
+          if ((topology.links[i] == null) || !topology.links[i].enabled)
+            continue;
+          policy_link = find_link(topology.links[i].link_id);
+          if (policy_link != null)
+            direct_links.push_back(policy_link);
+        end
+      end
+      else begin
+        foreach (links[i]) begin
+          if (links[i] != null)
+            direct_links.push_back(links[i]);
+        end
+      end
+      for (int i = 0; i < direct_links.size(); i++) begin
+        for (int j = i + 1; j < direct_links.size(); j++) begin
+          if (direct_links[j].link_id < direct_links[i].link_id) begin
+            swap_link = direct_links[i];
+            direct_links[i] = direct_links[j];
+            direct_links[j] = swap_link;
+          end
+        end
+      end
+      foreach (direct_links[i])
+        direct_link_ids.push_back(direct_links[i].link_id);
+      return;
+    end
+
+    // 在 validate() 报出编译期链路上限之前，避免按被污染/乱码的维度
+    // 分配数组。非法拓扑暴露空的规范数组；校验失败后任何调用者都不得
+    // 使用它们。
+    if ((switch_node.num_usp > `PCIE_SVT_ENV_MAX_NUM_LINKS) ||
+        (switch_node.num_dsp > `PCIE_SVT_ENV_MAX_NUM_LINKS)) begin
+      switch_usp_link_ids = new[0];
+      switch_dsp_link_ids = new[0];
+      return;
+    end
+    switch_usp_link_ids = new[switch_node.num_usp];
+    switch_dsp_link_ids = new[switch_node.num_dsp];
+    foreach (links[i]) begin
+      pcie_link_cfg link;
+
+      link = links[i];
+      if (link == null)
+        continue;
+
+      // 与直连链路相同：物理 Switch 槽位来源于图的启用边集合，而不是
+      // 可变的策略 enabled 位。策略禁用只是把 ID 留在其端口槽位上，
+      // 由严格的 provider 解析拒绝，而不是把更高端口整体前移。
+      if ((topology != null) && !topology_link_enabled(link.link_id))
+        continue;
+
+      if ((link.downstream_node_id == switch_node.node_id) &&
+          (link.downstream_role == PCIE_TOPO_PORT_USP) &&
+          (link.downstream_port_index < switch_usp_link_ids.size())) begin
+        switch_usp_link_ids[link.downstream_port_index] = link.link_id;
+      end
+      else if ((link.upstream_node_id == switch_node.node_id) &&
+               (link.upstream_role == PCIE_TOPO_PORT_DSP) &&
+               (link.upstream_port_index < switch_dsp_link_ids.size())) begin
+        switch_dsp_link_ids[link.upstream_port_index] = link.link_id;
+      end
+    end
+  endfunction
+
+  // 返回占据某个物理角色槽位的链路 ID。直连 RC 和 EP 共享成对序号；
+  // Switch 场景 RC 对应 USP、EP 对应 DSP。外部 DUT 槽位（use_svt==0）
+  // 也会返回，调用者由此区分"刻意不拥有"与"映射缺失"。
+  function string canonical_link_id(
+      pcie_device_role_e role,
+      int slot_index);
+    refresh_link_order();
+    canonical_link_id = "";
+    if (slot_index < 0)
+      return canonical_link_id;
+
+    if ((topology != null) && (switch_usp_link_ids.size() != 0 ||
+                               switch_dsp_link_ids.size() != 0)) begin
+      if (role == PCIE_DEVICE_RC) begin
+        if (slot_index < switch_usp_link_ids.size())
+          canonical_link_id = switch_usp_link_ids[slot_index];
+      end
+      else if (role == PCIE_DEVICE_EP) begin
+        if (slot_index < switch_dsp_link_ids.size())
+          canonical_link_id = switch_dsp_link_ids[slot_index];
+      end
+    end
+    else if ((role == PCIE_DEVICE_RC) || (role == PCIE_DEVICE_EP)) begin
+      if (slot_index < direct_link_ids.size())
+        canonical_link_id = direct_link_ids[slot_index];
+    end
+  endfunction
+
+  // 按规范物理顺序返回角色 ID 列表。provider_only 过滤出启用且 SVT
+  // 拥有的链路并保持其规范相对顺序；要寻址物理槽位的调用者必须改用
+  // canonical_link_id()，稀疏所有权才不会意外压缩进别的槽位。
+  function void get_role_link_ids(
+      pcie_device_role_e role,
+      output string role_link_ids[$],
+      input bit provider_only = 1'b0);
+    string canonical_ids[$];
+
+    role_link_ids.delete();
+    refresh_link_order();
+    if ((topology != null) && (switch_usp_link_ids.size() != 0 ||
+                               switch_dsp_link_ids.size() != 0)) begin
+      if (role == PCIE_DEVICE_RC)
+        foreach (switch_usp_link_ids[i])
+          canonical_ids.push_back(switch_usp_link_ids[i]);
+      else if (role == PCIE_DEVICE_EP)
+        foreach (switch_dsp_link_ids[i])
+          canonical_ids.push_back(switch_dsp_link_ids[i]);
+    end
+    else if ((role == PCIE_DEVICE_RC) || (role == PCIE_DEVICE_EP)) begin
+      foreach (direct_link_ids[i])
+        canonical_ids.push_back(direct_link_ids[i]);
+    end
+
+    foreach (canonical_ids[i]) begin
+      pcie_link_cfg link;
+
+      link = find_link(canonical_ids[i]);
+      if ((link == null) || (canonical_ids[i] == ""))
+        continue;
+      // 直连链路的两端可以分配不同的 provider 角色；Switch 拓扑同样有
+      // USP/RC 与 DSP/EP 物理槽位。因此角色查询除 use_svt 外还必须过
+      // 滤显式的策略角色，否则 EP 拥有的直连链路会被错误地放进 RC
+      // 紧凑视图（反之亦然）。
+      if (provider_only && (!link.enabled || !link.use_svt ||
+                            !link.svt_role_valid ||
+                            (link.svt_role != role)))
+        continue;
+      role_link_ids.push_back(canonical_ids[i]);
+    end
+  endfunction
+
+  function bit link_is_provider_owned(string link_id);
+    pcie_link_cfg link;
+
+    link = find_link(link_id);
+    return (link != null) && link.enabled && link.use_svt &&
+           link.svt_role_valid &&
+           ((link.svt_role == PCIE_DEVICE_RC) ||
+            (link.svt_role == PCIE_DEVICE_EP));
   endfunction
 
   // Populate link/device policy from the existing graph.  No connectivity is
@@ -86,6 +318,9 @@ class pcie_global_cfg extends uvm_object;
       link.downstream_port_index = source.downstream_port_index;
       link.enabled               = source.enabled;
       link.use_svt               = 1'b0;
+      link.svt_role_valid        = 1'b0;
+      link.svt_node_id           = "";
+      link.svt_role              = PCIE_DEVICE_RC;
       link.link_width            = source.link_width;
       link.max_gen               = source.max_gen;
 
@@ -142,6 +377,10 @@ class pcie_global_cfg extends uvm_object;
       device.init_default_bars();
       devices.push_back(device);
     end
+
+    // 固化初始的规范物理顺序。运行期修改 enabled/use_svt 后，查询方法
+    // 会再次刷新。
+    refresh_link_order();
   endfunction
 
   // Validate all policy before either backend creates children.  In particular,
@@ -153,6 +392,9 @@ class pcie_global_cfg extends uvm_object;
     bit seen_bdf[bit [15:0]];
 
     errors.delete();
+    // 即使校验报出其他策略错误，也保持对外的规范数组同步；这样诊断
+    // 信息和后续消费者看到的物理槽位视图完全一致。
+    refresh_link_order();
 
     // Validate the graph first; later checks assume its node/link references
     // are internally consistent.
@@ -160,6 +402,49 @@ class pcie_global_cfg extends uvm_object;
       errors.push_back("topology is null");
     else
       topology.validate(errors);
+
+    // policy 队列可以被刻意打乱，但仍必须与图一一对应。在这里拒绝
+    // 缺失/未知 ID 及端点元数据漂移，可防止规范刷新静默压缩物理槽
+    // 位、把后面的 adapter 绑到错误的边上。对图中存在的边允许
+    // `enabled=0`（槽位保留并按外部/DUT 所有解析）；重新启用权威图里
+    // 已禁用的边则不允许。
+    if (topology != null) begin
+      foreach (topology.links[topology_index]) begin
+        pcie_topology_link_cfg graph_link;
+        pcie_link_cfg policy_link;
+
+        graph_link = topology.links[topology_index];
+        if (graph_link == null)
+          continue;
+        policy_link = find_link(graph_link.link_id);
+        if (policy_link == null) begin
+          errors.push_back($sformatf(
+            "topology link '%s' has no global link policy",
+            graph_link.link_id));
+          continue;
+        end
+        if ((policy_link.upstream_node_id != graph_link.upstream_node_id) ||
+            (policy_link.downstream_node_id != graph_link.downstream_node_id) ||
+            (policy_link.upstream_role != graph_link.upstream_role) ||
+            (policy_link.downstream_role != graph_link.downstream_role) ||
+            (policy_link.upstream_port_index != graph_link.upstream_port_index) ||
+            (policy_link.downstream_port_index != graph_link.downstream_port_index))
+          errors.push_back($sformatf(
+            "global link policy '%s' endpoint metadata differs from topology",
+            graph_link.link_id));
+        if (policy_link.enabled && !graph_link.enabled)
+          errors.push_back($sformatf(
+            "global link policy '%s' re-enables a disabled topology edge",
+            graph_link.link_id));
+      end
+      foreach (links[policy_index]) begin
+        if ((links[policy_index] != null) &&
+            (find_topology_link(links[policy_index].link_id) == null))
+          errors.push_back($sformatf(
+            "global link policy '%s' is absent from topology",
+            links[policy_index].link_id));
+      end
+    end
 
     // Dynamic policy is always bounded by the compile-time HDL allocation.
     if (runtime_num_links > `PCIE_SVT_ENV_MAX_NUM_LINKS)
@@ -191,6 +476,48 @@ class pcie_global_cfg extends uvm_object;
       if (!((links[i].max_gen == 4) || (links[i].max_gen == 5)))
         errors.push_back($sformatf("link '%s' has unsupported Gen%0d",
                                    links[i].link_id, links[i].max_gen));
+
+      // SVT 角色是链路级显式策略。没有它时，backend 无法在同一条链路
+      // 上区分“SVT RC + DUT EP”和“DUT RC + SVT EP”，必须在 build 前报错。
+      if (links[i].use_svt) begin
+        if (!links[i].svt_role_valid)
+          errors.push_back($sformatf(
+            "SVT link '%s' must declare svt_role and svt_node_id",
+            links[i].link_id));
+        else if (links[i].svt_node_id == "")
+          errors.push_back($sformatf(
+            "SVT link '%s' has an empty svt_node_id", links[i].link_id));
+        else if (!((links[i].svt_role == PCIE_DEVICE_RC) ||
+                    (links[i].svt_role == PCIE_DEVICE_EP)))
+          errors.push_back($sformatf(
+            "SVT link '%s' role must be RC or EP", links[i].link_id));
+        else if (topology != null) begin
+          pcie_topology_node_cfg svt_node;
+          bit is_link_endpoint;
+
+          svt_node = topology.find_node(links[i].svt_node_id);
+          if (svt_node == null)
+            errors.push_back($sformatf(
+              "SVT link '%s' references unknown node '%s'",
+              links[i].link_id, links[i].svt_node_id));
+          else begin
+            is_link_endpoint =
+              (links[i].svt_node_id == links[i].upstream_node_id) ||
+              (links[i].svt_node_id == links[i].downstream_node_id);
+            if (!is_link_endpoint)
+              errors.push_back($sformatf(
+                "SVT node '%s' is not an endpoint of link '%s'",
+                links[i].svt_node_id, links[i].link_id));
+            else if (((links[i].svt_role == PCIE_DEVICE_RC) &&
+                    (svt_node.kind != PCIE_TOPO_NODE_RC)) ||
+                   ((links[i].svt_role == PCIE_DEVICE_EP) &&
+                    (svt_node.kind != PCIE_TOPO_NODE_EP)))
+              errors.push_back($sformatf(
+                "SVT link '%s' role does not match node '%s' kind",
+                links[i].link_id, links[i].svt_node_id));
+          end
+        end
+      end
 
       if (links[i].has_hdl_slot) begin
         if (links[i].hdl_slot >= `PCIE_SVT_ENV_MAX_HDL_AGENTS)
@@ -298,5 +625,7 @@ class pcie_global_cfg extends uvm_object;
         devices.push_back(device_copy);
       end
     end
+
+    refresh_link_order();
   endfunction
 endclass

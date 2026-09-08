@@ -202,9 +202,13 @@ class pcie_tl_if_adapter extends uvm_component;
         int base = beat_idx * 32;
         int remaining = bytes.size() - base;
         if (remaining >= 32) return 4'hF;
-        if (remaining >= 24) return 4'h7;
-        if (remaining >= 16) return 4'h3;
-        if (remaining >= 8)  return 4'h1;
+        // tlp_strb is expressed in 8-byte lanes.  Round the final beat up to
+        // the next lane so a 12/20-byte TLP is not truncated to 8/16 bytes;
+        // codec.decode() later discards bytes beyond the header-declared
+        // DWORD payload (and any ECRC).
+        if (remaining > 24) return 4'hF;
+        if (remaining > 16) return 4'h7;
+        if (remaining > 8)  return 4'h3;
         return 4'h1;
     endfunction
 

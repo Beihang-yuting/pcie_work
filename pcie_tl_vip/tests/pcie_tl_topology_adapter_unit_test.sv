@@ -3,12 +3,46 @@ import pcie_topology_pkg::*;
 import pcie_tl_pkg::*;
 `include "uvm_macros.svh"
 
+// A no-op component shell lets the unit test call the environment's protected
+// context-join helper without constructing the full agent hierarchy.  UVM
+// components must be created during build, so this shell is allocated by the
+// test build_phase and deliberately suppresses inherited build/connect work.
+class pcie_tl_context_lookup_env extends pcie_tl_env;
+    `uvm_component_utils(pcie_tl_context_lookup_env)
+
+    function new(string name = "pcie_tl_context_lookup_env",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        // Intentionally empty: the test supplies only cfg/topology/context
+        // fields needed by configured_ep_context().
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        // Intentionally empty; no agents are built by this shell.
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        // Intentionally empty; the parent test owns the objection and checks.
+    endtask
+endclass
+
 class pcie_tl_topology_adapter_unit_test extends uvm_test;
     `uvm_component_utils(pcie_tl_topology_adapter_unit_test)
+
+    pcie_tl_context_lookup_env context_env;
 
     function new(string name = "pcie_tl_topology_adapter_unit_test",
                  uvm_component parent = null);
         super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        context_env = pcie_tl_context_lookup_env::type_id::create(
+            "context_lookup_env", this);
     endfunction
 
     function void require(bit condition, string message);
@@ -47,6 +81,116 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
                                   PCIE_TOPO_PORT_EP, 0, 4, 4));
         end
         return builder.finish();
+    endfunction
+
+    // Deliberately non-lexicographic IDs and declaration order.  Canonical
+    // direct slots must still be ordered by link_id, matching the production
+    // topology adapter/global policy contract rather than queue position.
+    function pcie_topology_cfg build_shuffled_direct_links();
+        pcie_topology_builder builder;
+
+        builder = new("shuffled_direct_builder");
+        void'(builder.add_rc("RC_Z"));
+        void'(builder.add_ep("EP_Z"));
+        void'(builder.add_rc("RC_A"));
+        void'(builder.add_ep("EP_A"));
+        void'(builder.add_rc("RC_M"));
+        void'(builder.add_ep("EP_M"));
+        void'(builder.connect("Z_LINK", "RC_Z", PCIE_TOPO_PORT_RC, 0,
+                              "EP_Z", PCIE_TOPO_PORT_EP, 0, 8, 4));
+        void'(builder.connect("M_LINK", "RC_M", PCIE_TOPO_PORT_RC, 0,
+                              "EP_M", PCIE_TOPO_PORT_EP, 0, 8, 4));
+        void'(builder.connect("A_LINK", "RC_A", PCIE_TOPO_PORT_RC, 0,
+                              "EP_A", PCIE_TOPO_PORT_EP, 0, 8, 4));
+        return builder.finish();
+    endfunction
+
+    // The topology adapter orders physical EP slots by link ID, whereas DPU
+    // device records may arrive in an unrelated declaration order (and often
+    // use physical_node_id rather than the PF-qualified device_id).  Verify
+    // that pcie_tl_env joins by the canonical node ID before falling back to
+    // the historical declaration-order behavior for cfg-only callers.
+    function void check_ep_context_mapping();
+        pcie_topology_cfg source;
+        pcie_tl_topology_adapter adapter;
+        pcie_tl_env_config env_cfg;
+        pcie_tl_env_config translated_cfg;
+        pcie_device_cfg dev_z;
+        pcie_device_cfg dev_a;
+        pcie_device_cfg dev_m;
+        pcie_tl_func_context ctx_z;
+        pcie_tl_func_context ctx_a;
+        pcie_tl_func_context ctx_m;
+        string errors[$];
+
+        source = build_shuffled_direct_links();
+        adapter = pcie_tl_topology_adapter::type_id::create(
+            "context_lookup_adapter");
+        translated_cfg = adapter.translate(source, errors);
+        require((translated_cfg != null) && (errors.size() == 0),
+                "context lookup fixture translates successfully");
+        if ((translated_cfg == null) || (errors.size() != 0))
+            return;
+
+        env_cfg = pcie_tl_env_config::type_id::create("context_lookup_cfg");
+        env_cfg.switch_enable = translated_cfg.switch_enable;
+        env_cfg.num_ep = translated_cfg.num_ep;
+
+        // Deliberately declare Z, A, M while canonical physical order is
+        // A, M, Z.  physical_node_id carries the stable graph node identity;
+        // device_id models a PF-qualified DPU record.
+        dev_z = pcie_device_cfg::type_id::create("ctx_dev_z");
+        dev_z.device_id = "EP_Z.PF0";
+        dev_z.physical_node_id = "EP_Z";
+        dev_z.role = PCIE_DEVICE_EP;
+        dev_z.bdf = 16'h0200;
+        dev_a = pcie_device_cfg::type_id::create("ctx_dev_a");
+        dev_a.device_id = "EP_A.PF0";
+        dev_a.physical_node_id = "EP_A";
+        dev_a.role = PCIE_DEVICE_EP;
+        dev_a.bdf = 16'h0208;
+        dev_m = pcie_device_cfg::type_id::create("ctx_dev_m");
+        dev_m.device_id = "EP_M.PF0";
+        dev_m.physical_node_id = "EP_M";
+        dev_m.role = PCIE_DEVICE_EP;
+        dev_m.bdf = 16'h0210;
+        env_cfg.device_cfgs.push_back(dev_z);
+        env_cfg.device_cfgs.push_back(dev_a);
+        env_cfg.device_cfgs.push_back(dev_m);
+
+        ctx_z = pcie_tl_func_context::type_id::create("ctx_z");
+        ctx_z.bdf = dev_z.bdf;
+        ctx_a = pcie_tl_func_context::type_id::create("ctx_a");
+        ctx_a.bdf = dev_a.bdf;
+        ctx_m = pcie_tl_func_context::type_id::create("ctx_m");
+        ctx_m.bdf = dev_m.bdf;
+
+        context_env.cfg = env_cfg;
+        context_env.topology_adapter = adapter;
+        context_env.device_contexts[ctx_z.bdf] = ctx_z;
+        context_env.device_contexts[ctx_a.bdf] = ctx_a;
+        context_env.device_contexts[ctx_m.bdf] = ctx_m;
+
+        require(context_env.configured_ep_context(0) == ctx_a,
+                "EP slot 0 resolves canonical EP_A context");
+        require(context_env.configured_ep_context(1) == ctx_m,
+                "EP slot 1 resolves canonical EP_M context");
+        require(context_env.configured_ep_context(2) == ctx_z,
+                "EP slot 2 resolves canonical EP_Z context");
+
+        // An active topology must not silently fall back to declaration order
+        // when its canonical node is absent; that would bind the neighboring
+        // physical slot's configuration image.
+        dev_m.physical_node_id = "EP_M_MISSING";
+        require(context_env.configured_ep_context(1) == null,
+                "unmatched canonical node does not fall back by declaration");
+        dev_m.physical_node_id = "EP_M";
+
+        // With no topology adapter, preserve the old declaration-order
+        // contract for direct cfg-only users.
+        context_env.topology_adapter = null;
+        require(context_env.configured_ep_context(0) == ctx_z,
+                "cfg-only context lookup retains declaration fallback");
     endfunction
 
     function void require_switch_array_sizes(pcie_tl_switch_config cfg,
@@ -135,6 +279,28 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
                 (adapter.direct_ep_node_ids[1] == "EP1"),
                 "direct Endpoint mapping follows link ordering");
 
+        // Physical identity must survive both a shuffled declaration queue
+        // and IDs that do not sort in insertion order.
+        source = build_shuffled_direct_links();
+        cfg = adapter.translate(source, errors);
+        require((errors.size() == 0) && (cfg != null),
+                "shuffled direct-link translation");
+        require((adapter.direct_link_ids.size() == 3) &&
+                (adapter.direct_link_ids[0] == "A_LINK") &&
+                (adapter.direct_link_ids[1] == "M_LINK") &&
+                (adapter.direct_link_ids[2] == "Z_LINK"),
+                "shuffled direct IDs use canonical lexical order");
+        require((adapter.direct_rc_node_ids.size() == 3) &&
+                (adapter.direct_rc_node_ids[0] == "RC_A") &&
+                (adapter.direct_rc_node_ids[1] == "RC_M") &&
+                (adapter.direct_rc_node_ids[2] == "RC_Z"),
+                "shuffled direct RC IDs follow canonical slots");
+        require((adapter.direct_ep_node_ids.size() == 3) &&
+                (adapter.direct_ep_node_ids[0] == "EP_A") &&
+                (adapter.direct_ep_node_ids[1] == "EP_M") &&
+                (adapter.direct_ep_node_ids[2] == "EP_Z"),
+                "shuffled direct EP IDs follow canonical slots");
+        check_ep_context_mapping();
         if (cfg != null) begin
             cfg.switch_enable = 1;
             cfg.num_rc++;
@@ -197,6 +363,29 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
                 require(adapter.switch_ep_node_ids[i] == $sformatf("EP%0d", i),
                         "Switch Endpoint mapping follows DSP index");
         end
+
+        // Reorder every Switch edge in the source queue.  USP/DSP arrays must
+        // remain indexed by their declared physical port indexes, not by this
+        // arbitrary declaration order.
+        source = build_two_usp();
+        begin
+            pcie_topology_link_cfg reordered[$];
+            for (int i = source.links.size() - 1; i >= 0; i--)
+                reordered.push_back(source.links[i]);
+            source.links = reordered;
+        end
+        cfg = adapter.translate(source, errors);
+        require((errors.size() == 0) && (cfg != null),
+                "shuffled Switch-link translation");
+        require((adapter.switch_usp_link_ids.size() == 2) &&
+                (adapter.switch_usp_link_ids[0] == "UP0") &&
+                (adapter.switch_usp_link_ids[1] == "UP1"),
+                "shuffled Switch USP IDs follow physical ports");
+        require((adapter.switch_dsp_link_ids.size() == 3) &&
+                (adapter.switch_dsp_link_ids[0] == "DOWN0") &&
+                (adapter.switch_dsp_link_ids[1] == "DOWN1") &&
+                (adapter.switch_dsp_link_ids[2] == "DOWN2"),
+                "shuffled Switch DSP IDs follow physical ports");
         if (cfg != null) begin
             cfg.rc_agent_enable = 0;
             adapter.audit(source, cfg, errors);

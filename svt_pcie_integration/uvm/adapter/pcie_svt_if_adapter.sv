@@ -359,7 +359,7 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
       // 路径都必须抑制 Target App 默认响应；无 monitor 时 callback 只捕获
       // Completion，EP→RC 请求仍由 Target App callback 唯一入队。
       if (svt_device_is_root && (full_vip_agent.tl_mon != null)) begin
-        if (svt_agent.target[0] == null)
+        if ((svt_agent.target.size() == 0) || (svt_agent.target[0] == null))
           `uvm_fatal("FULL_VIP", "Root target[0] 为空，无法抑制内建 Target App")
 
         // Monitor 已经是 Root 的唯一观察源；Target App callback 只设置
@@ -382,7 +382,7 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
         // bridge 的 RC 请求响应应统一由 pcie_tl_env 的 host_mem 产生，
         // 因此在 Target App 接收边界复制请求并置 drop，避免 SVT 内部
         // target_appl0 同时返回一份未初始化数据的 Completion。
-        if (svt_agent.target[0] == null)
+        if ((svt_agent.target.size() == 0) || (svt_agent.target[0] == null))
           `uvm_fatal("FULL_VIP", "Root target[0] 为空，无法旁路上行请求")
         full_vip_target_rx_callback = new("full_vip_target_rx_callback");
         full_vip_target_rx_callback.rx_mailbox = full_vip_rx_mailbox;
@@ -406,7 +406,7 @@ class pcie_svt_if_adapter extends pcie_tl_if_adapter;
         // Endpoint active agent 通常没有 tl_mon，但 Target App 必然是
         // 完整 agent 的公开组件；post_rx_tlp_get 是官方定义的下行请求
         // 边界，不会把 Target App 生成的 Completion 再捕获成请求。
-        if (svt_agent.target[0] == null)
+        if ((svt_agent.target.size() == 0) || (svt_agent.target[0] == null))
           `uvm_fatal("SVT_ADAPTER",
             "FULL_VIP Endpoint target[0] 为空，无法注册 Target App callback")
         full_vip_target_rx_callback = new("full_vip_target_rx_callback");

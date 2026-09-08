@@ -7,6 +7,10 @@ class pcie_tl_topology_adapter extends uvm_object;
     string direct_link_ids[$];
     string direct_rc_node_ids[$];
     string direct_ep_node_ids[$];
+    // Switch link IDs are indexed by physical port, not source declaration
+    // order. USP entries feed RC/root slots; DSP entries feed EP slots.
+    string switch_usp_link_ids[];
+    string switch_dsp_link_ids[];
     string switch_ep_node_ids[];
 
     function new(string name = "pcie_tl_topology_adapter");
@@ -34,6 +38,8 @@ class pcie_tl_topology_adapter extends uvm_object;
         direct_link_ids.delete();
         direct_rc_node_ids.delete();
         direct_ep_node_ids.delete();
+        switch_usp_link_ids = new[0];
+        switch_dsp_link_ids = new[0];
         switch_ep_node_ids = new[0];
 
         if (topology == null) begin
@@ -114,13 +120,31 @@ class pcie_tl_topology_adapter extends uvm_object;
             switch_cfg.init_defaults();
             result.switch_cfg = switch_cfg;
 
+            switch_usp_link_ids = new[switch_node.num_usp];
+            switch_dsp_link_ids = new[switch_node.num_dsp];
             switch_ep_node_ids = new[switch_node.num_dsp];
             foreach (topology.links[i]) begin
                 if (topology.links[i].enabled &&
+                    (topology.links[i].downstream_node_id == switch_node.node_id) &&
+                    (topology.links[i].downstream_role == PCIE_TOPO_PORT_USP) &&
+                    (topology.links[i].downstream_port_index <
+                     switch_usp_link_ids.size())) begin
+                    switch_usp_link_ids[
+                        topology.links[i].downstream_port_index] =
+                        topology.links[i].link_id;
+                end
+                else if (topology.links[i].enabled &&
                     (topology.links[i].upstream_node_id == switch_node.node_id) &&
                     (topology.links[i].upstream_role == PCIE_TOPO_PORT_DSP)) begin
-                    switch_ep_node_ids[topology.links[i].upstream_port_index] =
-                        topology.links[i].downstream_node_id;
+                    if (topology.links[i].upstream_port_index <
+                        switch_dsp_link_ids.size()) begin
+                        switch_dsp_link_ids[
+                            topology.links[i].upstream_port_index] =
+                            topology.links[i].link_id;
+                        switch_ep_node_ids[
+                            topology.links[i].upstream_port_index] =
+                            topology.links[i].downstream_node_id;
+                    end
                 end
             end
         end
@@ -133,6 +157,30 @@ class pcie_tl_topology_adapter extends uvm_object;
              "TL backend does not simulate lanes, training, or data rate"},
             topology.links.size()), UVM_LOW)
         return result;
+    endfunction
+
+    // Return the canonical physical link ID for one translated role slot.
+    // This helper mirrors pcie_global_cfg::canonical_link_id() and is useful
+    // before a global policy object has been built.
+    function string canonical_link_id(
+        pcie_device_role_e role,
+        int slot_index);
+        canonical_link_id = "";
+        if (slot_index < 0)
+            return canonical_link_id;
+        if (switch_usp_link_ids.size() != 0 ||
+            switch_dsp_link_ids.size() != 0) begin
+            if ((role == PCIE_DEVICE_RC) &&
+                (slot_index < switch_usp_link_ids.size()))
+                canonical_link_id = switch_usp_link_ids[slot_index];
+            else if ((role == PCIE_DEVICE_EP) &&
+                     (slot_index < switch_dsp_link_ids.size()))
+                canonical_link_id = switch_dsp_link_ids[slot_index];
+        end
+        else if ((role == PCIE_DEVICE_RC) || (role == PCIE_DEVICE_EP)) begin
+            if (slot_index < direct_link_ids.size())
+                canonical_link_id = direct_link_ids[slot_index];
+        end
     endfunction
 
     function void audit(pcie_topology_cfg topology,

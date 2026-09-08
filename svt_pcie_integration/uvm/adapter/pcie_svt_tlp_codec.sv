@@ -86,9 +86,13 @@ class pcie_svt_tlp_codec;
       end
       default: begin `uvm_error("PCIE_SVT_CODEC", "unsupported TL transaction kind"); return 0; end
     endcase
-    if ((tlp.payload.size() % 4) != 0) begin `uvm_error("PCIE_SVT_CODEC", "SVT payload requires whole DWORDs"); svt_tlp = null; return 0; end
-    svt_tlp.payload = new[tlp.payload.size()/4];
-    foreach (tlp.payload[i]) svt_tlp.payload[i/4][31-8*(i%4)-:8] = tlp.payload[i];
+    // SVT stores payload as DWORDs.  TL sequences may provide a byte-granular
+    // payload, so round up only the transport representation and zero-fill
+    // the unused lanes; the Memory request's BE fields retain validity.
+    svt_tlp.payload = new[(tlp.payload.size() + 3) / 4];
+    foreach (svt_tlp.payload[dw]) svt_tlp.payload[dw] = '0;
+    foreach (tlp.payload[i])
+      svt_tlp.payload[i/4][31-8*(i%4)-:8] = tlp.payload[i];
     return 1;
   endfunction
 

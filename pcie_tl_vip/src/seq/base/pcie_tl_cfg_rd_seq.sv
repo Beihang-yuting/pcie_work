@@ -7,6 +7,8 @@ class pcie_tl_cfg_rd_seq extends uvm_sequence #(pcie_tl_tlp);
     rand tlp_constraint_mode_e mode;
     bit [15:0] completer_id;  // alias for target_bdf (set either one)
     bit [31:0] rd_data;
+    // 实际送入 sequencer 的配置读 TLP，供上层追踪请求字段及 Completion。
+    pcie_tl_cfg_tlp issued_tlp;
     pcie_rw_status_e status = PCIE_RW_OK;
     int rb_timeout_ns = 50000;
     constraint c_default { mode == CONSTRAINT_LEGAL; first_be == 4'hF; }
@@ -26,6 +28,7 @@ class pcie_tl_cfg_rd_seq extends uvm_sequence #(pcie_tl_tlp);
               tlp.constraint_mode_sel == local::mode;
             })
             `uvm_fatal("CFG_RD_SEQ", "Configuration Read randomize() failed")
+        issued_tlp = tlp;
         finish_item(tlp);
 
         // A successful Configuration Read must return one complete DWORD.

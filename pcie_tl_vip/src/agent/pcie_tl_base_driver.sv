@@ -20,8 +20,9 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
     //--- tag_mgr which env may free early). Maps tag -> requesting TLP handle
     //--- so returning Completions can be written back onto the seq's object. ---
     protected pcie_tl_tlp      rb_outstanding[bit [9:0]];
-    protected int              rb_recv[bit [9:0]];   // bytes received per tag
-    protected int              rb_total[bit [9:0]];  // expected bytes per tag
+    protected int              rb_recv[bit [9:0]];   // enabled bytes received
+    protected int              rb_total[bit [9:0]];  // enabled bytes expected
+    protected int              rb_wire[bit [9:0]];   // padded wire bytes consumed
 
     function new(string name = "pcie_tl_base_driver", uvm_component parent = null);
         super.new(name, parent);
@@ -62,6 +63,9 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
             tlp.rb_data = {};
             tlp.rb_status = CPL_STATUS_SC;
             rb_outstanding[t] = tlp;
+            rb_recv.delete(t);
+            rb_total.delete(t);
+            rb_wire.delete(t);
             // Global registry for SV_IF/adapter mode, where the monitor (not the
             // env/driver completion path) folds the returning CplD.
             pcie_rb_registry::register(tlp);
@@ -105,23 +109,57 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
         if (!rb_outstanding.exists(cpl.tag)) return;   // not a request we track
         req = rb_outstanding[cpl.tag];
         if (!rb_total.exists(cpl.tag)) begin
-            rb_total[cpl.tag] = (req.length == 0) ? 4096 : req.length * 4;
+            pcie_tl_mem_tlp mem_req;
+            if ($cast(mem_req, req))
+                rb_total[cpl.tag] = pcie_tl_mem_valid_bytes(mem_req);
+            else
+                rb_total[cpl.tag] = (req.length == 0) ? 4096 : req.length * 4;
             rb_recv[cpl.tag]  = 0;
+            rb_wire[cpl.tag]  = 0;
         end
-        foreach (cpl.payload[i]) req.rb_data.push_back(cpl.payload[i]);
-        rb_recv[cpl.tag] += cpl.payload.size();
+
+        if (cpl.has_data()) begin
+            pcie_tl_mem_tlp mem_req;
+            int declared_payload_bytes;
+            int available_payload_bytes;
+            int valid_in_cpl;
+
+            declared_payload_bytes = (cpl.length == 0) ? 4096 : cpl.length * 4;
+            available_payload_bytes = declared_payload_bytes;
+            if (available_payload_bytes > cpl.payload.size())
+                available_payload_bytes = cpl.payload.size();
+
+            if ($cast(mem_req, req)) begin
+                valid_in_cpl = pcie_tl_mem_valid_bytes_in_range(
+                    mem_req, rb_wire[cpl.tag], available_payload_bytes);
+                for (int i = 0; i < available_payload_bytes; i++) begin
+                    if (pcie_tl_mem_lane_enabled(mem_req, rb_wire[cpl.tag] + i))
+                        req.rb_data.push_back(cpl.payload[i]);
+                end
+            end else begin
+                valid_in_cpl = available_payload_bytes;
+                for (int i = 0; i < available_payload_bytes; i++)
+                    req.rb_data.push_back(cpl.payload[i]);
+            end
+
+            rb_recv[cpl.tag] += valid_in_cpl;
+            rb_wire[cpl.tag] += available_payload_bytes;
+        end
+
         if (cpl.cpl_status != CPL_STATUS_SC) req.rb_status = cpl.cpl_status;
         // A successful configuration/IO write completes with TLP_CPL, which
         // intentionally carries no data. That Completion is terminal just
         // like an error Completion; only CplD needs payload-byte accounting.
         last = !cpl.has_data() ||
                (rb_recv[cpl.tag] >= rb_total[cpl.tag]) ||
+               (rb_wire[cpl.tag] >= ((req.length == 0) ? 4096 : req.length * 4)) ||
                (cpl.cpl_status != CPL_STATUS_SC);
         if (last) begin
             req.rb_done = 1;
             rb_outstanding.delete(cpl.tag);
             rb_recv.delete(cpl.tag);
             rb_total.delete(cpl.tag);
+            rb_wire.delete(cpl.tag);
         end
     endfunction
 

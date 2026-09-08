@@ -31,10 +31,13 @@ class pcie_svt_link_override_cfg extends uvm_object;
 
   `uvm_object_utils(pcie_svt_link_override_cfg)
 
+  // 构造函数：仅透传名字，字段保持声明默认值。
   function new(string name = "pcie_svt_link_override_cfg");
     super.new(name);
   endfunction
 
+  // 深拷贝全部 has_*/值字段；rhs 类型不符时报 fatal（配置复制失败不可
+  // 继续构建 backend）。
   virtual function void do_copy(uvm_object rhs);
     pcie_svt_link_override_cfg source;
 
@@ -62,7 +65,7 @@ endclass
 
 class pcie_svt_backend_cfg extends uvm_object;
   // --------------------------------------------------------------------------
-  // Transport and link-training policy.
+  // Transport 与链路训练策略。
   // --------------------------------------------------------------------------
   bit enable = 1'b1;
   pcie_svt_transport_e transport = PCIE_SVT_TRANSPORT_SERIAL;
@@ -73,7 +76,7 @@ class pcie_svt_backend_cfg extends uvm_object;
   bit fast_link_training = 1'b0;
 
   // --------------------------------------------------------------------------
-  // Physical equalization policy.
+  // 物理层均衡（EQ）策略。
   // --------------------------------------------------------------------------
   bit enable_equalization = 1'b1;
   int unsigned eq_mode = 0;
@@ -83,7 +86,7 @@ class pcie_svt_backend_cfg extends uvm_object;
   bit full_equalization_required = 1'b1;
 
   // --------------------------------------------------------------------------
-  // SVT configuration-space and Target App policy.
+  // SVT 配置空间与 Target App 策略。
   // --------------------------------------------------------------------------
   bit enable_shadow_cfg_lookup = 1'b0;
   bit enable_multi_endpoint_mode = 1'b0;
@@ -91,7 +94,7 @@ class pcie_svt_backend_cfg extends uvm_object;
   bit target_auto_response = 1'b0;
 
   // --------------------------------------------------------------------------
-  // Timeout and log policy.
+  // 超时与日志策略。
   // --------------------------------------------------------------------------
   time link_timeout = 3ms;
   time cfg_timeout = 1ms;
@@ -118,10 +121,13 @@ class pcie_svt_backend_cfg extends uvm_object;
 
   `uvm_object_utils(pcie_svt_backend_cfg)
 
+  // 构造函数：仅透传名字，字段保持声明默认值。
   function new(string name = "pcie_svt_backend_cfg");
     super.new(name);
   endfunction
 
+  // 把全部字段重置为声明默认值并清空链路覆盖表。用于测试或复用同一
+  // 对象时回到已知状态；与声明初值保持逐字段一致。
   function void init_defaults();
     enable = 1'b1;
     transport = PCIE_SVT_TRANSPORT_SERIAL;
@@ -155,6 +161,8 @@ class pcie_svt_backend_cfg extends uvm_object;
     link_override.delete();
   endfunction
 
+  // 返回链路最终 Gen 上限：优先级为链路覆盖 > link.max_gen（非 0 时）
+  // > 全局 default_max_gen。link 为 null 时返回全局默认；恒返回 1。
   function bit get_link_max_gen(
       pcie_link_cfg link,
       output int unsigned value);
@@ -168,6 +176,7 @@ class pcie_svt_backend_cfg extends uvm_object;
     return 1'b1;
   endfunction
 
+  // 返回链路最终快速建链开关：链路覆盖优先于全局 fast_link_training。
   function bit get_link_fast_training(
       pcie_link_cfg link,
       output bit value);
@@ -232,6 +241,7 @@ class pcie_svt_backend_cfg extends uvm_object;
     return 1'b1;
   endfunction
 
+  // 返回链路最终建链超时：链路覆盖优先于全局 link_timeout。
   function bit get_link_timeout(
       pcie_link_cfg link,
       output time value);
@@ -243,6 +253,9 @@ class pcie_svt_backend_cfg extends uvm_object;
     return 1'b1;
   endfunction
 
+  // 校验全局字段与每条链路覆盖的取值合法性；所有问题以中文诊断累加进
+  // errors（空表示通过）。未实现的非默认请求（PIPE、monitor 等）在此
+  // 硬拒绝，避免 backend 静默忽略用户意图。
   function void validate(output string errors[$]);
     bit seen_override[string];
 
@@ -257,6 +270,48 @@ class pcie_svt_backend_cfg extends uvm_object;
       errors.push_back("SVT default_max_gen 必须为 Gen4 或 Gen5");
     if (eq_mode > 3)
       errors.push_back("SVT eq_mode 必须为 0~3");
+
+    // 当前 TL-root backend 始终创建 active Device Agent，并把 Target App
+    // 的请求交给 pcie_tl_env 统一处理。R-2020.12 没有一个名为
+    // target_app_enable/target_auto_response 的通用公开开关；Target App
+    // 必须存在（Device Configuration 也约束 target_cfg.num()>0），且
+    // backend 会通过 callback 抑制其自动 Completion。因此非默认请求必须
+    // 在 build 前明确拒绝，不能让用户误以为设置已经生效。
+    if (!target_app_enable)
+      errors.push_back(
+        "SVT target_app_enable=0 未实现：当前 backend 必须保留 Target App");
+    if (target_auto_response)
+      errors.push_back(
+        "SVT target_auto_response=1 未实现：TL-owned backend 禁止内建自动响应");
+
+    // enable_svt_monitor 不能在同一个 Device Agent 上与 active backend
+    // 同时表达。SVT 的公开配置要求 is_active=0/enable_monitor=1 才是
+    // passive monitor；当前 provider 没有创建独立 passive agent 的契约，
+    // 所以对该非默认值直接报错，而不是只打印 warning 后继续运行。
+    if (enable_svt_monitor)
+      errors.push_back(
+        "SVT enable_svt_monitor=1 未实现：请单独创建 passive SVT agent");
+
+    // 该字段仅为旧项目保留的兼容命名，真正控制 R-2020.12 EQ 的是
+    // enable_equalization/eq_mode。非默认值若继续被静默忽略会造成链路
+    // 训练策略与 test 意图不一致，因此要求调用者改用实际字段。
+    if (!full_equalization_required)
+      errors.push_back(
+        "SVT full_equalization_required=0 未实现：请使用 eq_mode/enable_equalization");
+
+    // cfg/enum/traffic timeout 是 pcie_tl_env 编排阶段的预算，并非
+    // R-2020.12 Device/PL/TL 的同名公开字段。当前 backend 尚未消费这些
+    // stage budget；保留默认值兼容既有配置，但对显式改写给出硬错误，
+    // 避免把一个未生效的 timeout 当成已启用。
+    if (cfg_timeout != 1ms)
+      errors.push_back(
+        "SVT cfg_timeout 当前仅供后续编排 sequence 使用，backend 暂不支持非默认值");
+    if (enum_timeout != 3ms)
+      errors.push_back(
+        "SVT enum_timeout 当前仅供后续编排 sequence 使用，backend 暂不支持非默认值");
+    if (traffic_timeout != 1ms)
+      errors.push_back(
+        "SVT traffic_timeout 当前仅供后续编排 sequence 使用，backend 暂不支持非默认值");
 
     if ($isunknown(link_timeout) || (link_timeout == 0))
       errors.push_back("SVT link_timeout 必须大于 0");
@@ -300,6 +355,8 @@ class pcie_svt_backend_cfg extends uvm_object;
     end
   endfunction
 
+  // 深拷贝全部全局字段，并逐项复制链路覆盖表（覆盖对象各自 new，
+  // 不共享句柄）；rhs 类型不符时报 fatal。
   virtual function void do_copy(uvm_object rhs);
     pcie_svt_backend_cfg source;
     pcie_svt_link_override_cfg override_copy;

@@ -8,6 +8,12 @@ class pcie_tl_env extends uvm_env;
     //--- Configuration ---
     pcie_tl_env_config     cfg;
 
+    // 后端无关的全局配置。TL-only 用户不需要提供该对象；SVT 或其他
+    // transport provider 通过它选择实际启用的物理链路。
+    pcie_global_cfg        global_cfg;
+    pcie_tl_backend_provider backend_provider;
+    pcie_tl_backend_factory  backend_factory;
+
     // 拓扑配置是可选的编排入口。存在 topology_cfg 时，环境在创建任何
     // agent 之前把后端无关拓扑转换成原生 pcie_tl_env_config；没有该
     // 对象时，继续走历史的直接 cfg 注入路径。
@@ -96,14 +102,67 @@ class pcie_tl_env extends uvm_env;
     // 该状态跨越 build/connect/apply_config 三个阶段，不能声明为局部变量。
     bit bridge_required;
 
-    // Return the Nth Endpoint policy context in declaration order.  The graph
-    // remains authoritative; this helper only provides a stable mapping from
-    // dynamically created EP agents to their independent config image.
+    // 在 build_phase 完成 provider 创建后记录其是否被成功接入。该状态
+    // 只用于诊断，不改变历史 cfg 注入路径。
+    bit backend_provider_active;
+
+    // 返回某个物理 agent 槽位对应的 Endpoint 策略上下文。topology
+    // adapter 激活时，EP 槽位遵循规范 link/端口顺序，可能与全局 device
+    // 记录的声明顺序不同。优先通过 adapter 的物理节点 ID 关联；对没有
+    // graph 节点元数据的 cfg-only/旧调用者保留历史的声明顺序扫描。
     function pcie_tl_func_context configured_ep_context(int ep_index);
+        string canonical_node_id;
         int ordinal;
 
-        ordinal = 0;
         configured_ep_context = null;
+
+        canonical_node_id = "";
+        if (topology_adapter != null) begin
+            if (cfg.switch_enable &&
+                (ep_index >= 0) &&
+                (ep_index < topology_adapter.switch_ep_node_ids.size())) begin
+                canonical_node_id = topology_adapter.switch_ep_node_ids[ep_index];
+            end
+            else if (!cfg.switch_enable &&
+                     (ep_index >= 0) &&
+                     (ep_index < topology_adapter.direct_ep_node_ids.size())) begin
+                canonical_node_id = topology_adapter.direct_ep_node_ids[ep_index];
+            end
+        end
+
+        // Global/DPU 投影通过稳定的 device_id 或显式 physical_node_id
+        // 识别物理 Endpoint。当一个节点拥有多条 PF/VF 记录时，首个匹配
+        // 是 PF/基础 function 上下文；全部记录仍可经 device_contexts
+        // 访问。
+        if (canonical_node_id != "") begin
+            foreach (cfg.device_cfgs[i]) begin
+                pcie_device_cfg device;
+
+                device = cfg.device_cfgs[i];
+                if ((device == null) || (device.role != PCIE_DEVICE_EP))
+                    continue;
+                if (!((device.device_id == canonical_node_id) ||
+                      ((device.physical_node_id != "") &&
+                       (device.physical_node_id == canonical_node_id))))
+                    continue;
+                if (device_contexts.exists(device.bdf)) begin
+                    configured_ep_context = device_contexts[device.bdf];
+                    return configured_ep_context;
+                end
+            end
+
+            // topology adapter 一旦激活，规范节点匹配失败就是配置错
+            // 误，而不是把物理槽位压回声明顺序的许可。返回 null 保留
+            // 调用方既有的缺上下文回退（共享 manager），并避免把
+            // EP_A 的配置分给 EP_M。
+            return configured_ep_context;
+        end
+
+        // 历史回退：没有 topology adapter 的调用者保留原有的声明顺序
+        // 契约。
+        if (topology_adapter != null)
+            return configured_ep_context;
+        ordinal = 0;
         foreach (cfg.device_cfgs[i]) begin
             if ((cfg.device_cfgs[i] != null) &&
                 (cfg.device_cfgs[i].role == PCIE_DEVICE_EP)) begin
@@ -209,13 +268,17 @@ class pcie_tl_env extends uvm_env;
     protected function bit prepare_topology_cfg(output string errors[$]);
         pcie_tl_env_config translated_cfg;
         pcie_tl_env_config policy_cfg;
-        pcie_global_cfg global_cfg;
-
         errors.delete();
         topology_cfg_active = 1'b0;
         if (!uvm_config_db#(pcie_topology_cfg)::get(
-                this, "", "topology_cfg", topology_cfg))
-            return 1'b1;
+                this, "", "topology_cfg", topology_cfg)) begin
+            // 生产集成可以只发布 global_cfg；其中的 authoritative topology
+            // 自动作为 TL graph 输入。没有任何 graph 时才回退历史 cfg-only
+            // 路径，保证旧 test 不需要修改。
+            if ((global_cfg == null) || (global_cfg.topology == null))
+                return 1'b1;
+            topology_cfg = global_cfg.topology;
+        end
         if (topology_cfg == null) begin
             errors.push_back("non-null topology_cfg is required");
             return 1'b0;
@@ -238,9 +301,7 @@ class pcie_tl_env extends uvm_env;
                 "default_tl_policy_cfg");
         end
 
-        if (uvm_config_db#(pcie_global_cfg)::get(
-                this, "", "global_cfg", global_cfg) &&
-            (global_cfg != null)) begin
+        if (global_cfg != null) begin
             policy_cfg.device_cfgs.delete();
             foreach (global_cfg.devices[i])
                 policy_cfg.device_cfgs.push_back(global_cfg.devices[i]);
@@ -272,6 +333,100 @@ class pcie_tl_env extends uvm_env;
         return cfg.configured_ep_root_index(ep_index, fallback_root);
     endfunction
 
+    // 返回某个角色槽位的权威物理 link ID。这里刻意*不是*扫描 use_svt
+    // 链路：直连/Switch 拓扑中间的 DUT 拥有槽位必须保留其物理序号。
+    protected function string provider_link_id(
+        pcie_device_role_e role,
+        int role_index);
+        provider_link_id = "";
+        if (global_cfg == null)
+            return provider_link_id;
+        provider_link_id = global_cfg.canonical_link_id(role, role_index);
+    endfunction
+
+    // 在非 TL provider 激活时解析一个物理槽位。只有映射畸形/缺失才返
+    // 回 0。返回 1 且 adapter==null 表示该槽位刻意归外部 DUT 所有、必
+    // 须保持 null；此模式下不允许任何 TL-only 回退。
+    protected function bit resolve_provider_slot(
+        pcie_device_role_e role,
+        int role_index,
+        output string link_id,
+        output pcie_tl_if_adapter adapter,
+        output bit provider_owned,
+        output string error_text);
+        pcie_link_cfg link;
+
+        link_id = "";
+        adapter = null;
+        provider_owned = 1'b0;
+        error_text = "";
+        if (!backend_provider_active)
+            return 1'b1;
+        if (global_cfg == null) begin
+            error_text = "active backend provider has no global_cfg";
+            return 1'b0;
+        end
+
+        link_id = provider_link_id(role, role_index);
+        if (link_id == "") begin
+            error_text = $sformatf(
+                "no canonical %s link for physical slot %0d",
+                (role == PCIE_DEVICE_RC) ? "RC" : "EP", role_index);
+            return 1'b0;
+        end
+        link = global_cfg.find_link(link_id);
+        if (link == null) begin
+            error_text = $sformatf(
+                "canonical link '%s' is absent from global_cfg", link_id);
+            return 1'b0;
+        end
+        if (!link.enabled) begin
+            // 策略禁用的边仍留在物理槽位表中，更高槽位永不重编号；但
+            // 本次构建刻意不给它 provider/TL agent。
+            provider_owned = 1'b0;
+            return 1'b1;
+        end
+
+        // svt_role 标识链路的哪一端被模拟。即使链路置了 use_svt，对端
+        // 仍是真实 DUT，因此刻意不给它 TL agent/adapter。
+        provider_owned = link.use_svt && link.svt_role_valid &&
+                         (link.svt_role == role);
+        if (!provider_owned)
+            return 1'b1;
+
+        adapter = backend_provider.get_adapter_for_link(link_id);
+        if (adapter == null) begin
+            error_text = $sformatf(
+                "provider-owned %s link '%s' has no adapter",
+                (role == PCIE_DEVICE_RC) ? "RC" : "EP", link_id);
+            return 1'b0;
+        end
+        return 1'b1;
+    endfunction
+
+    // 供 connect_phase 诊断使用：稀疏物理数组出现 null 表项时判断该槽
+    // 是否应归 provider。它复刻 resolve_provider_slot 的所有权判定，但
+    // 不制造 adapter、不改状态。
+    protected function bit strict_slot_provider_owned(
+        pcie_device_role_e role,
+        int role_index);
+        string link_id;
+        pcie_link_cfg link;
+
+        strict_slot_provider_owned = 1'b0;
+        if (!backend_provider_active || (global_cfg == null))
+            return strict_slot_provider_owned;
+        link_id = global_cfg.canonical_link_id(role, role_index);
+        if (link_id == "")
+            return strict_slot_provider_owned;
+        link = global_cfg.find_link(link_id);
+        if (link == null)
+            return strict_slot_provider_owned;
+        strict_slot_provider_owned = link.enabled && link.use_svt &&
+                                     link.svt_role_valid &&
+                                     (link.svt_role == role);
+    endfunction
+
     function new(string name = "pcie_tl_env", uvm_component parent = null);
         super.new(name, parent);
     endfunction
@@ -288,6 +443,12 @@ class pcie_tl_env extends uvm_env;
 
         super.build_phase(phase);
 
+        // 先读取 global_cfg，再执行 topology translation。这样生产 test
+        // 只需发布一个 global_cfg；TL-only 旧 test 没有该对象时完全不受
+        // 影响，仍然通过 cfg config-db 获取本地策略。
+        void'(uvm_config_db#(pcie_global_cfg)::get(
+            this, "", "global_cfg", global_cfg));
+
         // 拓扑编排必须早于“Get or create config”，否则 native 路径会先
         // 创建默认 1RC+1EP，导致 graph 配置无法覆盖实际 agent 数量。
         if (!prepare_topology_cfg(topology_errors)) begin
@@ -300,16 +461,106 @@ class pcie_tl_env extends uvm_env;
         end
 
         bridge_required = 1'b0;
+        backend_provider_active = 1'b0;
         void'(uvm_config_db#(bit)::get(
             this, "", "pcie_svt_bridge_required", bridge_required));
 
         legacy_rc_cpl_ap = new("legacy_rc_cpl_ap", this);
 
         // 1. Get or create config
-        if (!topology_cfg_active &&
-            !uvm_config_db#(pcie_tl_env_config)::get(this, "", "cfg", cfg)) begin
-            cfg = pcie_tl_env_config::type_id::create("cfg");
-            `uvm_info("ENV", "No config found in config_db, using defaults", UVM_MEDIUM)
+        if (!topology_cfg_active) begin
+            if (!uvm_config_db#(pcie_tl_env_config)::get(this, "", "cfg", cfg) ||
+                (cfg == null)) begin
+                cfg = pcie_tl_env_config::type_id::create("cfg");
+                if (cfg == null) begin
+                    `uvm_fatal("ENV", "pcie_tl_env_config factory returned null")
+                    return;
+                end
+                `uvm_info("ENV", "No config found in config_db, using defaults", UVM_MEDIUM)
+            end
+        end
+        if (cfg == null) begin
+            `uvm_fatal("ENV", "pcie_tl_env has null cfg after topology preparation")
+            return;
+        end
+
+        // SVT/其他外部 transport provider 在 TL adapter 创建前完成。TL
+        // 环境只依赖中性 provider 契约，因此本文件不需要包含 SVT package。
+        if ((global_cfg != null) &&
+            (global_cfg.backend != PCIE_BACKEND_TL_ONLY)) begin
+            string backend_errors[$];
+
+            global_cfg.validate(backend_errors);
+            if (backend_errors.size() != 0) begin
+                foreach (backend_errors[i])
+                    `uvm_fatal("BACKEND_CFG", backend_errors[i])
+                return;
+            end
+
+            if (!uvm_config_db#(pcie_tl_backend_provider)::get(
+                  this, "", "pcie_tl_backend_provider", backend_provider) ||
+                (backend_provider == null)) begin
+                if (!uvm_config_db#(pcie_tl_backend_factory)::get(
+                      this, "", "pcie_tl_backend_factory", backend_factory) ||
+                    (backend_factory == null)) begin
+                    `uvm_fatal("BACKEND_CFG", {
+                      "global_cfg 选择了非 TL_ONLY backend，但未提供 ",
+                      "pcie_tl_backend_provider 或 pcie_tl_backend_factory"})
+                    return;
+                end
+                else begin
+                    backend_provider = backend_factory.create_backend(
+                        "backend_provider");
+                end
+            end
+
+            if (backend_provider == null)
+                `uvm_fatal("BACKEND_CFG", "backend factory 返回了空 provider")
+            if (backend_provider == null)
+                return;
+
+            if (backend_provider != null) begin
+                if (!backend_provider.build_backend(
+                      this, global_cfg, cfg, backend_errors)) begin
+                    if (backend_errors.size() == 0)
+                        `uvm_fatal("BACKEND_BUILD",
+                            "backend provider build failed without diagnostics")
+                    foreach (backend_errors[i])
+                        `uvm_fatal("BACKEND_BUILD", backend_errors[i])
+                    backend_provider_active = 1'b0;
+                    return;
+                end
+                if (!backend_provider.validate_link_adapter_mapping(
+                      backend_errors)) begin
+                    if (backend_errors.size() == 0)
+                        `uvm_fatal("BACKEND_MAP",
+                            "backend provider mapping validation failed without diagnostics")
+                    foreach (backend_errors[i])
+                        `uvm_fatal("BACKEND_MAP", backend_errors[i])
+                    backend_provider_active = 1'b0;
+                    return;
+                end
+                backend_provider_active = 1'b1;
+                // global_cfg.svt_bridge_enable 是公共配置层提供的显式
+                // override。provider.bridge_required 仍表示 transport 自身
+                // 的硬性需求；两者取 OR，既允许 SVT provider 自动打开桥，
+                // 也允许用户对自定义 provider 明确要求桥接。该处理仅在
+                // 非 TL_ONLY backend 分支执行，不会污染旧 TL-only 路径。
+                bridge_required |= global_cfg.svt_bridge_enable;
+                bridge_required |= backend_provider.bridge_required;
+
+                // TL requester/responder agent 只为 provider 实际拥有的
+                // SVT/transport 方向创建。比如 SVT RC + DUT EP 只创建
+                // RC TL agent；DUT RC + SVT EP 则只创建 EP TL agent。
+                if (backend_provider.get_rc_adapter_count() != 0)
+                    cfg.rc_agent_enable = 1'b1;
+                else
+                    cfg.rc_agent_enable = 1'b0;
+                if (backend_provider.get_ep_adapter_count() != 0)
+                    cfg.ep_agent_enable = 1'b1;
+                else
+                    cfg.ep_agent_enable = 1'b0;
+            end
         end
 
         if (cfg.device_cfgs.size() != 0) begin
@@ -352,11 +603,26 @@ class pcie_tl_env extends uvm_env;
         if (cfg.switch_enable && cfg.switch_cfg != null)
             cfg.switch_cfg.init_defaults();
 
-        // Root count (USP): switch -> num_usp; else num_rc (0 when RC disabled).
-        nu = (cfg.switch_enable && cfg.switch_cfg != null) ? cfg.switch_cfg.num_usp
-                                                           : (cfg.rc_agent_enable ? cfg.num_rc : 0);
-        // Manager sets: >=1 so a no-RC (EP-only) env still has shared managers.
-        n_mgr = (nu > 0) ? nu : 1;
+        // RC agent 槽位是 provider 拥有的 transport 槽位。Switch 模式
+        // 下即使所有 RC 都归外部 DUT，也保留全部物理 USP manager 槽
+        // 位，但只有存在至少一个 provider RC 时才分配 RC agent。这样
+        // EP→dsp_owner 的 manager 接线保持有效，又不会为 DUT root 凭
+        // 空制造 RC adapter。
+        if (cfg.switch_enable && (cfg.switch_cfg != null)) begin
+            nu = cfg.rc_agent_enable ? cfg.switch_cfg.num_usp : 0;
+            n_mgr = (cfg.switch_cfg.num_usp > 0) ? cfg.switch_cfg.num_usp : 1;
+        end
+        else begin
+            nu = cfg.rc_agent_enable ? cfg.num_rc : 0;
+            // 混合 provider 直连拓扑激活时，EP 槽位可能映射到不同的外
+            // 部 RC root。即使没有任何 RC adapter 归 provider，也按物理
+            // root 各保留一个 manager；provider 一个不占时只抑制 RC
+            // agent/adapter 数组。
+            if (backend_provider_active)
+                n_mgr = (cfg.num_rc > 0) ? cfg.num_rc : 1;
+            else
+                n_mgr = (nu > 0) ? nu : 1;
+        end
         // Non-switch multi-EP: build ep_agents[]/ep_adapters[] (num_ep independent links).
         ns_multi_ep = (!cfg.switch_enable) && cfg.ep_agent_enable && (cfg.num_ep > 1);
 
@@ -377,16 +643,30 @@ class pcie_tl_env extends uvm_env;
         end
         rc_adapters = new[nu];
         for (int r = 0; r < nu; r++) begin
-            // 可选 SVT bridge 在 TL env 建树前注入，确保 Agent 持有同一适配器。
-            if (!uvm_config_db#(pcie_tl_if_adapter)::get(
-                  this, "", $sformatf("pcie_svt_bridge_rc_adapter_%0d", r),
-                  rc_adapters[r])) begin
-                // 适配器允许由工厂覆盖生成（例如 SVT adapter）。因此即使
-                // bridge_required=1，也不能要求调用方预先传入一个实例；
-                // 统一走 factory create，SVT adapter 再于 connect 阶段绑定
-                // 正式 Mapper。
-                rc_adapters[r] = pcie_tl_if_adapter::type_id::create(
-                    $sformatf("rc_adapter_%0d", r), this);
+            string slot_id;
+            string map_error;
+            bit provider_owned;
+
+            if (backend_provider_active) begin
+                // 严格 provider 模式先解析物理槽位。null 结果只在对端/
+                // DUT 一侧才是刻意的；这里不允许任何位置或 factory
+                // 回退。
+                if (!resolve_provider_slot(PCIE_DEVICE_RC, r, slot_id,
+                                            rc_adapters[r], provider_owned,
+                                            map_error)) begin
+                    `uvm_fatal("BACKEND_MAP", map_error)
+                    return;
+                end
+            end
+            else begin
+                // 历史 TL-only 路径：保留 config-db 注入与历史的
+                // factory 默认 adapter 创建。
+                if (!uvm_config_db#(pcie_tl_if_adapter)::get(
+                      this, "", $sformatf("pcie_svt_bridge_rc_adapter_%0d", r),
+                      rc_adapters[r])) begin
+                    rc_adapters[r] = pcie_tl_if_adapter::type_id::create(
+                        $sformatf("rc_adapter_%0d", r), this);
+                end
             end
         end
         // Aliases -> [0] (managers always exist; rc_adapter only when a root exists)
@@ -394,17 +674,34 @@ class pcie_tl_env extends uvm_env;
         fc_mgr     = fc_mgrs[0];
         ord_eng    = ord_engs[0];
         cfg_mgr    = cfg_mgrs[0];
-        if (nu > 0) rc_adapter = rc_adapters[0];
+        rc_adapter = null;
+        foreach (rc_adapters[r]) begin
+            if (rc_adapters[r] != null) begin
+                rc_adapter = rc_adapters[r];
+                break;
+            end
+        end
 
         // 3. Single EP adapter for the direct-mode / switch-dangling path.
         //    Non-switch multi-EP builds its own ep_adapters[] in block 4a instead;
         //    a no-EP (RC-only) env creates none (all EP derefs are guarded).
-        if (cfg.switch_enable || (cfg.ep_agent_enable && !ns_multi_ep))
+        if ((!backend_provider_active && cfg.switch_enable) ||
+            (!cfg.switch_enable && cfg.ep_agent_enable && !ns_multi_ep))
             begin
-                // 与 RC 侧一致，允许生产集成在 build 前注入外部适配器。
-                // 这样真实 DUT 的 EP 方向也能使用 SVT/PIPE adapter，而
-                // 未注入时仍保持原有 TL-only 工厂行为。
-                if (!uvm_config_db#(pcie_tl_if_adapter)::get(
+                string slot_id;
+                string map_error;
+                bit provider_owned;
+
+                ep_adapter = null;
+                if (backend_provider_active) begin
+                    if (!resolve_provider_slot(PCIE_DEVICE_EP, 0, slot_id,
+                                                ep_adapter, provider_owned,
+                                                map_error)) begin
+                        `uvm_fatal("BACKEND_MAP", map_error)
+                        return;
+                    end
+                end
+                else if (!uvm_config_db#(pcie_tl_if_adapter)::get(
                       this, "", "pcie_svt_bridge_ep_adapter_0", ep_adapter)) begin
                     ep_adapter = pcie_tl_if_adapter::type_id::create(
                         "ep_adapter", this);
@@ -419,12 +716,28 @@ class pcie_tl_env extends uvm_env;
         if (nu > 0) begin
             rc_agents = new[nu];
             for (int r = 0; r < nu; r++) begin
+                if (backend_provider_active && (rc_adapters[r] == null)) begin
+                    // 物理 RC 槽位属于外部 DUT（provider 拥有对端）。
+                    // 槽位留在按拓扑定长的数组里，但不创建 TL agent。
+                    if (strict_slot_provider_owned(PCIE_DEVICE_RC, r)) begin
+                        `uvm_fatal("BACKEND_MAP", $sformatf(
+                            "provider-owned RC slot %0d has no adapter", r))
+                        return;
+                    end
+                    continue;
+                end
                 uvm_config_db#(uvm_active_passive_enum)::set(
                     this, $sformatf("rc_agent_%0d", r), "is_active", cfg.rc_is_active);
                 rc_agents[r] = pcie_tl_rc_agent::type_id::create(
                     $sformatf("rc_agent_%0d", r), this);
             end
-            rc_agent = rc_agents[0];
+            rc_agent = null;
+            foreach (rc_agents[r]) begin
+                if (rc_agents[r] != null) begin
+                    rc_agent = rc_agents[r];
+                    break;
+                end
+            end
         end
 
         // 4a. EP agents. Non-switch multi-EP -> independent ep_agent_%0d links
@@ -434,20 +747,54 @@ class pcie_tl_env extends uvm_env;
             ep_agents   = new[cfg.num_ep];
             ep_adapters = new[cfg.num_ep];
             for (int i = 0; i < cfg.num_ep; i++) begin
+                if (backend_provider_active) begin
+                    string slot_id;
+                    string map_error;
+                    bit provider_owned;
+
+                    if (!resolve_provider_slot(PCIE_DEVICE_EP, i, slot_id,
+                                                ep_adapters[i], provider_owned,
+                                                map_error)) begin
+                        `uvm_fatal("BACKEND_MAP", map_error)
+                        return;
+                    end
+                    if (!provider_owned) begin
+                        // 刻意保留的外部 DUT 物理槽位。
+                        ep_agents[i] = null;
+                        continue;
+                    end
+                end
                 uvm_config_db#(uvm_active_passive_enum)::set(
                     this, $sformatf("ep_agent_%0d", i), "is_active", cfg.ep_is_active);
                 ep_agents[i]   = pcie_tl_ep_agent::type_id::create(
                     $sformatf("ep_agent_%0d", i), this);
-                if (!uvm_config_db#(pcie_tl_if_adapter)::get(
+                if (!backend_provider_active &&
+                    !uvm_config_db#(pcie_tl_if_adapter)::get(
                       this, "", $sformatf("pcie_svt_bridge_ep_adapter_%0d", i),
                       ep_adapters[i])) begin
                     ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
                         $sformatf("ep_adapter_%0d", i), this);
                 end
             end
-            ep_agent   = ep_agents[0];
-            ep_adapter = ep_adapters[0];
-        end else if (cfg.ep_agent_enable) begin
+            ep_agent = null;
+            ep_adapter = null;
+            foreach (ep_agents[i]) begin
+                if (ep_agents[i] != null) begin
+                    ep_agent = ep_agents[i];
+                    ep_adapter = ep_adapters[i];
+                    break;
+                end
+            end
+        end else if (cfg.ep_agent_enable &&
+                     (!cfg.switch_enable || !backend_provider_active)) begin
+            // 严格 provider 模式下 cfg.ep_agent_enable 隐含存在 provider
+            // 拥有的 EP 槽位，因此先解析标量 adapter 再创建 agent；
+            // 历史模式沿用原 factory 路径。
+            if (backend_provider_active && (ep_adapter == null)) begin
+                `uvm_fatal("BACKEND_MAP",
+                           "EP agent enabled but no provider adapter resolved")
+                return;
+            end
             uvm_config_db#(uvm_active_passive_enum)::set(this, "ep_agent", "is_active", cfg.ep_is_active);
             ep_agent = pcie_tl_ep_agent::type_id::create("ep_agent", this);
         end
@@ -475,11 +822,30 @@ class pcie_tl_env extends uvm_env;
             ep_agents  = new[n];
             ep_adapters = new[n];
             for (int i = 0; i < n; i++) begin
+                if (backend_provider_active) begin
+                    string slot_id;
+                    string map_error;
+                    bit provider_owned;
+
+                    if (!resolve_provider_slot(PCIE_DEVICE_EP, i, slot_id,
+                                                ep_adapters[i], provider_owned,
+                                                map_error)) begin
+                        `uvm_fatal("BACKEND_MAP", map_error)
+                        return;
+                    end
+                    if (!provider_owned) begin
+                        // 真实 Switch/DUT 下游端口由保留的 null 槽位表
+                        // 示；不得给它挂接合成的 TL EP agent。
+                        ep_agents[i] = null;
+                        continue;
+                    end
+                end
                 uvm_config_db#(uvm_active_passive_enum)::set(
                     this, $sformatf("ep_agent_%0d", i), "is_active", cfg.ep_is_active);
                 ep_agents[i]  = pcie_tl_ep_agent::type_id::create(
                     $sformatf("ep_agent_%0d", i), this);
-                if (!uvm_config_db#(pcie_tl_if_adapter)::get(
+                if (!backend_provider_active &&
+                    !uvm_config_db#(pcie_tl_if_adapter)::get(
                       this, "", $sformatf("pcie_svt_bridge_ep_adapter_%0d", i),
                       ep_adapters[i])) begin
                     ep_adapters[i] = pcie_tl_if_adapter::type_id::create(
@@ -539,7 +905,18 @@ class pcie_tl_env extends uvm_env;
 
         // 1. Inject shared components into RC agents (one per root, indexed managers/adapters)
         foreach (rc_agents[r]) begin
-            if (rc_agents[r] == null) continue;
+            if (rc_agents[r] == null) begin
+                if (backend_provider_active &&
+                    strict_slot_provider_owned(PCIE_DEVICE_RC, r))
+                    `uvm_fatal("BACKEND_MAP", $sformatf(
+                        "provider-owned RC slot %0d has no TL agent", r))
+                continue;
+            end
+            if ((r >= rc_adapters.size()) || (rc_adapters[r] == null)) begin
+                `uvm_fatal("ENV", $sformatf(
+                    "RC%0d has no adapter during connect", r))
+                continue;
+            end
             rc_agents[r].fc_mgr    = fc_mgrs[r];
             rc_agents[r].tag_mgr   = tag_mgrs[r];
             rc_agents[r].ord_eng   = ord_engs[r];
@@ -555,12 +932,24 @@ class pcie_tl_env extends uvm_env;
         if (!cfg.switch_enable && ep_agents.size() > 0) begin
             foreach (ep_agents[i]) begin
                 int mi;
+
+                if (ep_agents[i] == null) begin
+                    if (backend_provider_active &&
+                        strict_slot_provider_owned(PCIE_DEVICE_EP, i))
+                        `uvm_fatal("BACKEND_MAP", $sformatf(
+                            "provider-owned EP slot %0d has no TL agent", i))
+                    continue;
+                end
                 mi = configured_ep_root_index(i, i);
                 if ((mi < 0) || (mi >= fc_mgrs.size()))
                     `uvm_fatal("ROOT_MAP", $sformatf(
                         "EP%0d maps to invalid Root%0d (Root count=%0d)",
                         i, mi, fc_mgrs.size()))
-                if (ep_agents[i] == null) continue;
+                if ((i >= ep_adapters.size()) || (ep_adapters[i] == null)) begin
+                    `uvm_fatal("ENV", $sformatf(
+                        "EP%0d has no adapter during connect", i))
+                    continue;
+                end
                 ep_agents[i].fc_mgr    = fc_mgrs[mi];
                 ep_agents[i].tag_mgr   = tag_mgrs[mi];
                 ep_agents[i].ord_eng   = ord_engs[mi];
@@ -588,6 +977,10 @@ class pcie_tl_env extends uvm_env;
                 end
             end
         end else if (ep_agent != null) begin
+            if (ep_adapter == null) begin
+                `uvm_fatal("ENV", "EP agent has no adapter during connect")
+                return;
+            end
             ep_agent.fc_mgr    = fc_mgr;
             ep_agent.tag_mgr   = tag_mgr;
             ep_agent.ord_eng   = ord_eng;
@@ -616,6 +1009,13 @@ class pcie_tl_env extends uvm_env;
 
         // 2. Adapter codec injection (per-root RC adapters; EP adapter(s))
         foreach (rc_adapters[r]) begin
+            if (rc_adapters[r] == null) begin
+                if (!backend_provider_active ||
+                    strict_slot_provider_owned(PCIE_DEVICE_RC, r))
+                    `uvm_fatal("ENV", $sformatf(
+                        "RC adapter %0d is null during connect", r))
+                continue;
+            end
             rc_adapters[r].codec  = codec;
             rc_adapters[r].fc_mgr = fc_mgrs[r];
         end
@@ -651,8 +1051,13 @@ class pcie_tl_env extends uvm_env;
                     bridge_rc_rx_fifos[r].analysis_export);
             v_seqr.rc_seqr_arr.push_back(rc_agents[r].sequencer);
         end
-        if (rc_agents.size() > 0 && rc_agents[0] != null)
-            v_seqr.rc_seqr = rc_agents[0].sequencer;
+        v_seqr.rc_seqr = null;
+        foreach (rc_agents[r]) begin
+            if (rc_agents[r] != null) begin
+                v_seqr.rc_seqr = rc_agents[r].sequencer;
+                break;
+            end
+        end
 
         // 4. EP monitor -> scb[0] + coverage. Non-switch multi-EP wires every link;
         //    otherwise the single direct-mode / switch-dangling agent.
@@ -669,8 +1074,13 @@ class pcie_tl_env extends uvm_env;
                         bridge_ep_rx_fifos[i].analysis_export);
                 v_seqr.ep_seqr_arr.push_back(ep_agents[i].sequencer);
             end
-            if (ep_agents[0] != null)
-                v_seqr.ep_seqr = ep_agents[0].sequencer;
+            v_seqr.ep_seqr = null;
+            foreach (ep_agents[i]) begin
+                if (ep_agents[i] != null) begin
+                    v_seqr.ep_seqr = ep_agents[i].sequencer;
+                    break;
+                end
+            end
         end else if (ep_agent != null) begin
             if (scb != null)
                 ep_agent.monitor.tlp_ap.connect(scb.ep_imp);
@@ -697,6 +1107,20 @@ class pcie_tl_env extends uvm_env;
             for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
                 int owner = cfg.switch_cfg.dsp_owner[i];   // owning USP/root index
                 int mapped_owner;
+                if ((i >= sw.dsp.size()) || (sw.dsp[i] == null)) begin
+                    `uvm_fatal("SWITCH", $sformatf(
+                        "Switch DSP%0d is missing its native port", i))
+                    continue;
+                end
+                if ((i >= ep_agents.size()) || (ep_agents[i] == null) ||
+                    (i >= ep_adapters.size()) || (ep_adapters[i] == null)) begin
+                    if (backend_provider_active &&
+                        !strict_slot_provider_owned(PCIE_DEVICE_EP, i))
+                        continue;
+                    `uvm_fatal("SWITCH", $sformatf(
+                        "Switch DSP%0d missing provider EP agent/adapter", i))
+                    continue;
+                end
                 mapped_owner = configured_ep_root_index(i, owner);
                 if (mapped_owner != owner)
                     `uvm_fatal("ROOT_MAP", $sformatf(
@@ -725,7 +1149,10 @@ class pcie_tl_env extends uvm_env;
                     if (cfg.sriov_enable && func_mgr_sriov != null)
                         ep_agents[i].ep_driver.func_manager = func_mgr_sriov;
                 end
-                ep_adapters[i].mode   = cfg.if_mode;
+                // 保留 apply_config() 做出的外部 transport 决定。Switch
+                // 专用接线阶段不得把 SVT/Serial adapter 降级回
+                // TLM_MODE。
+                ep_adapters[i].mode   = bridge_required ? SV_IF_MODE : cfg.if_mode;
                 ep_adapters[i].codec  = codec;
                 ep_adapters[i].fc_mgr = sw.dsp[i].fc_mgr;
 
@@ -939,17 +1366,25 @@ class pcie_tl_env extends uvm_env;
                 fork
                     for (int r = 0; r < rc_agents.size(); r++) begin
                         automatic int rr = r;
-                        fork
-                            rc_to_switch_loopback(rr);
-                            switch_to_rc_loopback(rr);
-                        join_none
+                        if ((rr < rc_adapters.size()) &&
+                            (rc_agents[rr] != null) &&
+                            (rc_adapters[rr] != null)) begin
+                            fork
+                                rc_to_switch_loopback(rr);
+                                switch_to_rc_loopback(rr);
+                            join_none
+                        end
                     end
                     for (int i = 0; i < cfg.switch_cfg.num_ds_ports; i++) begin
                         automatic int idx = i;
-                        fork
-                            switch_to_ep_loopback(idx);
-                            ep_to_switch_loopback(idx);
-                        join_none
+                        if ((idx < ep_agents.size()) && (ep_agents[idx] != null) &&
+                            (idx < ep_adapters.size()) &&
+                            (ep_adapters[idx] != null)) begin
+                            fork
+                                switch_to_ep_loopback(idx);
+                                ep_to_switch_loopback(idx);
+                            join_none
+                        end
                     end
                 join_none
             end else if (!cfg.switch_enable && ep_adapters.size() > 0) begin
@@ -958,7 +1393,9 @@ class pcie_tl_env extends uvm_env;
                     for (int i = 0; i < ep_adapters.size(); i++) begin
                         automatic int ii = i;
                         if (ii < rc_agents.size() && rc_agents[ii] != null &&
-                            ep_agents[ii] != null) begin
+                            ii < rc_adapters.size() && rc_adapters[ii] != null &&
+                            ep_agents[ii] != null &&
+                            ii < ep_adapters.size() && ep_adapters[ii] != null) begin
                             fork
                                 tlm_loopback_rc_to_ep_pair(ii);
                                 tlm_loopback_ep_to_rc_pair(ii);
@@ -1217,7 +1654,8 @@ class pcie_tl_env extends uvm_env;
         switch_np_key_t switch_key;
         int ingress_port;
         int endpoint_index;
-        int total_bytes, chunk, remaining, received;
+        int total_wire_bytes, chunk, remaining_wire_bytes;
+        int remaining_valid_bytes, wire_offset;
         bit [63:0] cur_addr;
         int mps_bytes, rcb_bytes;
 
@@ -1261,21 +1699,31 @@ class pcie_tl_env extends uvm_env;
 
         mps_bytes = int'(cfg.max_payload_size);
         rcb_bytes = int'(cfg.read_completion_boundary);
-        total_bytes = (req.length == 0) ? 4096 : req.length * 4;
-        remaining   = total_bytes;
-        cur_addr    = mem_req.addr;
-        received    = 0;
+        total_wire_bytes      = pcie_tl_mem_dw_count(mem_req) * 4;
+        remaining_wire_bytes  = total_wire_bytes;
+        remaining_valid_bytes = pcie_tl_mem_valid_bytes(mem_req);
+        wire_offset            = 0;
+        cur_addr               = pcie_tl_mem_wire_addr(mem_req);
 
-        while (remaining > 0) begin
+        while (remaining_wire_bytes > 0) begin
             int bytes_to_rcb, len_dw;
+            int valid_in_chunk, first_valid;
+            bit [63:0] first_valid_addr;
 
             // Every Completion must end at or before the next RCB boundary.
             bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
             if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
             chunk = mps_bytes;
             if (bytes_to_rcb < chunk) chunk = bytes_to_rcb;
-            if (chunk > remaining) chunk = remaining;
-            len_dw = (chunk + 3) / 4;
+            if (chunk > remaining_wire_bytes) chunk = remaining_wire_bytes;
+            chunk = (chunk / 4) * 4;
+            if (chunk == 0) chunk = remaining_wire_bytes;
+            len_dw            = chunk / 4;
+            valid_in_chunk    = pcie_tl_mem_valid_bytes_in_range(
+                mem_req, wire_offset, chunk);
+            first_valid       = pcie_tl_mem_first_valid_in_range(
+                mem_req, wire_offset, chunk);
+            first_valid_addr  = cur_addr + first_valid;
 
             cpl = pcie_tl_cpl_tlp::type_id::create("rc_auto_cpl");
             cpl.kind         = TLP_CPLD;
@@ -1289,11 +1737,15 @@ class pcie_tl_env extends uvm_env;
             cpl.completer_id = 16'h0000;  // RC BDF
             cpl.cpl_status   = CPL_STATUS_SC;
             cpl.bcm          = 0;
-            cpl.byte_count   = remaining[11:0];
-            cpl.lower_addr   = cur_addr[6:0];
+            cpl.byte_count   = remaining_valid_bytes[11:0];
+            cpl.lower_addr   = first_valid_addr[6:0];
             cpl.payload      = new[chunk];
-            foreach (cpl.payload[i])
-                cpl.payload[i] = 8'hAA;  // Fill pattern
+            foreach (cpl.payload[i]) begin
+                // 历史 responder 没有后备 manager。使能 lane 保持历史的
+                // AA 图案，禁用 lane 保持 wire 上可见的零值。
+                cpl.payload[i] = pcie_tl_mem_lane_enabled(
+                    mem_req, wire_offset + i) ? 8'hAA : 8'h00;
+            end
 
             // Observation only: legacy completions deliberately bypass the
             // adapter/monitor transport, so publish before the direct
@@ -1306,9 +1758,10 @@ class pcie_tl_env extends uvm_env;
                 scbs[root_index].write_ep(cpl);
             resolved_requester_driver.handle_completion(cpl);
 
-            cur_addr  += chunk;
-            remaining -= chunk;
-            received  += chunk;
+            cur_addr              += chunk;
+            wire_offset           += chunk;
+            remaining_wire_bytes  -= chunk;
+            remaining_valid_bytes -= valid_in_chunk;
         end
 
         if (switch_origin)
@@ -1511,15 +1964,32 @@ class pcie_tl_env extends uvm_env;
 
         // Adapter mode (per-root RC; single + array EP adapters, all null-safe)
         foreach (rc_adapters[r]) begin
-            // SVT forward 模式必须保持 SV_IF_MODE，monitor 才会把外部
-            // Completion 交回 RC driver；普通 TL-only 仍沿用 cfg.if_mode。
-            rc_adapters[r].mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
+            if (rc_adapters[r] != null) begin
+                // SVT forward 模式必须保持 SV_IF_MODE，monitor 才会把外部
+                // Completion 交回 RC driver；普通 TL-only 仍沿用 cfg.if_mode。
+                rc_adapters[r].mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
+                if (bridge_required && (rc_adapters[r].vif == null))
+                    `uvm_info("ENV_BRIDGE_DIAG", $sformatf(
+                        "%s RC adapter %0d entered SV_IF_MODE without vif",
+                        get_full_name(), r), UVM_NONE)
+            end
         end
-        if (ep_adapter != null)
+        if (ep_adapter != null) begin
             ep_adapter.mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
-        foreach (ep_adapters[i])
-            if (ep_adapters[i] != null)
+            if (bridge_required && (ep_adapter.vif == null))
+                `uvm_info("ENV_BRIDGE_DIAG", $sformatf(
+                    "%s scalar EP adapter entered SV_IF_MODE without vif",
+                    get_full_name()), UVM_NONE)
+        end
+        foreach (ep_adapters[i]) begin
+            if (ep_adapters[i] != null) begin
                 ep_adapters[i].mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
+                if (bridge_required && (ep_adapters[i].vif == null))
+                    `uvm_info("ENV_BRIDGE_DIAG", $sformatf(
+                        "%s EP adapter %0d entered SV_IF_MODE without vif",
+                        get_full_name(), i), UVM_NONE)
+            end
+        end
 
         // Config space init (per-root)
         foreach (cfg_mgrs[r]) begin

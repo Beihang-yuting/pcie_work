@@ -55,6 +55,11 @@ package pcie_tl_pkg;
     //--- Env ---
     `include "env/pcie_tl_env_config.sv"
 
+    //--- Backend-neutral provider contract ---
+    // SVT-specific implementations are compiled only by the SVT integration
+    // filelist and are discovered through this neutral interface.
+    `include "env/pcie_tl_backend_provider.sv"
+
     //--- Topology Adapter (requires native Switch and Env configuration) ---
     `include "adapter/pcie_tl_topology_adapter.sv"
 

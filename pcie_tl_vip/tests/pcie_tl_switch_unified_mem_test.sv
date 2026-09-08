@@ -80,6 +80,62 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
         `uvm_info(ctx, $sformatf("OK -- %0d bytes match", sz), UVM_LOW)
     endfunction
 
+    //==========================================================================
+    // Prepare one DSP device-memory manager for a routed RC access.
+    //
+    // host_mem allocators normally choose any free address in their initialized
+    // aperture.  A Switch, however, forwards an RC request to DSP[i] only when
+    // the address is inside that DSP's programmed memory window.  The default
+    // testbench manager covers 0..4GB, so an unconstrained allocation can land
+    // below 0x8000_0000 and be dropped by the Switch before the EP sees it.
+    //
+    // Keep this policy local to this routing test: reserve the portion below
+    // the DSP window and use FIRST_FIT, making the first test allocation start
+    // at ds_mem_base[i].  The reservation is metadata only (it is not an
+    // allocation), therefore the normal free()/leak_check() lifecycle remains
+    // unchanged.  If a caller injects a manager whose region already starts at
+    // the DSP window, contains_range() is false for the lower prefix and the
+    // reservation is correctly skipped.
+    //==========================================================================
+    function automatic bit prepare_dsp_memory(int ep);
+        bit [63:0] window_base;
+        bit [63:0] window_limit;
+        bit [63:0] probe_size;
+
+        probe_size   = 64'd256;
+        window_base  = {32'h0, cfg.switch_cfg.ds_mem_base[ep]};
+        window_limit = {32'h0, cfg.switch_cfg.ds_mem_limit[ep]};
+
+        if (window_limit < window_base ||
+            !env.dev_mem[ep].contains_range(window_base, probe_size)) begin
+            `uvm_error("SW_UM", $sformatf(
+                "DSP%0d device manager does not cover Switch window [0x%016h,0x%016h]",
+                ep, window_base, window_limit))
+            return 0;
+        end
+
+        // Deterministic placement is important here: random placement can
+        // pass intermittently when it happens to select the routing window.
+        env.dev_mem[ep].set_alloc_policy(HOST_MEM_FIRST_FIT);
+
+        // The standard tb manager is initialized from 0..4GB-1.  Only reserve
+        // the lower prefix when it is entirely inside the injected manager's
+        // region; this keeps custom window-sized managers compatible.
+        if ((window_base != 0) &&
+            env.dev_mem[ep].contains_range(64'h0, window_base)) begin
+            if (!env.dev_mem[ep].reserve_range(
+                    64'h0, window_base,
+                    $sformatf("switch_dsp%0d_routing_window", ep))) begin
+                `uvm_error("SW_UM", $sformatf(
+                    "failed to reserve lower prefix for DSP%0d (base=0x%016h)",
+                    ep, window_base))
+                return 0;
+            end
+        end
+
+        return 1;
+    endfunction
+
     //=========================================================================
     // run_phase
     //=========================================================================
@@ -99,6 +155,15 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
             `uvm_fatal("SW_UM", "env.dev_mem[1] is null -- config_db injection failed")
 
         num_eps = cfg.switch_cfg.num_ds_ports;  // 2
+
+        // Constrain device-memory placement before Phase C starts.  Without
+        // this setup the allocator may return a legal host-memory address that
+        // is nevertheless outside every DSP routing window.
+        for (int i = 0; i < num_eps; i++) begin
+            if (!prepare_dsp_memory(i))
+                `uvm_fatal("SW_UM", $sformatf(
+                    "cannot prepare device memory for DSP%0d", i))
+        end
 
         for (int ep_idx = 0; ep_idx < num_eps; ep_idx++) begin
             automatic int ep = ep_idx;
@@ -185,13 +250,40 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
             //=================================================================
             begin
                 bit [63:0] b;
+                bit [64:0] alloc_end_excl;
+                bit [64:0] window_end_excl;
+                bit [7:0]  write_data[];
                 byte rd_b[];
                 int sz = 256;
                 pcie_tl_mem_wr_seq wr_rc;
                 pcie_tl_mem_rd_seq rd_rc;
 
                 b = env.dev_mem[ep].alloc(sz, 64);
+                if (b == '1)
+                    `uvm_fatal("SW_UM", $sformatf(
+                        "DSP%0d device-memory allocation failed", ep))
                 dev_allocs.push_back(b);
+
+                // Check the address before sending a TLP.  This turns a
+                // routing-window mismatch into an immediate, actionable error
+                // instead of a later Completion timeout.
+                alloc_end_excl  = {1'b0, b} + sz;
+                window_end_excl = {1'b0, cfg.switch_cfg.ds_mem_limit[ep]} + 65'd1;
+                if (({1'b0, b} < {32'h0, cfg.switch_cfg.ds_mem_base[ep]}) ||
+                    (alloc_end_excl > window_end_excl)) begin
+                    `uvm_fatal("SW_UM", $sformatf(
+                        "DSP%0d allocation 0x%016h+%0d is outside Switch window [0x%08h,0x%08h]",
+                        ep, b, sz,
+                        cfg.switch_cfg.ds_mem_base[ep],
+                        cfg.switch_cfg.ds_mem_limit[ep]))
+                end
+
+                // Use a deterministic payload so the Completion read-back
+                // proves that the request traversed RC -> Switch -> DSP -> EP
+                // and that the EP wrote/served the same bytes.
+                write_data = new[sz];
+                foreach (write_data[i])
+                    write_data[i] = 8'h40 + ep * 8'h20 + i[7:0];
 
                 wr_rc = pcie_tl_mem_wr_seq::type_id::create($sformatf("rc_wr_dev%0d", ep));
                 wr_rc.addr     = b;
@@ -199,8 +291,16 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
                 wr_rc.first_be = 4'hF;
                 wr_rc.last_be  = 4'hF;
                 wr_rc.is_64bit = (b[63:32] != 0);
+                wr_rc.write_data = write_data;
                 wr_rc.start(env.rc_agent.sequencer);
                 #2us;
+
+                if (wr_rc.issued_tlp == null ||
+                    wr_rc.issued_tlp.addr != b ||
+                    wr_rc.issued_tlp.payload.size() != sz)
+                    `uvm_fatal("SW_UM", $sformatf(
+                        "DSP%0d RC write TLP was not issued with expected address/payload",
+                        ep))
 
                 rd_rc = pcie_tl_mem_rd_seq::type_id::create($sformatf("rc_rd_dev%0d", ep));
                 rd_rc.addr     = b;
@@ -211,10 +311,29 @@ class pcie_tl_switch_unified_mem_test extends pcie_tl_base_test;
                 rd_rc.start(env.rc_agent.sequencer);
                 #2us;
 
+                if (rd_rc.issued_tlp == null || !rd_rc.issued_tlp.rb_done ||
+                    rd_rc.issued_tlp.rb_status != CPL_STATUS_SC ||
+                    rd_rc.rb_data.size() != sz)
+                    `uvm_fatal("SW_UM", $sformatf(
+                        "DSP%0d RC read did not receive a successful Completion (done=%0d status=%s bytes=%0d)",
+                        ep,
+                        (rd_rc.issued_tlp == null) ? 0 : rd_rc.issued_tlp.rb_done,
+                        (rd_rc.issued_tlp == null) ? "<null>" :
+                          rd_rc.issued_tlp.rb_status.name(),
+                        rd_rc.rb_data.size()))
+
+                foreach (write_data[i]) begin
+                    if (rd_rc.rb_data[i] !== write_data[i])
+                        `uvm_fatal("SW_UM", $sformatf(
+                            "DSP%0d Completion payload mismatch at byte %0d (got=0x%02h expected=0x%02h)",
+                            ep, i,
+                            rd_rc.rb_data[i], write_data[i]))
+                end
+
                 env.dev_mem[ep].read_mem(b, sz, rd_b);
                 `uvm_info("SW_UM", $sformatf(
-                    "C:RC_RD_DEV%0d OK -- dev_mem[0x%0h][0] = 0x%02h (write+read completed)",
-                    ep, b, rd_b[0]), UVM_LOW)
+                    "C:RC_RD_DEV%0d OK -- routed address=0x%0h Completion bytes=%0d dev_mem[0]=0x%02h",
+                    ep, b, rd_rc.rb_data.size(), rd_b[0]), UVM_LOW)
             end
         end
 

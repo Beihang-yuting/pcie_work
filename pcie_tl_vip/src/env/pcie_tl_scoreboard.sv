@@ -20,6 +20,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         pcie_tl_tlp    orig_req;
         int            total_bytes;
         int            received_bytes;
+        int            wire_bytes;
         bit [63:0]     expected_addr;
         int            cpl_count;
     } cpl_tracker_t;
@@ -165,12 +166,15 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                 // 其余(MRd/FetchAdd/Swap)CplD 字节数 = length*4。
                 if (req.kind == TLP_ATOMIC_CAS)
                     tracker.total_bytes = ((req.length == 0) ? 4096 : req.length * 4) / 2;
+                else if ($cast(mem_req, req))
+                    tracker.total_bytes = pcie_tl_mem_valid_bytes(mem_req);
                 else
                     tracker.total_bytes = (req.length == 0) ? 4096 : req.length * 4;
                 tracker.received_bytes = 0;
+                tracker.wire_bytes     = 0;
                 tracker.cpl_count      = 0;
                 if ($cast(mem_req, req))
-                    tracker.expected_addr = mem_req.addr;
+                    tracker.expected_addr = pcie_tl_mem_wire_addr(mem_req);
                 else
                     tracker.expected_addr = 0;
                 cpl_trackers[cpl.tag] = tracker;
@@ -237,11 +241,33 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             return;
         end
 
-        // Verify lower_addr
-        if (cpl.lower_addr != tracker.expected_addr[6:0]) begin
+        // Verify lower_addr.  For a Memory request, the lower address points
+        // to the first enabled byte in this Completion, not blindly to the
+        // DWORD-aligned request address.
+        begin
+            bit [6:0] expected_lower_addr;
+            pcie_tl_mem_tlp mem_req;
+            int wire_payload_bytes;
+            int first_valid;
+            bit [63:0] expected_lower_full;
+            wire_payload_bytes = (cpl.length == 0) ? 4096 : cpl.length * 4;
+            if (wire_payload_bytes > cpl.payload.size())
+                wire_payload_bytes = cpl.payload.size();
+            if ($cast(mem_req, tracker.orig_req)) begin
+                first_valid = pcie_tl_mem_first_valid_in_range(
+                    mem_req, tracker.wire_bytes, wire_payload_bytes);
+                expected_lower_full = pcie_tl_mem_wire_addr(mem_req) +
+                                      tracker.wire_bytes + first_valid;
+                expected_lower_addr = expected_lower_full[6:0];
+            end else begin
+                expected_lower_addr = tracker.expected_addr[6:0];
+            end
+
+            if (cpl.lower_addr != expected_lower_addr) begin
             `uvm_warning("SCB", $sformatf(
                 "Completion lower_addr mismatch: tag=0x%03h expected=0x%02h got=0x%02h",
-                cpl.tag, tracker.expected_addr[6:0], cpl.lower_addr))
+                cpl.tag, expected_lower_addr, cpl.lower_addr))
+            end
         end
 
         // Verify byte_count matches remaining.
@@ -257,11 +283,28 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         end
 
         // Data integrity check for read completions
-        if (data_integrity_enable && cpl.kind == TLP_CPLD)
-            check_data_integrity(tracker.orig_req, cpl, tracker.received_bytes);
+        begin
+            int wire_payload_bytes;
+            int valid_in_cpl;
+            pcie_tl_mem_tlp mem_req;
+            wire_payload_bytes = (cpl.length == 0) ? 4096 : cpl.length * 4;
+            if (wire_payload_bytes > cpl.payload.size())
+                wire_payload_bytes = cpl.payload.size();
+            if (data_integrity_enable && cpl.kind == TLP_CPLD)
+                check_data_integrity(tracker.orig_req, cpl, tracker.wire_bytes);
 
-        // Accumulate received bytes
-        tracker.received_bytes += cpl.payload.size();
+            if ($cast(mem_req, tracker.orig_req))
+                valid_in_cpl = pcie_tl_mem_valid_bytes_in_range(
+                    mem_req, tracker.wire_bytes, wire_payload_bytes);
+            else
+                valid_in_cpl = wire_payload_bytes;
+
+            // Accumulate logical enabled bytes separately from the DWORD-
+            // padded wire span.  Transport padding is never counted here.
+            tracker.received_bytes += valid_in_cpl;
+            tracker.wire_bytes     += wire_payload_bytes;
+        end
+
         tracker.expected_addr  += cpl.payload.size();
         tracker.cpl_count++;
         cpl_trackers[cpl.tag] = tracker;
@@ -282,8 +325,9 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         if (!$cast(mem_req, req)) return;
 
         foreach (cpl.payload[i]) begin
-            bit [63:0] addr = mem_req.addr + byte_offset + i;
-            if (written_data.exists(addr)) begin
+            bit [63:0] addr = pcie_tl_mem_wire_addr(mem_req) + byte_offset + i;
+            if (pcie_tl_mem_lane_enabled(mem_req, byte_offset + i) &&
+                written_data.exists(addr)) begin
                 if (written_data[addr] != cpl.payload[i]) begin
                     `uvm_error("SCB", $sformatf(
                         "Data mismatch at addr=0x%016h: expected=0x%02h got=0x%02h",
@@ -321,27 +365,13 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     protected function void store_write_data(pcie_tl_tlp tlp);
         pcie_tl_mem_tlp mem;
-        int total_dw;
         if (tlp.kind != TLP_MEM_WR) return;
         if (!$cast(mem, tlp)) return;
 
-        total_dw = (mem.length == 0) ? 1024 : mem.length;
         foreach (tlp.payload[i]) begin
-            int dw_index;
-            int byte_index;
-            bit [3:0] byte_enable;
-
-            dw_index = i / 4;
-            byte_index = i % 4;
-            if (dw_index == 0)
-                byte_enable = mem.first_be;
-            else if (dw_index == (total_dw - 1))
-                byte_enable = mem.last_be;
-            else
-                byte_enable = 4'hF;
-
-            if (byte_enable[byte_index])
-                written_data[mem.addr + i] = tlp.payload[i];
+            bit [63:0] addr = pcie_tl_mem_wire_addr(mem) + i;
+            if (pcie_tl_mem_lane_enabled(mem, i))
+                written_data[addr] = tlp.payload[i];
         end
     endfunction
 

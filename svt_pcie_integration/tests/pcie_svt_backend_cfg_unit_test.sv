@@ -34,6 +34,8 @@ class pcie_svt_backend_cfg_unit_test extends uvm_test;
     bit equalization;
     int unsigned eq_mode;
     bit direct_speedup;
+    pcie_svt_backend backend;
+    svt_pcie_pl_configuration::link_eq_mode_enum effective_mode;
     string errors[$];
 
     phase.raise_objection(this);
@@ -57,6 +59,32 @@ class pcie_svt_backend_cfg_unit_test extends uvm_test;
             "default link EQ mode must inherit global automatic mode");
     require(direct_speedup == 1'b0,
             "direct speed-up must be disabled by default");
+
+    // EQ 关闭语义：无论 Gen4 还是 Gen5，都必须落到官方
+    // NO_EQUALIZATION_NEEDED 枚举，不能隐式启用 direct-speed-up。
+    backend = pcie_svt_backend::type_id::create("cfg_contract_backend");
+    effective_mode = backend.get_effective_equalization_mode(
+      4, 1'b0, 0);
+    require(effective_mode ==
+            svt_pcie_pl_configuration::LINK_EQ_MODE_NO_EQUALIZATION_NEEDED,
+            "Gen4 EQ-off must map to NO_EQUALIZATION_NEEDED");
+    effective_mode = backend.get_effective_equalization_mode(
+      5, 1'b0, 0);
+    require(effective_mode ==
+            svt_pcie_pl_configuration::LINK_EQ_MODE_NO_EQUALIZATION_NEEDED,
+            "Gen5 EQ-off must map to NO_EQUALIZATION_NEEDED");
+
+    // EQ 开启时保留既有代际策略：Gen4 默认 Full-EQ，Gen5 默认 bypass。
+    effective_mode = backend.get_effective_equalization_mode(
+      4, 1'b1, 0);
+    require(effective_mode ==
+            svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED,
+            "Gen4 default EQ must map to FULL_EQUALIZATION_REQUIRED");
+    effective_mode = backend.get_effective_equalization_mode(
+      5, 1'b1, 0);
+    require(effective_mode ==
+            svt_pcie_pl_configuration::LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE,
+            "Gen5 default EQ must map to EQ_BYPASS_TO_HIGHEST_RATE");
 
     // 链路级覆盖必须优先于全局值；覆盖对象只修改明确置位的字段。
     cfg.direct_gen4_enable = 1'b1;
@@ -101,6 +129,65 @@ class pcie_svt_backend_cfg_unit_test extends uvm_test;
     require(errors.size() != 0,
             "global EQ mode 4 must be rejected during validation");
     cfg.eq_mode = 0;
+
+    // Unsupported Target App/passive-monitor switches must fail fast rather
+    // than silently being ignored.  The current TL-root bridge owns all
+    // completions, therefore the active SVT Target App is mandatory and its
+    // built-in automatic response must remain disabled.
+    cfg.target_app_enable = 1'b0;
+    errors.delete();
+    cfg.validate(errors);
+    require(errors.size() != 0,
+            "target_app_enable=0 must be rejected as unsupported");
+    cfg.target_app_enable = 1'b1;
+
+    cfg.target_auto_response = 1'b1;
+    errors.delete();
+    cfg.validate(errors);
+    require(errors.size() != 0,
+            "target_auto_response=1 must be rejected by TL-owned bridge");
+    cfg.target_auto_response = 1'b0;
+
+    cfg.enable_svt_monitor = 1'b1;
+    errors.delete();
+    cfg.validate(errors);
+    require(errors.size() != 0,
+            "enable_svt_monitor=1 must be rejected for active backend");
+    cfg.enable_svt_monitor = 1'b0;
+
+    // These stage budgets belong to the (not-yet-present) TL orchestration
+    // sequences, not to an R-2020.12 Device configuration field.  A nonzero
+    // default is valid, but a changed value must be diagnosed until the
+    // orchestration layer consumes it explicitly.
+    cfg.cfg_timeout = 2ms;
+    errors.delete();
+    cfg.validate(errors);
+    require(errors.size() != 0,
+            "non-default cfg_timeout must be diagnosed as unsupported");
+    cfg.cfg_timeout = 1ms;
+
+    cfg.enum_timeout = 4ms;
+    errors.delete();
+    cfg.validate(errors);
+    require(errors.size() != 0,
+            "non-default enum_timeout must be diagnosed as unsupported");
+    cfg.enum_timeout = 3ms;
+
+    cfg.traffic_timeout = 2ms;
+    errors.delete();
+    cfg.validate(errors);
+    require(errors.size() != 0,
+            "non-default traffic_timeout must be diagnosed as unsupported");
+    cfg.traffic_timeout = 1ms;
+
+    // full_equalization_required is retained for source compatibility only;
+    // eq_mode/enable_equalization are the actual SVT controls.
+    cfg.full_equalization_required = 1'b0;
+    errors.delete();
+    cfg.validate(errors);
+    require(errors.size() != 0,
+            "non-default full_equalization_required must be diagnosed");
+    cfg.full_equalization_required = 1'b1;
 
     // PIPE 仍是显式未实现路径，必须由 validate() 报出，而不是静默降级
     // 成 Serial。

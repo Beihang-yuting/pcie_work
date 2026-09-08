@@ -59,11 +59,14 @@ $HOST_MEM_ROOT/src/host_mem_manager.sv
 ../tests/pcie_tl_bar_decoder_test.sv
 ../tests/pcie_tl_virtio_fix_regression_test.sv
 ../tests/pcie_tl_codec_regression_test.sv
+../tests/pcie_tl_partial_be_regression_test.sv
 ../tests/pcie_topology_model_unit_test.sv
 ../tests/pcie_topology_builder_unit_test.sv
 ../tests/pcie_topology_validation_unit_test.sv
 ../tests/pcie_tl_topology_adapter_unit_test.sv
 ../tests/pcie_global_cfg_unit_test.sv
+../tests/pcie_tl_backend_provider_unit_test.sv
+../tests/pcie_tl_sequence_contract_unit_test.sv
 ../tests/pcie_tl_device_cfg_adapter_unit_test.sv
 
 // ---- testbench top module ----

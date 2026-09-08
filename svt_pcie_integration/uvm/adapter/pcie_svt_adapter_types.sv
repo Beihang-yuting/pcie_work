@@ -16,6 +16,14 @@ typedef struct {
   bit [2:0]  completion_status;
 } pcie_svt_route_info;
 
+// 传输层选择。当前正式验证只启用 Serial；PIPE 保留为显式枚举值，
+// 这样用户可以在配置阶段提前发现尚未实现的物理适配器，而不是把
+// PIPE 请求静默当成 Serial。
+typedef enum {
+  PCIE_SVT_TRANSPORT_SERIAL,
+  PCIE_SVT_TRANSPORT_PIPE
+} pcie_svt_transport_e;
+
 // SVT 后端工作模式。
 //
 // MAPPER_APP 用于真实 RTL 的 Application Agent：TL TLP 通过

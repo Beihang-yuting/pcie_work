@@ -23,6 +23,8 @@ class pcie_tl_rw_seq extends uvm_sequence #(pcie_tl_tlp);
     bit [7:0]         wdata[];
 
     // READ results (valid after body() returns for a READ op).
+    // 实际发出的 Memory TLP，供上层关联 payload、Tag 与 Completion。
+    pcie_tl_mem_tlp issued_tlp;
     bit [7:0]         rdata[];              // byte_len read-back bytes
     pcie_rw_status_e  status = PCIE_RW_OK;  // OK / ERR (UR/CA/...) / TIMEOUT
     int               rb_timeout_ns = 50000; // read-back wait budget (50us)
@@ -87,6 +89,7 @@ class pcie_tl_rw_seq extends uvm_sequence #(pcie_tl_tlp);
                 tlp.payload[off + i] = wdata[i];
         end
 
+        issued_tlp = tlp;
         finish_item(tlp);
 
         // WRITE is posted: fire-and-forget, no completion to wait for.

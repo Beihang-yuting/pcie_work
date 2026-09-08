@@ -216,3 +216,86 @@ class pcie_tl_custom_root_mapping_test extends pcie_tl_custom_base_test;
                        "custom EP1 did not use mapped Root0 manager")
     endfunction
 endclass
+
+//------------------------------------------------------------------------------
+// EP configuration context must follow canonical physical-link order even when
+// topology node declarations are shuffled.  The topology adapter orders direct
+// links lexically by link_id, while build_default_for_topology() intentionally
+// retains node declaration order for device/BDF records.  These two orders are
+// independent and must be joined by the physical EP node ID.
+//------------------------------------------------------------------------------
+class pcie_tl_custom_shuffled_ep_context_test extends pcie_tl_custom_base_test;
+    `uvm_component_utils(pcie_tl_custom_shuffled_ep_context_test)
+
+    pcie_global_cfg global_cfg;
+    pcie_topology_cfg shuffled_topology;
+
+    function new(string name = "pcie_tl_custom_shuffled_ep_context_test",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    virtual function bit configure_topology(output pcie_topology_cfg result);
+        pcie_topology_builder builder;
+
+        // Keep node declarations in Z/A order, but link IDs in the reverse
+        // lexical order.  The adapter therefore creates EP agent 0 for A_LINK
+        // and EP agent 1 for Z_LINK, unlike the device-policy declaration
+        // order (EP_Z then EP_A).
+        if (shuffled_topology == null) begin
+            builder = pcie_topology_builder::type_id::create(
+                "shuffled_ep_context_builder");
+            void'(builder.add_rc("RC_Z"));
+            void'(builder.add_ep("EP_Z"));
+            void'(builder.add_rc("RC_A"));
+            void'(builder.add_ep("EP_A"));
+            void'(builder.connect("Z_LINK", "RC_Z", PCIE_TOPO_PORT_RC, 0,
+                                  "EP_Z", PCIE_TOPO_PORT_EP, 0, 8, 4));
+            void'(builder.connect("A_LINK", "RC_A", PCIE_TOPO_PORT_RC, 0,
+                                  "EP_A", PCIE_TOPO_PORT_EP, 0, 8, 4));
+            shuffled_topology = builder.finish();
+        end
+        result = shuffled_topology;
+        return 1'b1;
+    endfunction
+
+    virtual function void build_phase(uvm_phase phase);
+        pcie_topology_cfg source;
+
+        void'(configure_topology(source));
+        global_cfg = pcie_global_cfg::type_id::create(
+            "shuffled_ep_context_global_cfg");
+        global_cfg.build_default_for_topology(source);
+        uvm_config_db#(pcie_global_cfg)::set(
+            this, "env", "global_cfg", global_cfg);
+
+        super.build_phase(phase);
+    endfunction
+
+    virtual function void end_of_elaboration_phase(uvm_phase phase);
+        pcie_tl_func_context ep_a_context;
+        pcie_tl_func_context ep_z_context;
+
+        super.end_of_elaboration_phase(phase);
+        if ((env == null) || (env.ep_agents.size() != 2)) begin
+            `uvm_error("EP_CONTEXT_ORDER",
+                       "shuffled topology did not create two EP agents")
+            return;
+        end
+
+        if (!env.device_contexts.exists(16'h0208) ||
+            !env.device_contexts.exists(16'h0200)) begin
+            `uvm_error("EP_CONTEXT_ORDER",
+                       "expected shuffled EP BDF contexts are missing")
+            return;
+        end
+        ep_a_context = env.device_contexts[16'h0208];
+        ep_z_context = env.device_contexts[16'h0200];
+        if ((ep_a_context == null) || (ep_z_context == null) ||
+            (env.ep_agents[0].cfg_mgr != ep_a_context.cfg_mgr) ||
+            (env.ep_agents[1].cfg_mgr != ep_z_context.cfg_mgr)) begin
+            `uvm_error("EP_CONTEXT_ORDER",
+                       "EP cfg managers did not follow canonical link/node order")
+        end
+    endfunction
+endclass

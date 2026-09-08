@@ -48,9 +48,14 @@ $HOST_MEM_ROOT/src/host_mem_manager.sv
 ../../pcie_tl_vip/src/topology/pcie_topology_pkg.sv
 ../../pcie_tl_vip/src/pcie_tl_pkg.sv
 
-// 用户顶层负责在包含 svt_pcie.uvm.pkg 前定义 global shadow/seed 宏并加载
-// 官方 SVT package。这里不加载带有顶层层次假设的 bootstrap，避免 source-only
-// filelist 依赖任何项目占位 top。
+// 重要：adapter package 会 import svt_uvm_pkg/svt_pcie_uvm_pkg，因此官方
+// svt_pcie.uvm.pkg 必须在本列表展开前完成编译。这里故意不直接 include
+// 该 package：它要求用户顶层的 global shadow/random-seed 层次宏，source-only
+// 列表无法猜测这些层次。真实工程应先在同一次 VCS 命令中编译一个用户自有
+// prefix 源文件（定义 EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH、
+// SVC_RANDOM_SEED_SCOPE 并 include "svt_pcie.uvm.pkg"），再用 -f 引入本列表；
+// 或把包含 package 的用户顶层源文件放在 -f 本列表之前。仅把用户 top 追加
+// 在本列表之后不能满足 adapter package 的编译顺序。
 
 // SVT adapter package（仅适配层，不引入 topology env）。
 ../uvm/adapter/pcie_svt_adapter_pkg.sv

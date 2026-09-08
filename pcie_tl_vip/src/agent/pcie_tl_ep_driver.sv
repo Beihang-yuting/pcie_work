@@ -40,6 +40,7 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     protected function void um_write(bit [63:0] a, bit [7:0] data[], bit [3:0] fbe, bit [3:0] lbe);
         int total_dw = (data.size() + 3) / 4;
         int idx = 0;
+        bit [63:0] wire_addr = {a[63:2], 2'b00};
         for (int dw = 0; dw < total_dw; dw++) begin
             bit [3:0] be = (dw == 0) ? fbe :
                            (dw == total_dw - 1 && total_dw > 1) ? lbe : 4'hF;
@@ -49,7 +50,7 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
                         byte one[];
                         one = new[1];
                         one[0] = byte'(data[idx]);
-                        mem.write_mem(a + idx, one);
+                        mem.write_mem(wire_addr + idx, one);
                     end
                     idx++;
                 end
@@ -85,9 +86,13 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
         if (tag_mgr != null)
             request = tag_mgr.match_completion(cpl);
         rb_note_completion(cpl);
-        pcie_rb_registry::complete(cpl);
-        if ((request != null) && request.rb_done && (tag_mgr != null))
-            tag_mgr.free_tag(cpl.tag, cpl.requester_id[2:0]);
+        if ((request != null) && request.rb_done) begin
+            // Keep the global SV_IF registry alive across a split CplD; only
+            // the terminal fragment may retire the tag/key.
+            pcie_rb_registry::complete(cpl);
+            if (tag_mgr != null)
+                tag_mgr.free_tag(cpl.tag, cpl.requester_id[2:0]);
+        end
     endfunction
 
     virtual task handle_request(pcie_tl_tlp req);
@@ -182,54 +187,82 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     //=========================================================================
     protected task handle_mem_read(pcie_tl_tlp req);
         pcie_tl_mem_tlp mem_req;
-        int total_byte_count;
-        int remaining;
+        int total_wire_bytes;
+        int remaining_wire_bytes;
+        int remaining_valid_bytes;
+        int wire_offset;
         bit [63:0] cur_addr;
 
         $cast(mem_req, req);
-        total_byte_count = (req.length == 0) ? 4096 : req.length * 4;
-        remaining = total_byte_count;
-        cur_addr  = mem_req.addr;
+        total_wire_bytes     = pcie_tl_mem_dw_count(mem_req) * 4;
+        remaining_wire_bytes = total_wire_bytes;
+        remaining_valid_bytes = pcie_tl_mem_valid_bytes(mem_req);
+        wire_offset          = 0;
+        cur_addr             = pcie_tl_mem_wire_addr(mem_req);
 
-        while (remaining > 0) begin
+        while (remaining_wire_bytes > 0) begin
             pcie_tl_cpl_tlp cpl;
             int chunk;
             int bytes_to_rcb;
             int len_dw;
+            int valid_in_chunk;
+            int first_valid;
+            bit [63:0] first_valid_addr;
 
             // Every Completion must end at or before the next RCB boundary.
             bytes_to_rcb = rcb_bytes - (cur_addr % rcb_bytes);
             if (bytes_to_rcb == 0) bytes_to_rcb = rcb_bytes;
             chunk = mps_bytes;
             if (bytes_to_rcb < chunk) chunk = bytes_to_rcb;
-            if (chunk > remaining) chunk = remaining;
+            if (chunk > remaining_wire_bytes) chunk = remaining_wire_bytes;
 
-            len_dw = (chunk + 3) / 4;
+            // Completion length is expressed in DWORDs.  Keep every chunk
+            // DWORD aligned and retain disabled lanes as zero-filled bytes in
+            // the wire payload; only the BE-selected lanes are read below.
+            chunk = (chunk / 4) * 4;
+            if (chunk == 0) chunk = remaining_wire_bytes;
+
+            len_dw          = chunk / 4;
+            valid_in_chunk  = pcie_tl_mem_valid_bytes_in_range(
+                mem_req, wire_offset, chunk);
+            first_valid     = pcie_tl_mem_first_valid_in_range(
+                mem_req, wire_offset, chunk);
+            first_valid_addr = cur_addr + first_valid;
 
             cpl = generate_completion(req, CPL_STATUS_SC);
             cpl.kind       = TLP_CPLD;
             cpl.fmt        = FMT_3DW_WITH_DATA;
             cpl.length     = (len_dw == 1024) ? 0 : len_dw[9:0];
-            cpl.byte_count = remaining[11:0];
-            cpl.lower_addr = cur_addr[6:0];
+            cpl.byte_count = remaining_valid_bytes[11:0];
+            cpl.lower_addr = first_valid_addr[6:0];
             cpl.payload    = new[chunk];
+            foreach (cpl.payload[i]) cpl.payload[i] = 8'h00;
 
-            // Read from memory backend
+            // Read only enabled lanes.  One-byte reads are intentional here:
+            // they preserve exact host-memory allocation boundaries even when
+            // a request selects only a subset of the first/last DWORD.
             if (use_unified_mem && mem != null) begin
-                bit [7:0] um_data[];
-                um_read(cur_addr, chunk, um_data);
-                for (int i = 0; i < chunk; i++) cpl.payload[i] = um_data[i];
+                for (int i = 0; i < chunk; i++) begin
+                    if (pcie_tl_mem_lane_enabled(mem_req, wire_offset + i)) begin
+                        byte rd[];
+                        mem.read_mem(cur_addr + i, 1, rd);
+                        if (rd.size() == 1) cpl.payload[i] = rd[0];
+                    end
+                end
             end else begin
                 for (int i = 0; i < chunk; i++) begin
                     bit [63:0] a = cur_addr + i;
-                    cpl.payload[i] = mem_space.exists(a) ? mem_space[a] : 8'h00;
+                    if (pcie_tl_mem_lane_enabled(mem_req, wire_offset + i))
+                        cpl.payload[i] = mem_space.exists(a) ? mem_space[a] : 8'h00;
                 end
             end
 
             send_tlp(cpl);
 
-            cur_addr  += chunk;
-            remaining -= chunk;
+            cur_addr              += chunk;
+            wire_offset           += chunk;
+            remaining_wire_bytes  -= chunk;
+            remaining_valid_bytes -= valid_in_chunk;
         end
     endtask
 

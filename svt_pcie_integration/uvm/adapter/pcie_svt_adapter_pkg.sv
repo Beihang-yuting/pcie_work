@@ -14,7 +14,9 @@ package pcie_svt_adapter_pkg;
   `include "uvm_macros.svh"
 
   `include "adapter/pcie_svt_adapter_types.sv"
+  `include "adapter/pcie_svt_backend_cfg.sv"
   `include "adapter/pcie_svt_tlp_codec.sv"
   `include "adapter/pcie_svt_tlp_mapper_bridge.sv"
   `include "adapter/pcie_svt_if_adapter.sv"
+  `include "adapter/pcie_svt_backend.sv"
 endpackage : pcie_svt_adapter_pkg

@@ -6,6 +6,8 @@ class pcie_tl_cfg_wr_seq extends uvm_sequence #(pcie_tl_tlp);
     rand bit [31:0] wr_data;
     rand bit        is_type1;
     rand tlp_constraint_mode_e mode;
+    // 实际发出的配置写 TLP；payload 和 Completion 状态均可通过该句柄观察。
+    pcie_tl_cfg_tlp issued_tlp;
     pcie_rw_status_e status = PCIE_RW_OK;
     int rb_timeout_ns = 50000;
     constraint c_default { mode == CONSTRAINT_LEGAL; first_be == 4'hF; }
@@ -30,6 +32,7 @@ class pcie_tl_cfg_wr_seq extends uvm_sequence #(pcie_tl_tlp);
         tlp.payload = new[4];
         foreach (tlp.payload[index])
             tlp.payload[index] = wr_data[index * 8 +: 8];
+        issued_tlp = tlp;
         finish_item(tlp);
 
         fork begin : completion_wait

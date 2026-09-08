@@ -11,6 +11,8 @@ module pcie_tl_svt_formal_top;
   `include `SVC_SOURCE_MAP_SUITE_MODEL_MODULE(pcie_svc,Include,latest,pciesvc_parms)
   `include "pcie_device_unified_vip_env.sv"
   `include "pcie_tl_svt_formal_test.sv"
+  `include "pcie_svt_backend_auto_link_test.sv"
+  `include "pcie_svt_backend_cfg_unit_test.sv"
 
   bit reset = 1'b1;
   int unsigned global_random_seed = 0;
@@ -25,7 +27,12 @@ module pcie_tl_svt_formal_top;
   end
 
   initial begin
+    string selected_test;
     repeat (100) #0;
-    run_test("pcie_tl_svt_formal_link_test");
+    // 默认保持原有双向 formal 门禁；配置契约可通过标准 UVM_TESTNAME
+    // plusarg 单独运行，避免修改顶层或重新编译另一套 testbench。
+    if (!$value$plusargs("UVM_TESTNAME=%s", selected_test))
+      selected_test = "pcie_tl_svt_formal_link_test";
+    run_test(selected_test);
   end
 endmodule

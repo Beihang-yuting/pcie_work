@@ -28,6 +28,13 @@ class pcie_link_cfg extends uvm_object;
   bit enabled;
   bit use_svt;
 
+  // 当链路由 SVT backend 承担时，必须明确指出哪一个物理节点由 SVT
+  // 模拟。这样同一条 RC↔EP 链既可以表达“SVT RC + DUT EP”，也可以
+  // 表达“DUT RC + SVT EP”，不会根据链路方向误判角色。
+  bit svt_role_valid;
+  string svt_node_id;
+  pcie_device_role_e svt_role;
+
   // Physical policy copied from the topology graph.  Width is still a static
   // HDL property for SVT and is validated before backend construction.
   int unsigned link_width;
@@ -69,6 +76,9 @@ class pcie_link_cfg extends uvm_object;
     // Runtime protocol and negotiated capability policy.
     enabled               = source.enabled;
     use_svt               = source.use_svt;
+    svt_role_valid        = source.svt_role_valid;
+    svt_node_id           = source.svt_node_id;
+    svt_role              = source.svt_role;
     link_width            = source.link_width;
     max_gen               = source.max_gen;
 

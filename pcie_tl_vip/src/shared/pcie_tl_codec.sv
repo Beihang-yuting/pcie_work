@@ -96,6 +96,8 @@ class pcie_tl_codec extends uvm_object;
         end
 
         // Parse first DW of main TLP header (starts at offset)
+        if (bytes.size() < offset + 12)
+            return null;
         dw0 = {bytes[offset+0], bytes[offset+1], bytes[offset+2], bytes[offset+3]};
         dw1 = {bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7]};
         dw2 = {bytes[offset+8], bytes[offset+9], bytes[offset+10], bytes[offset+11]};
@@ -104,6 +106,8 @@ class pcie_tl_codec extends uvm_object;
         type_f = tlp_type_e'(dw0[28:24]);
 
         hdr_len = (fmt == FMT_4DW_NO_DATA || fmt == FMT_4DW_WITH_DATA) ? 16 : 12;
+        if (bytes.size() < offset + hdr_len)
+            return null;
         if (hdr_len == 16)
             dw3 = {bytes[offset+12], bytes[offset+13], bytes[offset+14], bytes[offset+15]};
 
@@ -128,13 +132,26 @@ class pcie_tl_codec extends uvm_object;
         payload_start = offset + hdr_len;
         if (fmt == FMT_3DW_WITH_DATA || fmt == FMT_4DW_WITH_DATA) begin
             int unsigned len_dw;
+            int unsigned declared_payload_len;
+            int unsigned available_payload_len;
             len_dw = (tlp.length == 0) ? 1024 : tlp.length;
-            payload_len = len_dw * 4;
-            // Account for ECRC at end
-            if (tlp.td && (bytes.size() >= payload_start + payload_len + 4))
-                payload_len = bytes.size() - payload_start - 4;
-            else if (!tlp.td)
-                payload_len = bytes.size() - payload_start;
+            declared_payload_len = len_dw * 4;
+            available_payload_len = (bytes.size() > payload_start) ?
+                                    bytes.size() - payload_start : 0;
+
+            // The header length is authoritative.  SV interface transport
+            // rounds the final beat to an 8-byte strobe group, and a TLP with
+            // TD may additionally carry a trailing four-byte ECRC.  Neither
+            // transport padding nor the ECRC belongs in payload[];
+            // decode exactly the declared DWORD payload whenever present.
+            if (tlp.td && (available_payload_len >= declared_payload_len + 4))
+                payload_len = declared_payload_len;
+            else
+                // A truncated transfer has no provable ECRC trailer; retain
+                // the bytes that are actually present and let protocol checks
+                // report the short payload.
+                payload_len = (declared_payload_len < available_payload_len) ?
+                              declared_payload_len : available_payload_len;
             // 防御性检查：防止 payload_len 为负（cosim glue 可能发
             // fmt=WITH_DATA 但无实际 payload 的 TLP）
             if (payload_len < 0) payload_len = 0;

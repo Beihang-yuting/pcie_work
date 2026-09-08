@@ -392,8 +392,12 @@ class pcie_tl_mem_tlp extends pcie_tl_tlp;
     // 4KB boundary: TLP must not cross a 4KB address boundary
     constraint c_4kb_boundary {
         (constraint_mode_sel == CONSTRAINT_LEGAL) -> {
-            (length == 0) -> (addr[11:0] == 0);
-            (length != 0) -> ((addr[11:0] + length * 4) <= 4096);
+            // wire 上携带的地址是 DWORD 对齐的。校验完整 wire 跨度
+            // （含禁用的首/末 lane），partial-BE 请求才不会意外跨过
+            // 4KB 边界。
+            (length == 0) -> (addr[11:2] == 0);
+            (length != 0) ->
+                (({addr[11:2], 2'b00} + length * 4) <= 4096);
         }
     }
 
@@ -442,6 +446,97 @@ class pcie_tl_mem_tlp extends pcie_tl_tlp;
         return s;
     endfunction
 endclass
+
+//=============================================================================
+// Memory 请求 byte-enable 工具函数
+//=============================================================================
+// PCIe 的 Memory 请求地址按 DWORD 粒度携带，地址低两位由 first BE 掩码
+// 表达而非地址字段本身。wire 跨度与逻辑（使能）字节跨度必须分开：
+// responder 只能访问使能字节，但 CplD payload 在 wire 上仍占据完整
+// DWORD。以下工具函数供 driver/scoreboard/registry 共用这套换算。
+
+// 返回请求在 wire 上的 DWORD 对齐起始地址（抹掉低两位）。
+function automatic bit [63:0] pcie_tl_mem_wire_addr(input pcie_tl_mem_tlp req);
+    return {req.addr[63:2], 2'b00};
+endfunction
+
+// 返回请求的 DWORD 数；PCIe 用 length=0 编码 1024 DWORD。
+function automatic int pcie_tl_mem_dw_count(input pcie_tl_mem_tlp req);
+    // PCIe 用 length=0 编码 1024 个 DWORD。
+    return (req.length == 0) ? 1024 : int'(req.length);
+endfunction
+
+// 判断 wire 偏移 wire_offset 处的字节 lane 是否被 BE 使能：首 DWORD 用
+// first_be，末 DWORD 用 last_be（单 DWORD 时仍用 first_be），中间恒为
+// 全使能；越过请求末尾返回 0。
+function automatic bit pcie_tl_mem_lane_enabled(
+    input pcie_tl_mem_tlp req,
+    input int unsigned wire_offset
+);
+    int dw_count;
+    int dw_index;
+    int lane_index;
+    bit [3:0] be;
+
+    dw_count   = pcie_tl_mem_dw_count(req);
+    dw_index   = int'(wire_offset / 4);
+    lane_index = int'(wire_offset % 4);
+
+    if (dw_index >= dw_count)
+        return 1'b0;
+
+    if (dw_index == 0)
+        be = req.first_be;
+    else if (dw_index == (dw_count - 1))
+        // 单 DWORD 请求的 last_be 是保留位；该 DWORD 的完整掩码就是
+        // first_be。
+        be = (dw_count == 1) ? req.first_be : req.last_be;
+    else
+        be = 4'hF;
+
+    return be[lane_index];
+endfunction
+
+// 统计整个请求中被 BE 使能的字节总数（read-back 完成判定的分母）。
+function automatic int pcie_tl_mem_valid_bytes(input pcie_tl_mem_tlp req);
+    int count;
+    count = 0;
+    for (int i = 0; i < pcie_tl_mem_dw_count(req) * 4; i++) begin
+        if (pcie_tl_mem_lane_enabled(req, i))
+            count++;
+    end
+    return count;
+endfunction
+
+// 统计从 wire_offset 起 byte_count 个 wire 字节内的使能字节数，用于按
+// CplD 分片累计 read-back 进度。
+function automatic int pcie_tl_mem_valid_bytes_in_range(
+    input pcie_tl_mem_tlp req,
+    input int unsigned wire_offset,
+    input int unsigned byte_count
+);
+    int count;
+    count = 0;
+    for (int i = 0; i < byte_count; i++) begin
+        if (pcie_tl_mem_lane_enabled(req, wire_offset + i))
+            count++;
+    end
+    return count;
+endfunction
+
+// 返回从 wire_offset 起 byte_count 范围内第一个使能字节的相对偏移；
+// 范围内全部禁用时返回 0（调用方需先用 valid_bytes_in_range 判空）。
+function automatic int pcie_tl_mem_first_valid_in_range(
+    input pcie_tl_mem_tlp req,
+    input int unsigned wire_offset,
+    input int unsigned byte_count
+);
+    for (int i = 0; i < byte_count; i++) begin
+        if (pcie_tl_mem_lane_enabled(req, wire_offset + i))
+            return i;
+    end
+    return 0;
+endfunction
 
 //=============================================================================
 // IO TLP (Read / Write)
@@ -752,8 +847,9 @@ endclass
 //-----------------------------------------------------------------------------
 class pcie_rb_registry;
     static pcie_tl_tlp reqs [bit [25:0]];   // {req_id[15:0], tag[9:0]} -> request obj
-    static int         recv [bit [25:0]];   // bytes received per key
-    static int         total[bit [25:0]];   // bytes expected per key
+    static int         recv [bit [25:0]];   // 每个 key 已收到的使能字节数
+    static int         total[bit [25:0]];   // 每个 key 预期的使能字节总数
+    static int         wire_bytes [bit [25:0]]; // 已消费的填充 wire 字节数
 
     static function bit [25:0] mk_key(bit [15:0] req_id, bit [9:0] tag);
         return {req_id, tag};
@@ -764,6 +860,7 @@ class pcie_rb_registry;
         reqs[k] = t;
         recv.delete(k);
         total.delete(k);
+        wire_bytes.delete(k);
     endfunction
 
     static function void note(pcie_tl_cpl_tlp cpl);
@@ -773,18 +870,57 @@ class pcie_rb_registry;
         if (!reqs.exists(k)) return;
         req = reqs[k];
         if (!total.exists(k)) begin
-            total[k] = (req.length == 0) ? 4096 : req.length * 4;
+            pcie_tl_mem_tlp mem_req;
+            if ($cast(mem_req, req))
+                total[k] = pcie_tl_mem_valid_bytes(mem_req);
+            else
+                total[k] = (req.length == 0) ? 4096 : req.length * 4;
             recv[k]  = 0;
+            wire_bytes[k]  = 0;
         end
-        foreach (cpl.payload[i]) req.rb_data.push_back(cpl.payload[i]);
-        recv[k] += cpl.payload.size();
+
+        if (cpl.has_data()) begin
+            pcie_tl_mem_tlp mem_req;
+            int declared_payload_bytes;
+            int available_payload_bytes;
+            int valid_in_cpl;
+
+            declared_payload_bytes = (cpl.length == 0) ? 4096 : cpl.length * 4;
+            available_payload_bytes = declared_payload_bytes;
+            if (available_payload_bytes > cpl.payload.size())
+                available_payload_bytes = cpl.payload.size();
+
+            if ($cast(mem_req, req)) begin
+                valid_in_cpl = pcie_tl_mem_valid_bytes_in_range(
+                    mem_req, wire_bytes[k], available_payload_bytes);
+                for (int i = 0; i < available_payload_bytes; i++) begin
+                    if (pcie_tl_mem_lane_enabled(mem_req, wire_bytes[k] + i))
+                        req.rb_data.push_back(cpl.payload[i]);
+                end
+            end else begin
+                valid_in_cpl = available_payload_bytes;
+                for (int i = 0; i < available_payload_bytes; i++)
+                    req.rb_data.push_back(cpl.payload[i]);
+            end
+
+            recv[k] += valid_in_cpl;
+            wire_bytes[k] += available_payload_bytes;
+        end
+
         if (cpl.cpl_status != CPL_STATUS_SC) req.rb_status = cpl.cpl_status;
-        last = (recv[k] >= total[k]) || (cpl.cpl_status != CPL_STATUS_SC);
+        // 成功的无数据 Completion 终结 Config/IO 写；CplD 则要等全部
+        // 使能字节（或完整声明的 wire 跨度）到齐才完成；错误状态一律
+        // 立即终结。
+        last = !cpl.has_data() ||
+               (recv[k] >= total[k]) ||
+               (wire_bytes[k] >= ((req.length == 0) ? 4096 : req.length * 4)) ||
+               (cpl.cpl_status != CPL_STATUS_SC);
         if (last) begin
             req.rb_done = 1;
             reqs.delete(k);
             recv.delete(k);
             total.delete(k);
+            wire_bytes.delete(k);
         end
     endfunction
 
@@ -797,5 +933,6 @@ class pcie_rb_registry;
         reqs.delete(k);
         recv.delete(k);
         total.delete(k);
+        wire_bytes.delete(k);
     endfunction
 endclass
