@@ -272,6 +272,23 @@ class pcie_tl_custom_shuffled_ep_context_test extends pcie_tl_custom_base_test;
         super.build_phase(phase);
     endfunction
 
+    // device_contexts 的 key 自"BDF 唯一性按逻辑域限定"改造后不再是裸
+    // BDF，而是 pcie_device_cfg::context_key() 生成的域限定字符串
+    // （h<host>.s<segment>.<bdf>）。测试侧不应自行拼 key 格式，而是在
+    // env.cfg.device_cfgs 中按 BDF 找到对应设备策略，复用其 context_key()
+    // 查表；找不到设备或上下文时返回 null，由调用方统一报错。
+    virtual function pcie_tl_func_context find_context_by_bdf(bit [15:0] bdf);
+        foreach (env.cfg.device_cfgs[i]) begin
+            if ((env.cfg.device_cfgs[i] != null) &&
+                (env.cfg.device_cfgs[i].bdf == bdf) &&
+                env.device_contexts.exists(
+                    env.cfg.device_cfgs[i].context_key()))
+                return env.device_contexts[
+                    env.cfg.device_cfgs[i].context_key()];
+        end
+        return null;
+    endfunction
+
     virtual function void end_of_elaboration_phase(uvm_phase phase);
         pcie_tl_func_context ep_a_context;
         pcie_tl_func_context ep_z_context;
@@ -283,16 +300,14 @@ class pcie_tl_custom_shuffled_ep_context_test extends pcie_tl_custom_base_test;
             return;
         end
 
-        if (!env.device_contexts.exists(16'h0208) ||
-            !env.device_contexts.exists(16'h0200)) begin
+        ep_a_context = find_context_by_bdf(16'h0208);
+        ep_z_context = find_context_by_bdf(16'h0200);
+        if ((ep_a_context == null) || (ep_z_context == null)) begin
             `uvm_error("EP_CONTEXT_ORDER",
                        "expected shuffled EP BDF contexts are missing")
             return;
         end
-        ep_a_context = env.device_contexts[16'h0208];
-        ep_z_context = env.device_contexts[16'h0200];
-        if ((ep_a_context == null) || (ep_z_context == null) ||
-            (env.ep_agents[0].cfg_mgr != ep_a_context.cfg_mgr) ||
+        if ((env.ep_agents[0].cfg_mgr != ep_a_context.cfg_mgr) ||
             (env.ep_agents[1].cfg_mgr != ep_z_context.cfg_mgr)) begin
             `uvm_error("EP_CONTEXT_ORDER",
                        "EP cfg managers did not follow canonical link/node order")
