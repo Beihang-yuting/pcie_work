@@ -54,6 +54,14 @@ class pcie_device_cfg extends uvm_object;
 
   `uvm_object_utils(pcie_device_cfg)
 
+  // 返回"域限定 BDF"查找 key。BDF 只在单个 Host/segment 枚举空间内
+  // 唯一，多域拓扑必须用该 key 索引 device context/去重表；env 与
+  // 测试统一调用本方法，避免各处手拼格式漂移。
+  function string context_key();
+    return $sformatf("h%0d.s%0d.%04h", domain_host_id,
+                     domain_segment_id, bdf);
+  endfunction
+
   function new(string name = "pcie_device_cfg");
     super.new(name);
 

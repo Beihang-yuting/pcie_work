@@ -130,31 +130,23 @@ class pcie_dpu_2host_16pf_16vf_example_test extends uvm_test;
     domain.key.host_id = host_id;
     domain.key.segment_id = host_id;
 
-    // 每 Host 272 个 function（16 PF + 256 VF）。当前投影校验按全局
-    // BDF 去重（未按 domain 区分），因此两个 Host 使用互不重叠的 BDF
-    // 段：Host0 0x0100~0x07FF，Host1 0x0800~0x0FFF。
-    bdf_range.first_bdf = 16'h0100 + host_id * 16'h0700;
-    bdf_range.last_bdf  = bdf_range.first_bdf + 16'h06FF;
+    // 每 Host 272 个 function（16 PF + 256 VF）。BDF 唯一性按逻辑域
+    // 限定（global_cfg 校验与 env context 表都带 host/segment key），
+    // 因此两个 Host 可以使用完全相同的 BDF 段——这也验证多域同 BDF
+    // 的支持。
+    bdf_range.first_bdf = 16'h0100;
+    bdf_range.last_bdf  = 16'h0FFF;
     domain.bdf_ranges.push_back(bdf_range);
 
-    // 随机放置的碎片化约束：resolver 按 function 顺序放置（不按 size
-    // 降序），随机撒下的 16KB VF BAR 会击穿 32MB 对齐槽位。因此
-    // DEVICE_MEMORY 独占一个 64GB 大窗口（2048 个 32MB 槽，272 个小
-    // BAR 最多打穿 272 个，first-fit 兜底必然成功），MAILBOX/MSIX 的
-    // 小 BAR 另开 1GB 窗口，互不干扰。两 Host 的窗口区间不重叠。
+    // 每 Host 独立 4GB 窗口（两 Host 区间不重叠），三种 BAR 角色共
+    // 享。resolver 按 size 降序放置：16 个 32MB PF BAR 先占，VF 小 BAR
+    // 再填缝，4GB 窗口即可容纳全部 1632 个 BAR 且随机放置不会碎片化。
     window = dpu_mmio_window_cfg::type_id::create(
-      $sformatf("window_devmem_%0d", host_id));
-    window.base  = 64'h0000_0100_0000_0000 +
-                   host_id * 64'h0000_0100_0000_0000;
-    window.limit = window.base + 64'h0000_0010_0000_0000;   // 64GB
-    window.allowed_roles.push_back(DPU_BAR_DEVICE_MEMORY);
-    domain.mmio_windows.push_back(window);
-
-    window = dpu_mmio_window_cfg::type_id::create(
-      $sformatf("window_small_%0d", host_id));
+      $sformatf("window_%0d", host_id));
     window.base  = 64'h0000_0010_0000_0000 +
                    host_id * 64'h0000_0010_0000_0000;
-    window.limit = window.base + 64'h0000_0000_4000_0000;   // 1GB
+    window.limit = window.base + 64'h0000_0001_0000_0000;   // 4GB
+    window.allowed_roles.push_back(DPU_BAR_DEVICE_MEMORY);
     window.allowed_roles.push_back(DPU_BAR_MAILBOX);
     window.allowed_roles.push_back(DPU_BAR_MSIX);
     domain.mmio_windows.push_back(window);

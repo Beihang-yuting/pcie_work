@@ -167,9 +167,11 @@ class pcie_tl_topology_adapter_unit_test extends uvm_test;
 
         context_env.cfg = env_cfg;
         context_env.topology_adapter = adapter;
-        context_env.device_contexts[ctx_z.bdf] = ctx_z;
-        context_env.device_contexts[ctx_a.bdf] = ctx_a;
-        context_env.device_contexts[ctx_m.bdf] = ctx_m;
+        // device_contexts 以"域限定 BDF"字符串为 key（多域拓扑允许
+        // 跨域同 BDF），必须经 pcie_device_cfg::context_key() 生成。
+        context_env.device_contexts[dev_z.context_key()] = ctx_z;
+        context_env.device_contexts[dev_a.context_key()] = ctx_a;
+        context_env.device_contexts[dev_m.context_key()] = ctx_m;
 
         require(context_env.configured_ep_context(0) == ctx_a,
                 "EP slot 0 resolves canonical EP_A context");

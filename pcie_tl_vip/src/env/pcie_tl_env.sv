@@ -75,10 +75,18 @@ class pcie_tl_env extends uvm_env;
     host_mem_api    host_mem_by_root[];
     host_mem_api    dev_mem[16];
 
-    // BDF-indexed device contexts are only built when global device policy is
-    // supplied.  Existing tests that do not use global-cfg keep this map empty.
-    pcie_tl_func_context device_contexts[bit [15:0]];
+    // 设备上下文表只在提供全局 device 策略时构建；不用 global-cfg 的旧
+    // 测试保持空表。key 是"域限定 BDF"字符串（见 device_context_key）：
+    // 不同 Host/segment 是独立枚举空间，允许相同 BDF，只有同域重复才
+    // 是错误。
+    pcie_tl_func_context device_contexts[string];
     pcie_tl_device_cfg_adapter device_cfg_adapter;
+
+    // 生成域限定的 device context 查找 key；委托给 pcie_device_cfg 的
+    // 公共 context_key()，测试与 env 共用同一格式。
+    protected function string device_context_key(pcie_device_cfg device);
+        return device.context_key();
+    endfunction
 
     //--- Legacy RC auto-response observation ---
     // Legacy CplD objects are written directly to the scoreboard rather than
@@ -145,8 +153,9 @@ class pcie_tl_env extends uvm_env;
                       ((device.physical_node_id != "") &&
                        (device.physical_node_id == canonical_node_id))))
                     continue;
-                if (device_contexts.exists(device.bdf)) begin
-                    configured_ep_context = device_contexts[device.bdf];
+                if (device_contexts.exists(device_context_key(device))) begin
+                    configured_ep_context =
+                        device_contexts[device_context_key(device)];
                     return configured_ep_context;
                 end
             end
@@ -167,9 +176,10 @@ class pcie_tl_env extends uvm_env;
             if ((cfg.device_cfgs[i] != null) &&
                 (cfg.device_cfgs[i].role == PCIE_DEVICE_EP)) begin
                 if (ordinal == ep_index) begin
-                    if (device_contexts.exists(cfg.device_cfgs[i].bdf))
-                        configured_ep_context =
-                            device_contexts[cfg.device_cfgs[i].bdf];
+                    if (device_contexts.exists(
+                          device_context_key(cfg.device_cfgs[i])))
+                        configured_ep_context = device_contexts[
+                            device_context_key(cfg.device_cfgs[i])];
                     return configured_ep_context;
                 end
                 ordinal++;
@@ -581,10 +591,15 @@ class pcie_tl_env extends uvm_env;
                         cfg.device_cfgs[i].device_id,
                         (device_errors.size() == 0) ?
                           "unspecified adapter error" : device_errors[0]))
-                if (device_contexts.exists(context.bdf))
+                // 同域 BDF 重复才是错误；跨 Host/segment 允许同 BDF。
+                if (device_contexts.exists(
+                      device_context_key(cfg.device_cfgs[i])))
                     `uvm_fatal("DEVICE_CFG", $sformatf(
-                        "duplicate device BDF 0x%04h", context.bdf))
-                device_contexts[context.bdf] = context;
+                        "duplicate device BDF 0x%04h in domain h%0d.s%0d",
+                        context.bdf, cfg.device_cfgs[i].domain_host_id,
+                        cfg.device_cfgs[i].domain_segment_id))
+                device_contexts[device_context_key(cfg.device_cfgs[i])] =
+                    context;
             end
         end
 

@@ -389,7 +389,7 @@ class pcie_global_cfg extends uvm_object;
   function void validate(output string errors[$]);
     bit seen_link[string];
     string slot_owner[int unsigned];
-    bit seen_bdf[bit [15:0]];
+    bit seen_bdf[string];
 
     errors.delete();
     // 即使校验报出其他策略错误，也保持对外的规范数组同步；这样诊断
@@ -542,11 +542,22 @@ class pcie_global_cfg extends uvm_object;
         continue;
       end
 
-      if (seen_bdf.exists(devices[i].bdf))
-        errors.push_back($sformatf("duplicate device BDF 0x%04h",
-                                   devices[i].bdf));
-      else
-        seen_bdf[devices[i].bdf] = 1'b1;
+      // BDF 唯一性按逻辑域限定：不同 Host/segment 是独立的枚举空间，
+      // 允许出现相同 BDF；只有同域重复才是配置错误。
+      begin
+        string bdf_key;
+        bdf_key = $sformatf("h%0d.s%0d.%04h",
+                            devices[i].domain_host_id,
+                            devices[i].domain_segment_id,
+                            devices[i].bdf);
+        if (seen_bdf.exists(bdf_key))
+          errors.push_back($sformatf(
+            "duplicate device BDF 0x%04h in domain h%0d.s%0d",
+            devices[i].bdf, devices[i].domain_host_id,
+            devices[i].domain_segment_id));
+        else
+          seen_bdf[bdf_key] = 1'b1;
+      end
 
       foreach (devices[i].bars[bar]) begin
         if ((devices[i].bars[bar] != null) &&
