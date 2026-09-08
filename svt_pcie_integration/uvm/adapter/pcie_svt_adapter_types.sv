@@ -16,9 +16,10 @@ typedef struct {
   bit [2:0]  completion_status;
 } pcie_svt_route_info;
 
-// 传输层选择。当前正式验证只启用 Serial；PIPE 保留为显式枚举值，
-// 这样用户可以在配置阶段提前发现尚未实现的物理适配器，而不是把
-// PIPE 请求静默当成 Serial。
+// 传输层选择。Serial 与 PIPE 均为已验证路径：双 SVT RC↔EP 门禁分别
+// 由 pcie_tl_svt_formal.f（Serial）与 pcie_tl_svt_pipe.f（PIPE，
+// Gen3/4/5 三档）覆盖。物理层类型最终由静态 HDL 顶层参数决定，本
+// 枚举用于策略声明与一致性校验。
 typedef enum {
   PCIE_SVT_TRANSPORT_SERIAL,
   PCIE_SVT_TRANSPORT_PIPE

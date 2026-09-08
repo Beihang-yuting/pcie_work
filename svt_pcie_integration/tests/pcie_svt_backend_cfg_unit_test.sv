@@ -189,12 +189,12 @@ class pcie_svt_backend_cfg_unit_test extends uvm_test;
             "non-default full_equalization_required must be diagnosed");
     cfg.full_equalization_required = 1'b1;
 
-    // PIPE 仍是显式未实现路径，必须由 validate() 报出，而不是静默降级
-    // 成 Serial。
+    // PIPE 已是受支持的 transport（双 SVT PIPE 门禁 Gen3/4/5 全绿），
+    // validate() 必须接受 PIPE override 而不再报错。
     override_cfg.transport = PCIE_SVT_TRANSPORT_PIPE;
     cfg.validate(errors);
-    require(errors.size() != 0,
-            "PIPE override must be rejected during configuration validation");
+    require(errors.size() == 0,
+            "PIPE override must be accepted after PIPE support landed");
 
     `uvm_info("SVT_CFG_CONTRACT",
       "SVT_BACKEND_CFG_CONTRACT_PASS: override precedence and Gen4 semantics",

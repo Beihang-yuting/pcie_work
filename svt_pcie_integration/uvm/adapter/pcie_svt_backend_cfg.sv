@@ -188,8 +188,9 @@ class pcie_svt_backend_cfg extends uvm_object;
     return 1'b1;
   endfunction
 
-  // 返回链路最终采用的 transport。当前只实现 Serial；PIPE 会在
-  // validate() 阶段被拒绝，避免 backend 把未实现请求静默降级。
+  // 返回链路最终采用的 transport。Serial 与 PIPE 均已支持：物理层由
+  // 静态 HDL 顶层的 PHY_INTERFACE_TYPE 决定，本字段用于策略声明与
+  // 校验一致性（PIPE 顶层见 pcie_tl_svt_pipe_top/topology）。
   function bit get_link_transport(
       pcie_link_cfg link,
       output pcie_svt_transport_e value);
@@ -254,15 +255,16 @@ class pcie_svt_backend_cfg extends uvm_object;
   endfunction
 
   // 校验全局字段与每条链路覆盖的取值合法性；所有问题以中文诊断累加进
-  // errors（空表示通过）。未实现的非默认请求（PIPE、monitor 等）在此
-  // 硬拒绝，避免 backend 静默忽略用户意图。
+  // errors（空表示通过）。未实现的非默认请求（passive monitor 等）在
+  // 此硬拒绝，避免 backend 静默忽略用户意图。
   function void validate(output string errors[$]);
     bit seen_override[string];
 
     errors.delete();
 
-    if (transport != PCIE_SVT_TRANSPORT_SERIAL)
-      errors.push_back("SVT backend 当前只支持 SERIAL transport，PIPE 预留未实现");
+    if (!((transport == PCIE_SVT_TRANSPORT_SERIAL) ||
+          (transport == PCIE_SVT_TRANSPORT_PIPE)))
+      errors.push_back("SVT transport 必须为 SERIAL 或 PIPE");
     if (!((backend_mode == PCIE_SVT_BACKEND_FULL_VIP) ||
           (backend_mode == PCIE_SVT_BACKEND_MAPPER_APP)))
       errors.push_back("SVT backend_mode 必须为 FULL_VIP 或 MAPPER_APP");
@@ -337,9 +339,10 @@ class pcie_svt_backend_cfg extends uvm_object;
       else
         seen_override[link_id] = 1'b1;
       if (override_cfg.has_transport &&
-          (override_cfg.transport != PCIE_SVT_TRANSPORT_SERIAL))
+          !((override_cfg.transport == PCIE_SVT_TRANSPORT_SERIAL) ||
+            (override_cfg.transport == PCIE_SVT_TRANSPORT_PIPE)))
         errors.push_back($sformatf(
-          "SVT link override '%s' 请求了未实现的 PIPE transport", link_id));
+          "SVT link override '%s' transport 必须为 SERIAL 或 PIPE", link_id));
       if (override_cfg.has_max_gen &&
           !((override_cfg.max_gen == 4) || (override_cfg.max_gen == 5)))
         errors.push_back($sformatf(

@@ -5,10 +5,47 @@
 
 ## 编译入口
 
-当前有两个可直接运行的 SVT 验证入口：
+当前有三个可直接运行的 SVT 验证入口：
 
 - `pcie_tl_svt_formal.f`：本项目 TL-root + SVT FULL_VIP 双向 Serial 门禁；
+- `pcie_tl_svt_pipe.f`：同一门禁的 PIPE 物理层版本（见下节）；
 - `pcie_svt_peer_traffic.f`：官方 SVT RC/EP peer-only Serial 自检。
+
+## TL→SVT PIPE 双向门禁（Gen3/4/5）
+
+`pcie_tl_svt_pipe.f` + `pcie_tl_svt_pipe_top` 与 Serial 门禁完全同构
+（同一批 test、同样的 `PCIE_TL_SVT_TLP_PASS` 等断言），差异只在物理层：
+双 SVT agent 通过官方 PIPE/PIPE5 互连宏对接（RC=MPIPE 0，EP=MPIPE 1，
+x1 lane）。TL 控制面与 adapter 对 PHY 类型无感知。
+
+PIPE spec 版本与 PCIe Gen 联动，由编译宏选择档位（拓扑内锁定映射，
+用户只选 Gen，不可能出现版本错配）：
+
+| 编译宏 | PCIe | PIPE | 互连宏 |
+|---|---|---|---|
+| （无，默认） | 3.0 | 4.3 | `SVT_PCIE_ICM_PIPE_PIPE_LINK` |
+| `+define+PCIE_PIPE_GEN4` | 4.0 | 4.4 | `SVT_PCIE_ICM_PIPE_PIPE_LINK` |
+| `+define+PCIE_PIPE_GEN5` | 5.0 | 5.1 | `SVT_PCIE_ICM_PIPE5_PIPE5_LINK` |
+
+Gen5 档必须同时给出三个官方使能宏，缺一编译失败：
+
+```sh
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  +define+PCIE_PIPE_GEN5 \
+  +define+SVT_PCIE_ENABLE_GEN5 \
+  +define+SVT_PCIE_ENABLE_PIPE5 \
+  +define+EXPERTIO_PCIESVC_INCLUDE_32G \
+  -f pcie_tl_svt_pipe.f -top pcie_tl_svt_pipe_top \
+  -o build/pipe_gen5/simv
+./build/pipe_gen5/simv +UVM_TESTNAME=pcie_tl_svt_formal_link_test
+```
+
+宏含义：`SVT_PCIE_ENABLE_GEN5` 提供 32G 速率编码与覆盖组；
+`SVT_PCIE_ENABLE_PIPE5` 编译 PIPE5 MBI EQ 握手 task；
+`EXPERTIO_PCIESVC_INCLUDE_32G` 引入 32 GT/s 速率模型。三档均已在
+R-2020.12 上通过 L0 + 全部四个双向门禁标志（0 ERROR/FATAL）。PIPE5 的
+pclk 方向由 `SVT_PCIE_ENABLE_PIPE5_PCLK_AS_PHY_OUTPUT_MODE` 编译宏联动
+两端，默认 pclk 来自 MAC。
 
 `pcie_tl_svt_adapter.f` 现在是 source-only 适配层 filelist。它只包含
 `pcie_tl_env`、SVT adapter package 和官方 SVT 支持源码，不再包含没有真实
