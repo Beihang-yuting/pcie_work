@@ -52,4 +52,5 @@ $HOST_MEM_ROOT/src/host_mem_manager.sv
 ../../pcie_tl_vip/src/pcie_tl_pkg.sv
 ../rtl/pcie_svt_vip_bootstrap.sv
 ../uvm/adapter/pcie_svt_adapter_pkg.sv
+../rtl/pcie_svt_pipe_port_if.sv
 ../rtl/pcie_tl_svt_pipe_macro_top.sv

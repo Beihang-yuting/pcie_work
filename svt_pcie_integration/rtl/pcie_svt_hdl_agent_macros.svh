@@ -44,6 +44,9 @@
 // PIPE 物理层版本。
 //------------------------------------------------------------------------------
 
+// 向量化 PIPE 端口与散名映射宏（与 Serial 版 serial_adapter 对称）。
+`include "pcie_svt_pipe_adapter.sv"
+
 // Gen 档位 → PCIe/PIPE spec 的中间宏（宏体内不能再写 `ifdef，先在
 // 文件级解析档位）。
 `ifdef PCIE_PIPE_GEN5
@@ -79,14 +82,23 @@
   ) instance_name``_spd(                                                   \
     instance_name``_if);
 
+// 每个宽度外壳在基宏之上追加：向量化端口 <name>_pipe + 散名映射。
+// DUT/对端只对接 <name>_pipe（或用 PCIE_SVT_PIPE_PORT_CROSS_Xn 与另一
+// 实例的 port 对拼），与 Serial 版 <name>_serial 的体验一致。
 `define PCIE_SVT_DECLARE_HDL_AGENT_X4(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy) \
-  `PCIE_SVT_DECLARE_HDL_AGENT_PIPE_BASE(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy, 4)
+  `PCIE_SVT_DECLARE_HDL_AGENT_PIPE_BASE(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy, 4) \
+  pcie_svt_pipe_port_if #(4) instance_name``_pipe();                       \
+  `PCIE_SVT_MAP_PIPE_X4(instance_name``_spd, instance_name``_pipe, is_root)
 
 `define PCIE_SVT_DECLARE_HDL_AGENT_X8(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy) \
-  `PCIE_SVT_DECLARE_HDL_AGENT_PIPE_BASE(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy, 8)
+  `PCIE_SVT_DECLARE_HDL_AGENT_PIPE_BASE(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy, 8) \
+  pcie_svt_pipe_port_if #(8) instance_name``_pipe();                       \
+  `PCIE_SVT_MAP_PIPE_X8(instance_name``_spd, instance_name``_pipe, is_root)
 
 `define PCIE_SVT_DECLARE_HDL_AGENT_X16(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy) \
-  `PCIE_SVT_DECLARE_HDL_AGENT_PIPE_BASE(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy, 16)
+  `PCIE_SVT_DECLARE_HDL_AGENT_PIPE_BASE(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy, 16) \
+  pcie_svt_pipe_port_if #(16) instance_name``_pipe();                      \
+  `PCIE_SVT_MAP_PIPE_X16(instance_name``_spd, instance_name``_pipe, is_root)
 
 `else  // !PCIE_SVT_HDL_PHY_PIPE
 

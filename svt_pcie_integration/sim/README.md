@@ -54,11 +54,16 @@ pclk 方向由 `SVT_PCIE_ENABLE_PIPE5_PCLK_AS_PHY_OUTPUT_MODE` 编译宏联动
 即切换为 PIPE 展开——宏调用行、参数、`update_if_variables`、
 `vif_key` 约定完全不变。差异只有两点：
 
-- 不再生成 `<name>_serial`；DUT 直接对接
-  `<name>_spd.vip_port_if.pipe_if` 的 tx_*/rx_* 逐 lane 信号；
-- `pipe_if.reset` 是 logic（单一结构驱动），宏内不驱动它：双 VIP 对拼
-  时由官方 `SVT_PCIE_ICM_PIPE_PIPE_LINK` 驱动，真实 DUT 单侧由用户顶层
-  `assign <name>_spd.vip_port_if.pipe_if.reset = <复位>;`。
+- 生成 `<name>_pipe`（`pcie_svt_pipe_port_if #(LANES)` 向量化端口，
+  替代 Serial 的 `<name>_serial`）：宏内已把官方 pipe_if/pie8_eq_if 的
+  全部散名逐 lane 信号（含 tx_deemph、preset/EQ、MBI message bus）按
+  is_root 方向映射进该端口，DUT 只需向量级连线：
+  `assign <name>_pipe.tx_data[0] = dut_tx_data_l0;` …；
+- 双实例对拼一行搞定：
+  `` `PCIE_SVT_PIPE_PORT_CROSS_X4(rc_pipe, ep_pipe) ``（a 必须是
+  spipe/Root 的 port，b 是 mpipe/EP 的 port）；
+- `pipe_if.reset` 是 logic（单一结构驱动），宏内不驱动它：由用户顶层
+  每实例一行 `assign <name>_spd.vip_port_if.pipe_if.reset = <复位>;`。
 
 MPIPE 侧别由 is_root 自动推导（Root=spipe，Endpoint=mpipe）；PIPE/PCIe
 spec 版本沿用上表的 `PCIE_PIPE_GEN4/GEN5` 档位宏。宏路线的双 SVT x4

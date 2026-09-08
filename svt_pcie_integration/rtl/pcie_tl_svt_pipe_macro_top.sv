@@ -40,15 +40,15 @@ module pcie_tl_svt_pipe_macro_top;
   `PCIE_SVT_DECLARE_HDL_AGENT_X4(svt_ep0, "SVT_EP0.", 1'b0, 1'b0,
                                  common_pwr_on_reset, 0, 1)
 
-  // 官方 PIPE 逐 lane 交叉互连（spipe 在前、mpipe 在后）。
-  `SVT_PCIE_ICM_PIPE_PIPE_LINK(0, svt_rc0_spd, svt_ep0_spd)
+  // 向量化端口对拼：宏展开已生成 svt_rc0_pipe / svt_ep0_pipe，一条
+  // CROSS 宏即完成全部 per-lane + 公共信号互连（a=spipe/RC 的 port，
+  // b=mpipe/EP 的 port）。真实 DUT 场景把 CROSS 换成 DUT 与单个
+  // <name>_pipe 的向量连线即可。
+  `PCIE_SVT_PIPE_PORT_CROSS_X4(svt_rc0_pipe, svt_ep0_pipe)
 
-  // pclk 方向：两侧 CLK_FROM_MAC 均为默认 0，spipe（RC）驱动 pclk，
-  // mpipe（EP）跟随——等价于官方 DO_CONDITIONAL_INTERCONNECT 在该参数
-  // 组合下选择的连接（该官方宏依赖 CREATE_PORT_INST 生成的 parameter，
-  // DECLARE 宏路线不可用，故显式写出这一条）。
-  assign svt_ep0_spd.vip_port_if.pipe_if.pclk =
-         svt_rc0_spd.vip_port_if.pipe_if.pclk;
+  // pipe_if.reset 是 logic 单驱动，归顶层：每实例一条 assign。
+  assign svt_rc0_spd.vip_port_if.pipe_if.reset = common_pwr_on_reset;
+  assign svt_ep0_spd.vip_port_if.pipe_if.reset = common_pwr_on_reset;
 
   // VIF 发布沿用 DECLARE 宏路线的固定约定：RC 端 port 4'h0 →
   // link_0_vif_0，EP 端 port 4'h1 → link_0_vif_1，与 unified env 的
