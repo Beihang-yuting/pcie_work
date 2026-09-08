@@ -47,6 +47,24 @@ R-2020.12 上通过 L0 + 全部四个双向门禁标志（0 ERROR/FATAL）。PIP
 pclk 方向由 `SVT_PCIE_ENABLE_PIPE5_PCLK_AS_PHY_OUTPUT_MODE` 编译宏联动
 两端，默认 pclk 来自 MAC。
 
+### 真实 DUT 集成宏的 PIPE 模式
+
+`PCIE_SVT_DECLARE_HDL_AGENT_X4/X8/X16` 是 Serial/PIPE 通用的声明入口：
+默认展开 SERDES（历史行为不变），加 `+define+PCIE_SVT_HDL_PHY_PIPE`
+即切换为 PIPE 展开——宏调用行、参数、`update_if_variables`、
+`vif_key` 约定完全不变。差异只有两点：
+
+- 不再生成 `<name>_serial`；DUT 直接对接
+  `<name>_spd.vip_port_if.pipe_if` 的 tx_*/rx_* 逐 lane 信号；
+- `pipe_if.reset` 是 logic（单一结构驱动），宏内不驱动它：双 VIP 对拼
+  时由官方 `SVT_PCIE_ICM_PIPE_PIPE_LINK` 驱动，真实 DUT 单侧由用户顶层
+  `assign <name>_spd.vip_port_if.pipe_if.reset = <复位>;`。
+
+MPIPE 侧别由 is_root 自动推导（Root=spipe，Endpoint=mpipe）；PIPE/PCIe
+spec 版本沿用上表的 `PCIE_PIPE_GEN4/GEN5` 档位宏。宏路线的双 SVT x4
+PIPE 门禁入口为 `pcie_tl_svt_pipe_macro.f` + `pcie_tl_svt_pipe_macro_top`
+（复用同一批门禁断言），已在 R-2020.12 上全绿。
+
 `pcie_tl_svt_adapter.f` 现在是 source-only 适配层 filelist。它只包含
 `pcie_tl_env`、SVT adapter package 和官方 SVT 支持源码，不再包含没有真实
 SVT agent 的占位 test/top。接入真实 DUT 时，应在用户工程自己的 filelist
