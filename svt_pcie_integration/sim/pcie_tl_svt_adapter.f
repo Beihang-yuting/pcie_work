@@ -31,7 +31,6 @@
 +define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME
 +define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
 +define+SVT_PCIE_ENABLE_10_BIT_TAGS
-+define+PCIE_SVT_AVAILABLE
 +define+PCIE_TOPO_EP_X16
 
 +define+EXPERTIO_PCIESVC_INCLUDE_8G
@@ -48,14 +47,14 @@ $HOST_MEM_ROOT/src/host_mem_manager.sv
 ../../pcie_tl_vip/src/topology/pcie_topology_pkg.sv
 ../../pcie_tl_vip/src/pcie_tl_pkg.sv
 
-// 重要：adapter package 会 import svt_uvm_pkg/svt_pcie_uvm_pkg，因此官方
-// svt_pcie.uvm.pkg 必须在本列表展开前完成编译。这里故意不直接 include
-// 该 package：它要求用户顶层的 global shadow/random-seed 层次宏，source-only
-// 列表无法猜测这些层次。真实工程应先在同一次 VCS 命令中编译一个用户自有
-// prefix 源文件（定义 EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH、
-// SVC_RANDOM_SEED_SCOPE 并 include "svt_pcie.uvm.pkg"），再用 -f 引入本列表；
-// 或把包含 package 的用户顶层源文件放在 -f 本列表之前。仅把用户 top 追加
-// 在本列表之后不能满足 adapter package 的编译顺序。
+// adapter package 会 import svt_uvm_pkg/svt_pcie_uvm_pkg，官方
+// svt_pcie.uvm.pkg 必须先于 adapter package 编译。本列表默认通过
+// bootstrap 自行完成该编译，因此单独 -f 本列表即可通过编译（两个
+// HDL 层次宏 EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH / SVC_RANDOM_SEED_SCOPE
+// 为可选，详见 bootstrap 头注释）。若外部集成流程已在别处编译了
+// SVT 包，请 +define+PCIE_SVT_PKG_EXTERNAL 跳过 bootstrap，避免
+// package 重复定义。
+../rtl/pcie_svt_vip_bootstrap.sv
 
 // SVT adapter package（仅适配层，不引入 topology env）。
 ../uvm/adapter/pcie_svt_adapter_pkg.sv
