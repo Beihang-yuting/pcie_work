@@ -577,15 +577,15 @@ class pcie_tl_env extends uvm_env;
             device_cfg_adapter = pcie_tl_device_cfg_adapter::type_id::create(
                 "device_cfg_adapter");
             foreach (cfg.device_cfgs[i]) begin
-                pcie_tl_func_context context;
+                pcie_tl_func_context device_context;
                 string device_errors[$];
                 if (cfg.device_cfgs[i] == null)
                     `uvm_fatal("DEVICE_CFG", $sformatf(
                         "device policy %0d is null", i))
-                context = pcie_tl_func_context::type_id::create(
+                device_context = pcie_tl_func_context::type_id::create(
                     $sformatf("device_context_%0d", i));
                 if (!device_cfg_adapter.apply_device_cfg(
-                      cfg.device_cfgs[i], context, device_errors))
+                      cfg.device_cfgs[i], device_context, device_errors))
                     `uvm_fatal("DEVICE_CFG", $sformatf(
                         "device '%s' translation failed: %s",
                         cfg.device_cfgs[i].device_id,
@@ -596,10 +596,10 @@ class pcie_tl_env extends uvm_env;
                       device_context_key(cfg.device_cfgs[i])))
                     `uvm_fatal("DEVICE_CFG", $sformatf(
                         "duplicate device BDF 0x%04h in domain h%0d.s%0d",
-                        context.bdf, cfg.device_cfgs[i].domain_host_id,
+                        device_context.bdf, cfg.device_cfgs[i].domain_host_id,
                         cfg.device_cfgs[i].domain_segment_id))
                 device_contexts[device_context_key(cfg.device_cfgs[i])] =
-                    context;
+                    device_context;
             end
         end
 
