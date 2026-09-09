@@ -169,3 +169,39 @@ VIO/DPU 初始化的 manager 也不会被 `pcie_tl_env` 重新 `init_region()`�
   only one production TL environment.  Real-DUT integration should provide
   its own HDL top while reusing the adapter package and official SVT agent
   interfaces.
+
+## 宏定义总览（编译期 `+define+`）
+
+本节汇总全仓库编译期宏：每个宏门控什么、在哪里开启。运行期 plusarg
+（`+PCIE_TOPOLOGY=`、`+PCIE_GEN=`、`+TAG_BIT=`、`+CAPACITY_CASE=` 等）不属于
+编译宏，见 `pcie_tl_vip/docs/PCIe_TL_VIP_User_Guide.md`。
+
+### 项目功能宏
+
+| 宏 | 门控内容 | 在哪里开启 |
+|---|---|---|
+| `PCIE_COSIM_ENABLE` | `pcie_tl_func_manager` / `pcie_tl_config_proxy` 中面向 QEMU-VCS bridge 的 DPI-C 导出（拓扑导出、VF 事件、BAR base 同步）。未定义时相关入口为安全空操作，TL 行为不变 | 仅 QEMU_VCS cosim 平台的组合构建（其 Makefile `vcs-vip` 等目标 `+define`）。TL-only 回归与 SVT 独立集成**不要**定义；无 bridge 库时定义它也能编译（DPI 运行期解析），但一旦调到 DPI 会运行时报错 |
+| `PCIE_TOPO_EP_X16` / `PCIE_TOPO_EP_2X8` / `PCIE_TOPO_SWITCH_1X16_4X4` | 拓扑档位：推导 `pcie_svt_hdl_slot_cfg.svh` / `pcie_unified_limits.svh` 中链路数、HDL agent 槽位等容量默认值 | 各集成 filelist 按目标拓扑三选一（`pcie_tl_svt_adapter.f` 默认 `EP_X16`）；与运行期 `+PCIE_TOPOLOGY=` 档位保持一致 |
+| `PCIE_PIPE_GEN4` / `PCIE_PIPE_GEN5` | Gen 档位 → PCIe/PIPE spec 版本联动（`pcie_svt_hdl_agent_macros.svh`、`pcie_tl_svt_pipe_topology.sv`）。无档位宏 = PCIe 3.0 + PIPE 4.3；GEN4 = 4.0 + 4.4；GEN5 = 5.0 + 5.1 且走 PIPE5 互连宏 | PIPE 集成 filelist / 顶层。GEN5 还需同时开官方 `SVT_PCIE_ENABLE_GEN5` / `SVT_PCIE_ENABLE_PIPE5` / `EXPERTIO_PCIESVC_INCLUDE_32G`（见 `svt_pcie_integration/sim/README.md`） |
+| `PCIE_SVT_HDL_PHY_PIPE` | SVT HDL agent 的 PHY 形态：默认 SERDES（Serial），定义后切 PIPE、DUT 直接对接逐 lane PIPE 信号 | `pcie_tl_svt_pipe*.f`；Serial 集成不定义 |
+| `PCIE_SVT_PIPE_MACRO_X16` | `pcie_tl_svt_pipe_macro_top` 的 x16 宽度门禁（DECLARE_X16 + CROSS_X16），默认 x4 | `pcie_tl_svt_pipe_macro.f` 需要 x16 时 |
+| `PCIE_USE_SVT_PEER` | `pcie_unified_limits.svh` 中 SVT peer-traffic 模式的容量分支 | peer-traffic 场景 filelist |
+| `PCIE_SVT_ENV_MAX_NUM_LINKS` / `PCIE_SVT_ENV_MAX_HDL_AGENTS` / `PCIE_SVT_ENV_REQUIRED_HDL_AGENTS` | 容量上限覆盖；不定义时按拓扑档位宏自动推导（`ifndef` 默认） | 仅需偏离默认容量时在 filelist 覆盖 |
+| `PCIE_SVT_PKG_EXTERNAL` | 跳过 `pcie_svt_vip_bootstrap.sv` 的官方 SVT 包编译 | 外部集成流程已在别处编译 `svt_pcie.uvm.pkg` 时，避免 package 重复定义 |
+
+### Synopsys 官方宏（原样透传给 SVT VIP）
+
+| 宏 | 作用 | 在哪里开启 |
+|---|---|---|
+| `DESIGNWARE_INCDIR=$DESIGNWARE_HOME` + `SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS` | SVT loader 定位安装目录并启用其内部 incdir | 所有编译 SVT 包的 filelist（adapter/formal/pipe/peer 已带） |
+| `SVT_PCIE_ENABLE_10_BIT_TAGS` | SVT 10-bit tag 能力 | 需要 10-bit tag 的入口（adapter.f 已带） |
+| `SVT_PCIE_ENABLE_GEN4` / `SVT_PCIE_ENABLE_GEN5` / `SVT_PCIE_ENABLE_PIPE5` | SVT 速率/PIPE5 能力开关 | 对应 Gen 档位的 filelist |
+| `EXPERTIO_PCIESVC_INCLUDE_8G/16G/32G` | 包含对应速率的 SVC 模型 | 与 Gen 档位配套 |
+| `EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH` / `SVC_RANDOM_SEED_SCOPE` | 层次锚：前者指向顶层 `pciesvc_global_shadow` 实例（官方 example env/interconnect 需要），后者把 SVT 随机种子锚定到顶层变量以复现随机序列 | **均可选**。formal/pipe filelist 已指向各自 top；自研 top 不需要官方 example env 时可不定义（种子回退 `$random`），详见 `pcie_svt_vip_bootstrap.sv` 头注释 |
+| `SVT_PCIE_ENABLE_PIPE5_PCLK_AS_PHY_OUTPUT_MODE` | PIPE5 pclk 由 PHY 输出的时钟模式 | Gen5/PIPE5 拓扑需要该时钟模型时 |
+
+### 已清理的历史宏
+
+- `PCIE_SVT_AVAILABLE`：曾守卫"无 SVT 时空翻译单元"的适配器测试；该批测试
+  在环境清理（`aeac5ae`）中删除后宏残留、全仓库零引用，现已从
+  `pcie_tl_svt_adapter.f` 移除。请勿再使用。
