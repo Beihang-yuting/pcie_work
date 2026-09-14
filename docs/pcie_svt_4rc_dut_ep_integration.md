@@ -318,8 +318,10 @@ class my_4rc_dut_test extends uvm_test;
       this, "tl_env", "pcie_svt_backend_cfg", svt_backend_cfg);
     uvm_config_db#(pcie_tl_backend_factory)::set(
       this, "tl_env", "pcie_tl_backend_factory", backend_factory);
+    // topology env 从 tl_policy_cfg 读取行为策略；cfg 仅用于没有
+    // topology 的历史直接注入路径。
     uvm_config_db#(pcie_tl_env_config)::set(
-      this, "tl_env", "cfg", tl_cfg);
+      this, "tl_env", "tl_policy_cfg", tl_cfg);
 
     tl_env = pcie_tl_env::type_id::create("tl_env", this);
 endfunction

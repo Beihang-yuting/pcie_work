@@ -1,45 +1,60 @@
-# DUT Switch（1 USP + 4 DSP）集成说明（SVT RC + 4×SVT EP，含建链流程）
+# DUT Switch（1×x16 USP + 4×x4 DSP）端到端集成说明
 
-本文档描述"真实 DUT 是 PCIe Switch：上行 1 个 USP 接 SVT RC，下行 4 个
-DSP 各接一个 SVT EP"的完整集成方式。DUT 完成物理转发；TL env 管理全部
-端口策略。
-
-对应 `docs/superpowers/specs/2026-09-06-svt-backend-configuration-design.md`
-§8 拓扑表第四行：**SVT RC + DUT Switch + 四个 SVT EP → 自动创建
-1 RC + 4 EP 共 5 个 SVT agent**。
+本文档给出一个可直接改名落地的完整示例：真实 DUT 是 PCIe Switch，
+上行 USP 为 x16，下行 DSP0~DSP3 各为 x4；SVT 在 USP 侧模拟 RC，在每个
+DSP 侧模拟 EP。DUT Switch 负责五条真实 SerDes 链路的物理转发，
+`pcie_tl_env` 负责拓扑、配置空间、BAR 和业务流量，`pcie_svt_backend`
+负责把 TL adapter 接到五个正式 SVT active Device Agent。
 
 ```text
-                SVT RC0
-                  │ x16 Serial          link_id: RC0_SW0_USP0   hdl_slot 0
-             ┌────┴────┐
-             │ DUT SW0 │   （真实 Switch RTL，物理转发）
-             └─┬──┬──┬─┬─┘
-      x4 Serial│  │  │ │
-        SVT EP0  EP1 EP2 EP3
-   link_id: SW0_DSP0_EP0 .. SW0_DSP3_EP3    hdl_slot 1..4
+                                  SVT RC0
+                                    │ x16
+                         RC0_SW0_USP0│ hdl_slot=0
+                             ┌──────┴──────┐
+                             │   DUT SW0   │
+                             └─┬────┬────┬─┴─┐
+                       x4      │    │    │   │
+                 DSP0_EP0   DSP1_EP1 DSP2_EP2 DSP3_EP3
+                 SVT EP0    SVT EP1  SVT EP2  SVT EP3
+                 slot=1     slot=2   slot=3    slot=4
 ```
 
-链路共 5 条：1 条 USP 链 + 4 条 DSP 链。`pcie_topology_builder::
-build_switch_1x16_4x4()` 直接生成该拓扑，link_id 为
-`RC0_SW0_USP0`、`SW0_DSP0_EP0` … `SW0_DSP3_EP3`。
+拓扑 builder 生成的稳定 link ID 是：
 
-## 1. 角色与所有权模型
+```text
+RC0_SW0_USP0
+SW0_DSP0_EP0
+SW0_DSP1_EP1
+SW0_DSP2_EP2
+SW0_DSP3_EP3
+```
 
-| 实体 | 数量 | 说明 |
-|---|---|---|
-| 物理链路 | 5 | 1 USP + 4 DSP |
-| SVT RC agent | 1 | USP 链上 `svt_role=RC`（SVT 模拟 Root，DUT USP 是对端） |
-| SVT EP agent | 4 | 每条 DSP 链上 `svt_role=EP`（SVT 模拟 EP，DUT DSP 是对端） |
-| TL agent | 1 RC + 4 EP | 规范角色序号：RC→USP 端口号，EP→DSP 端口号 |
-| DUT Switch | 1 | 不创建任何 SVT/TL agent，仅物理转发 |
+对应 `docs/superpowers/specs/2026-09-06-svt-backend-configuration-design.md`
+§8 的 Switch 行：自动创建 1 个 SVT RC 和 4 个 SVT EP，共 5 个 active
+SVT agent。DUT 本身不创建 SVT/TL agent。
 
-规范序号规则（`pcie_global_cfg.canonical_link_id`）：Switch 场景
-RC 槽位按 USP 端口号、EP 槽位按 DSP 端口号索引——`ep_agents[2]` 恒对应
-物理 DSP2，与链路声明顺序无关；策略禁用某条 DSP 也不会让更高端口前移。
+## 1. 角色、槽位与事务所有权
 
-## 2. 静态 HDL 顶层
+| 对象 | 数量 | 所有权/用途 |
+|---|---:|---|
+| 物理 SerDes 链路 | 5 | USP x16 一条，DSP x4 四条 |
+| SVT RC agent | 1 | 连接 DUT USP，模拟上游 Root |
+| SVT EP agent | 4 | 分别连接 DUT DSP0~DSP3，响应下行请求 |
+| TL RC agent | 1 | `tl_env.v_seqr.rc_seqr_arr[0]` 发起配置和内存事务 |
+| TL EP agent | 4 | 由 env 为四个 DSP 槽位创建，驱动 SVT EP 的响应路径 |
+| DUT Switch | 1 | 只做真实物理链路转发，不由 VIP 模拟 |
 
-5 个 SVT 单端 HDL agent：1 个 x16 Root + 4 个 x4 Endpoint。
+`hdl_slot` 和 `vif_key` 是物理连接契约，不是 Host 编号。Switch 场景的
+规范序号按端口号固定：`rc_agents[0]` 对应 USP0，`ep_agents[i]` 恒对应
+DSPi；禁用某一条链路时保留其物理槽位，不把后面的 DSP 前移。
+
+## 2. HDL 顶层与 SerDes 连接
+
+### 2.1 五个 SVT HDL agent
+
+下面的顶层只展示 SVT 侧和连接边界，`my_switch_dut` 的端口名必须替换为
+用户 DUT 的真实声明。Serial 数据方向始终是 **SVT TX → DUT RX，DUT TX →
+SVT RX**；不要按信号名把 `tx` 对 `tx`。
 
 ```systemverilog
 `timescale 1ns/1fs
@@ -54,179 +69,553 @@ module my_switch_top;
   bit reset = 1'b1;
   int unsigned global_random_seed = 0;
 
-  pciesvc_global_shadow #(.DISPLAY_NAME("global_shadow0.")) global_shadow0();
+  // 只接真实 DUT + pcie_svt_backend 时不需要 global shadow。
+  // 官方 example env/interconnect 若引用它，再实例化并定义对应宏。
+  // pciesvc_global_shadow #(.DISPLAY_NAME("global_shadow0.")) global_shadow0();
 
-  // slot 0：USP 链的 SVT Root（x16，is_root=1，hierarchy 0）
-  `PCIE_SVT_DECLARE_HDL_AGENT_X16(svt_rc0, "SVT_RC0.", 1'b0, 1'b0, reset, 1, 0)
+  // 参数顺序：name, display_name, clkreq, wake, reset, is_root, hierarchy
+  `PCIE_SVT_DECLARE_HDL_AGENT_X16(svt_rc0, "SVT_RC0.", 1'b0, 1'b0,
+                                  reset, 1, 0)
+  `PCIE_SVT_DECLARE_HDL_AGENT_X4 (svt_ep0, "SVT_EP0.", 1'b0, 1'b0,
+                                  reset, 0, 1)
+  `PCIE_SVT_DECLARE_HDL_AGENT_X4 (svt_ep1, "SVT_EP1.", 1'b0, 1'b0,
+                                  reset, 0, 2)
+  `PCIE_SVT_DECLARE_HDL_AGENT_X4 (svt_ep2, "SVT_EP2.", 1'b0, 1'b0,
+                                  reset, 0, 3)
+  `PCIE_SVT_DECLARE_HDL_AGENT_X4 (svt_ep3, "SVT_EP3.", 1'b0, 1'b0,
+                                  reset, 0, 4)
 
-  // slot 1..4：DSP 链的 SVT Endpoint（x4，is_root=0，hierarchy 1..4）
-  `PCIE_SVT_DECLARE_HDL_AGENT_X4(svt_ep0, "SVT_EP0.", 1'b0, 1'b0, reset, 0, 1)
-  `PCIE_SVT_DECLARE_HDL_AGENT_X4(svt_ep1, "SVT_EP1.", 1'b0, 1'b0, reset, 0, 2)
-  `PCIE_SVT_DECLARE_HDL_AGENT_X4(svt_ep2, "SVT_EP2.", 1'b0, 1'b0, reset, 0, 3)
-  `PCIE_SVT_DECLARE_HDL_AGENT_X4(svt_ep3, "SVT_EP3.", 1'b0, 1'b0, reset, 0, 4)
+  // 每个 Switch 物理端口使用独立的 Serial interface；不要把五个电气
+  // 端口拼成一个向量。若 DUT 端口本来就是向量，下面的接口可直接接入。
+  pcie_svt_serial_port_if #(16) usp_if();
+  pcie_svt_serial_port_if #(4)  dsp0_if();
+  pcie_svt_serial_port_if #(4)  dsp1_if();
+  pcie_svt_serial_port_if #(4)  dsp2_if();
+  pcie_svt_serial_port_if #(4)  dsp3_if();
 
-  // Serial 连线：
-  //   svt_rc0_serial ↔ DUT Switch USP SerDes（x16）
-  //   svt_ep<i>_serial ↔ DUT Switch DSP<i> SerDes（x4）
-  my_switch_dut u_dut ( /* USP + DSP0..3 SerDes */ );
+  `PCIE_SVT_CONNECT_DUT_SERDES_X16(svt_rc0_serial, usp_if, 0)
+  `PCIE_SVT_CONNECT_DUT_SERDES_X4 (svt_ep0_serial, dsp0_if, 0)
+  `PCIE_SVT_CONNECT_DUT_SERDES_X4 (svt_ep1_serial, dsp1_if, 0)
+  `PCIE_SVT_CONNECT_DUT_SERDES_X4 (svt_ep2_serial, dsp2_if, 0)
+  `PCIE_SVT_CONNECT_DUT_SERDES_X4 (svt_ep3_serial, dsp3_if, 0)
 
-  // VIF 发布：RC 端 port 4'h0，EP 端 port 4'h1；数字 link_id 0..4 与
-  // hdl_slot 一一对应。发布 key：
-  //   link_0_vif_0（USP 链 RC 端）
-  //   link_1_vif_1 .. link_4_vif_1（DSP 链 EP 端）
+  my_switch_dut u_dut (
+    .usp_rx_p  (usp_if.rx_p),  .usp_rx_m  (usp_if.rx_n),
+    .usp_tx_p  (usp_if.tx_p),  .usp_tx_m  (usp_if.tx_n),
+    .dsp0_rx_p (dsp0_if.rx_p), .dsp0_rx_m (dsp0_if.rx_n),
+    .dsp0_tx_p (dsp0_if.tx_p), .dsp0_tx_m (dsp0_if.tx_n),
+    .dsp1_rx_p (dsp1_if.rx_p), .dsp1_rx_m (dsp1_if.rx_n),
+    .dsp1_tx_p (dsp1_if.tx_p), .dsp1_tx_m (dsp1_if.tx_n),
+    .dsp2_rx_p (dsp2_if.rx_p), .dsp2_rx_m (dsp2_if.rx_n),
+    .dsp2_tx_p (dsp2_if.tx_p), .dsp2_tx_m (dsp2_if.tx_n),
+    .dsp3_rx_p (dsp3_if.rx_p), .dsp3_rx_m (dsp3_if.rx_n),
+    .dsp3_tx_p (dsp3_if.tx_p), .dsp3_tx_m (dsp3_if.tx_n)
+  );
+
+  // 第二个参数是数字 link_id；它必须与下面 global_cfg 的 hdl_slot 对齐。
+  // RC 使用 port ID 4'h0，EP 使用 port ID 4'h1。
   initial begin
-    svt_rc0_spd.update_if_variables(4'h0, 8'd0, "uvm_test_top", "uvm_test_top");
-    svt_ep0_spd.update_if_variables(4'h1, 8'd1, "uvm_test_top", "uvm_test_top");
-    svt_ep1_spd.update_if_variables(4'h1, 8'd2, "uvm_test_top", "uvm_test_top");
-    svt_ep2_spd.update_if_variables(4'h1, 8'd3, "uvm_test_top", "uvm_test_top");
-    svt_ep3_spd.update_if_variables(4'h1, 8'd4, "uvm_test_top", "uvm_test_top");
+    svt_rc0_spd.update_if_variables(4'h0, 8'd0,
+                                    "uvm_test_top", "uvm_test_top");
+    svt_ep0_spd.update_if_variables(4'h1, 8'd1,
+                                    "uvm_test_top", "uvm_test_top");
+    svt_ep1_spd.update_if_variables(4'h1, 8'd2,
+                                    "uvm_test_top", "uvm_test_top");
+    svt_ep2_spd.update_if_variables(4'h1, 8'd3,
+                                    "uvm_test_top", "uvm_test_top");
+    svt_ep3_spd.update_if_variables(4'h1, 8'd4,
+                                    "uvm_test_top", "uvm_test_top");
   end
 
+  // PHY reference clock、复位、clkreq/wake 属于 DUT 顶层职责。
   initial begin #200ns; reset = 1'b0; end
   initial run_test("my_switch_test");
 endmodule
 ```
 
-要点：SVT 作 Root 用 port ID `4'h0`，作 Endpoint 用 `4'h1`；
-`update_if_variables` 必须在静态 `initial` 块调用。
+`clkreq` 和 `wake` 传入 `1'b0` 只表示本例不建模 sideband；它们不是
+SerDes bit clock。若 DUT 有真实管脚，应把常量替换为顶层信号并按 DUT
+极性连接。
 
-## 3. 编译宏
+### 2.2 标量差分 pad 和 x4/x8/x16 切片
+
+`PCIE_SVT_BIND_PAD16_SCALAR` 与三个 `PCIE_SVT_CONNECT_DUT_SERDES_Xn`
+宏都定义在
+[`pcie_svt_hdl_agent_macros.svh`](../svt_pcie_integration/rtl/pcie_svt_hdl_agent_macros.svh)。
+绑定宏把 `pad_prefix_phy_rx0..15_p/m`（DUT 输入）和
+`pad_prefix_phy_tx0..15_p/m`（DUT 输出）转换成一个 16-lane 向量视图：
+
+```systemverilog
+pcie_svt_serial_port_if #(16) usp_pad_if();
+`PCIE_SVT_BIND_PAD16_SCALAR(usp_pad_if, usp)
+`PCIE_SVT_CONNECT_DUT_SERDES_X16(svt_rc0_serial, usp_pad_if, 0)
+```
+
+如果四个 DSP 各自有 16 个 scalar lane，可对每个端口各绑定一次，再取
+x4 切片：
+
+```systemverilog
+pcie_svt_serial_port_if #(16) dsp0_pad_if();
+`PCIE_SVT_BIND_PAD16_SCALAR(dsp0_pad_if, dsp0)
+`PCIE_SVT_CONNECT_DUT_SERDES_X4(svt_ep0_serial, dsp0_pad_if, 0)
+```
+
+若一个 16-lane pad 组承载两个 x8 链路，也可以使用 `base_lane=0` 和
+`base_lane=8`；x4/x8/x16 不能重叠占用同一组物理 lane。若 DUT 只有四个
+scalar pad 而不是 16-lane 命名组，应在用户顶层先手工打包成
+`pcie_svt_serial_port_if #(4)`，或写一个等价的 4-lane binder；不要把不
+相邻的物理端口错误地拼在一个 16-lane pad 组中。
+
+展开后的方向可用下面的等式核对：
+
+```text
+svt_port.rx_p/rx_n = SVT tx_datap/tx_datan = DUT RX 输入
+svt_port.tx_p/tx_n = DUT TX 输出          = SVT rx_datap/rx_datan
+```
+
+### 2.3 Reference clock、bit clock 与 Passive Monitor
+
+SerDes 数据连接宏只连接 `rx_p/rx_n` 和 `tx_p/tx_n`，不产生 DUT PHY
+reference clock，也不自动创建 Passive Monitor。
+
+对启用 transmit-bit-clock mode 的 active SVT Serial 端口，`tx_clk` 和
+`rx_clk` 是送入 SVT PHY interface 的时钟输入，按对端方向连接：
+
+| 信号 | 来源/用途 |
+|---|---|
+| `svt_port.rx_clk` | DUT TX transmit bit clock |
+| `svt_port.tx_clk` | DUT RX recovered bit clock |
+| `svt_port.active_tx_transmit_clk` | SVT active PHY 输出，供观察器使用 |
+| `svt_port.active_rx_recovered_clk` | SVT active PHY 输出，供观察器使用 |
+| DUT PHY reference clock | 只接 DUT PHY，由用户顶层负责 |
+
+`active_rx_recovered_clk` 不是 DUT 的 reference clock，也不需要回接到
+DUT。若 DUT 只提供 reference clock 而不提供上述 bit clock，请先按所用
+SVT Serial PHY interface 的时钟契约选择 clock-recovery 方案；不能把
+reference clock 随意同时接到 `tx_clk`/`rx_clk`。
+
+SVT 侧的 Passive Monitor 是旁路观察器：它只采样 Serial symbol、解码
+链路活动并向 analysis port 发布结果，不驱动 TX/RX、不启动 link training、
+也不替 DUT 产生时钟。当前端到端示例只需要五个 active SVT agent，因而
+不额外实例化 Passive Monitor。若要观察 DUT 波形，应单独创建
+`is_active=UVM_PASSIVE`、`enable_monitor=1` 的 SVT agent，并显式提供：
+
+```text
+DUT TX transmit bit clock   -> passive_port.rx_clk
+DUT RX recovered bit clock  -> passive_port.tx_clk
+```
+
+`pcie_svt_backend_cfg.enable_svt_monitor=1` 不会把 active backend 变成
+passive agent；backend 会给出 warning，纯观察器必须由用户单独实例化。
+
+## 3. 编译、bootstrap 与宏
+
+`pcie_tl_svt_adapter.f` 是 source-only filelist，包含 TL env、SVT adapter
+和 `pcie_svt_vip_bootstrap.sv`。bootstrap 会在 adapter package 前 include
+官方 `svt_pcie.uvm.pkg`；因此用户 prefix 只定义需要的宏，不要再次 include
+官方 package。
+
+```systemverilog
+// user_svt_pkg_prefix.sv
+`define SVC_RANDOM_SEED_SCOPE my_switch_top.global_random_seed
+// 只有官方 example env 使用 global shadow 时才需要：
+// `define EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH my_switch_top.global_shadow0
+```
+
+真实 Switch 工程的 VCS 输入顺序应保持为 prefix → source-only filelist →
+DUT top → test：
 
 ```sh
 vcs -full64 -sverilog -ntb_opts uvm-1.2 \
   +define+PCIE_TOPO_SWITCH_1X16_4X4 \
+  +define+PCIE_SVT_ENV_MAX_NUM_LINKS=5 \
   user_svt_pkg_prefix.sv \
   -f svt_pcie_integration/sim/pcie_tl_svt_adapter.f \
   my_switch_top.sv my_switch_test.sv
 ```
 
-| 宏 | 说明 |
-|---|---|
-| `PCIE_TOPO_SWITCH_1X16_4X4` | 预置拓扑选择：`pcie_svt_hdl_slot_cfg.svh` 据此把 `PCIE_SVT_ENV_MAX_NUM_LINKS` 定为 5 |
-| `PCIE_SVT_ENV_MAX_NUM_LINKS=5` | 等价的显式写法，二选一 |
-| `EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH` / `SVC_RANDOM_SEED_SCOPE` | 同四链路文档 §3，prefix 文件里定义后 include `svt_pcie.uvm.pkg` |
+必须显式给 `PCIE_SVT_ENV_MAX_NUM_LINKS=5`：source-only filelist 为兼容
+其它入口带有 `PCIE_TOPO_EP_X16`，不能只依赖 Switch 拓扑宏推导五个静态
+slot。若外层流程已经编译官方 package，再增加
+`+define+PCIE_SVT_PKG_EXTERNAL`，并保证 package 只编译一次。
 
-## 4. UVM 策略配置
+| 宏 | 用途 | 本示例 |
+|---|---|---|
+| `PCIE_TOPO_SWITCH_1X16_4X4` | 标记 Switch 拓扑 profile | 定义 |
+| `PCIE_SVT_ENV_MAX_NUM_LINKS` | 静态 HDL slot/runtime link 上限 | `5` |
+| `SVC_RANDOM_SEED_SCOPE` | 把 SVT 随机种子锚定到用户变量 | 可选 |
+| `EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH` | 官方 global shadow 层次路径 | 仅官方 example env 必需 |
+
+## 4. UVM env、global policy 与 backend 配置
+
+拓扑路径的配置优先级是：`global_cfg.topology` → TL topology translation
+→ `tl_policy_cfg` → backend provider。**当存在 topology 时，必须把
+`pcie_tl_env_config` 发布到 `tl_policy_cfg`；`cfg` 是无 topology 的旧路径，
+不能只发布 `cfg`。**
+
+下面的 class 骨架包含五条链所需的完整 build 配置。`pcie_tl_env` 会按
+provider 返回的 adapter 数量创建 1 个 TL RC agent、4 个 TL EP agent 和
+一个 1-USP/4-DSP 的 TL switch；用户不需要手工创建 SVT agent/config/status。
 
 ```systemverilog
-function void build_global_policy();
-  pcie_topology_cfg topology;
+import uvm_pkg::*;
+import pcie_topology_pkg::*;
+import pcie_tl_pkg::*;
+import pcie_svt_adapter_pkg::*;
+`include "uvm_macros.svh"
 
-  // 现成 builder：RC0—SW0(1 USP,4 DSP)—EP0..3，x16/x4，Gen4
-  topology = pcie_topology_builder::build_switch_1x16_4x4(4);
+class my_switch_test extends uvm_test;
+  `uvm_component_utils(my_switch_test)
 
-  global_cfg = pcie_global_cfg::type_id::create("global_cfg");
-  global_cfg.build_default_for_topology(topology);
-  global_cfg.backend           = PCIE_BACKEND_SVT_REAL_DUT;
-  global_cfg.svt_bridge_enable = 1'b1;
-  global_cfg.runtime_num_links = 5;
+  pcie_global_cfg          global_cfg;
+  pcie_tl_env_config       tl_cfg;
+  pcie_svt_backend_cfg     svt_backend_cfg;
+  pcie_svt_backend_factory backend_factory;
+  pcie_tl_env              tl_env;
 
-  // 链路 0 = RC0_SW0_USP0（USP），1..4 = SW0_DSP<i>_EP<i>（DSP）
-  foreach (global_cfg.links[i]) begin
-    pcie_link_cfg link = global_cfg.links[i];
-    bit is_usp = (link.link_id == "RC0_SW0_USP0");
+  extern task run_phase(uvm_phase phase);
+  extern task run_enum_and_traffic();
+  extern function void check_switch_contract();
+  extern function void end_of_elaboration_phase(uvm_phase phase);
 
-    link.enabled        = 1'b1;
-    link.use_svt        = 1'b1;
-    link.svt_role_valid = 1'b1;
-    // USP 链：SVT 模拟上游 Root；DSP 链：SVT 模拟下游 Endpoint。
-    link.svt_role       = is_usp ? PCIE_DEVICE_RC : PCIE_DEVICE_EP;
-    link.svt_node_id    = is_usp ? topology.links[i].upstream_node_id
-                                 : topology.links[i].downstream_node_id;
-    link.has_hdl_slot   = 1'b1;
-    link.hdl_slot       = i;   // 与顶层静态实例/数字 link_id 对齐
-    // RC 端 vif 后缀 _0，EP 端 _1，与 update_if_variables 的 port 一致
-    link.vif_key        = is_usp ? $sformatf("link_%0d_vif_0", i)
-                                 : $sformatf("link_%0d_vif_1", i);
-  end
-endfunction
+  function new(string name = "my_switch_test", uvm_component parent = null);
+    super.new(name, parent);
+  endfunction
+
+  function void build_global_policy();
+    pcie_topology_cfg topology;
+
+    topology = pcie_topology_builder::build_switch_1x16_4x4(4);
+    global_cfg = pcie_global_cfg::type_id::create("global_cfg");
+    global_cfg.build_default_for_topology(topology);
+    global_cfg.backend           = PCIE_BACKEND_SVT_REAL_DUT;
+    global_cfg.svt_bridge_enable = 1'b1;
+    global_cfg.runtime_num_links = 5;
+
+    foreach (global_cfg.links[i]) begin
+      pcie_link_cfg link = global_cfg.links[i];
+      bit is_usp = (link.link_id == "RC0_SW0_USP0");
+      int slot = is_usp ? 0 : (link.upstream_port_index + 1);
+
+      link.enabled        = 1'b1;
+      link.use_svt        = 1'b1;
+      link.svt_role_valid = 1'b1;
+      link.svt_role       = is_usp ? PCIE_DEVICE_RC : PCIE_DEVICE_EP;
+      link.svt_node_id    = is_usp ? link.upstream_node_id
+                                   : link.downstream_node_id;
+      link.has_hdl_slot   = 1'b1;
+      link.hdl_slot       = slot;
+      link.vif_key        = is_usp ?
+        $sformatf("link_%0d_vif_0", slot) :
+        $sformatf("link_%0d_vif_1", slot);
+    end
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    super.build_phase(phase);
+    build_global_policy();
+
+    svt_backend_cfg = pcie_svt_backend_cfg::type_id::create(
+      "svt_backend_cfg");
+    svt_backend_cfg.init_defaults();
+    svt_backend_cfg.transport                = PCIE_SVT_TRANSPORT_SERIAL;
+    svt_backend_cfg.backend_mode             = PCIE_SVT_BACKEND_FULL_VIP;
+    svt_backend_cfg.default_max_gen          = 4;
+    svt_backend_cfg.enable_equalization      = 1'b1;
+    svt_backend_cfg.eq_mode                  = 0; // 按 Gen 自动选择 EQ
+    svt_backend_cfg.enable_shadow_cfg_lookup = 1'b0;
+    svt_backend_cfg.enable_svt_monitor       = 1'b0;
+    // FULL_VIP 内建 Target App 不响应；EP TL driver 统一负责 Completion。
+    svt_backend_cfg.target_app_enable        = 1'b1;
+    svt_backend_cfg.target_auto_response     = 1'b0;
+
+    backend_factory = pcie_svt_backend_factory::type_id::create(
+      "svt_backend_factory");
+
+    tl_cfg = pcie_tl_env_config::type_id::create("tl_policy_cfg");
+    tl_cfg.if_mode          = SV_IF_MODE;
+    tl_cfg.rc_agent_enable  = 1'b1;  // provider build 后仍为 1
+    tl_cfg.ep_agent_enable  = 1'b1;  // provider build 后仍为 1
+    tl_cfg.num_rc           = 1;     // topology translation 会确认 USP 数量
+    tl_cfg.num_ep           = 4;     // topology translation 会确认 DSP 数量
+    tl_cfg.rc_is_active     = UVM_ACTIVE;
+    tl_cfg.ep_is_active     = UVM_ACTIVE;
+    tl_cfg.fc_enable        = 1'b1;
+    tl_cfg.infinite_credit  = 1'b1;
+    tl_cfg.scb_enable       = 1'b1;
+    // Switch 下的 SVT EP 要由 TL EP driver 对 DUT 发来的请求回 Completion。
+    tl_cfg.ep_auto_response = 1'b1;
+    tl_cfg.use_unified_mem  = 1'b0; // 最小 BAR/窗口示例使用 EP sparse memory
+
+    uvm_config_db#(pcie_global_cfg)::set(
+      this, "tl_env", "global_cfg", global_cfg);
+    uvm_config_db#(pcie_svt_backend_cfg)::set(
+      this, "tl_env", "pcie_svt_backend_cfg", svt_backend_cfg);
+    uvm_config_db#(pcie_tl_backend_factory)::set(
+      this, "tl_env", "pcie_tl_backend_factory", backend_factory);
+    // topology env 消费 tl_policy_cfg；不要只写 cfg。
+    uvm_config_db#(pcie_tl_env_config)::set(
+      this, "tl_env", "tl_policy_cfg", tl_cfg);
+
+    tl_env = pcie_tl_env::type_id::create("tl_env", this);
+  endfunction
+
+  // 上述 extern 方法的定义见 §6~§8，仍属于本 class。
+endclass
 ```
 
-config_db 发布与四链路文档 §4 完全相同（`global_cfg` /
-`pcie_svt_backend_cfg` / `pcie_tl_backend_factory` / `cfg` 四个 key，
-`tl_cfg.if_mode = SV_IF_MODE`）。backend 自动创建 1 个 SVT RC +
-4 个 SVT EP agent，并给 TL env 返回 1 RC + 4 EP 的 adapter。
+backend 的关键映射如下：
 
-Switch 特有注意：
+| link | SVT role/node | `vif_key` | `hdl_slot` |
+|---|---|---|---:|
+| `RC0_SW0_USP0` | RC / RC0 | `link_0_vif_0` | 0 |
+| `SW0_DSP0_EP0` | EP / EP0 | `link_1_vif_1` | 1 |
+| `SW0_DSP1_EP1` | EP / EP1 | `link_2_vif_1` | 2 |
+| `SW0_DSP2_EP2` | EP / EP2 | `link_3_vif_1` | 3 |
+| `SW0_DSP3_EP3` | EP / EP3 | `link_4_vif_1` | 4 |
 
-- TL env 会开启 Switch 端口管理（`cfg.switch_enable` 由拓扑翻译得出），
-  USP manager 槽位始终保留；
-- 某条链完全交给外部/DUT 时设 `use_svt=0`：其物理槽位保留为 null、序号
-  不压缩，严格 provider 解析会拒绝对它的误访问；
-- `ep_agents[i]`/`ep_adapters[i]` 的 `i` 恒等于物理 DSP 端口号。
+`target_auto_response=0` 与 `tl_cfg.ep_auto_response=1` 是有意的分工：
+SVT Target App 不重复回包，TL EP driver 通过 SVT adapter 产生唯一的
+Completion。若把两者都打开，会出现重复 Completion 或 tag 状态不一致。
 
-## 5. 建链（link training）启动流程
+## 5. Host memory（可选）
 
-5 条链 = 5 次 link_en，全部只启 **SVT 侧**；DUT Switch 两个方向的 LTSSM
-（USP 上行口、DSP 下行口）由 DUT RTL 自行训练：
-
-| 链 | SVT 侧启动对象 | 对端（自训练） |
-|---|---|---|
-| RC0_SW0_USP0 | SVT RC agent 的 `pcie_virt_seqr.dl_seqr` | DUT USP |
-| SW0_DSP<i>_EP<i> | 对应 SVT EP agent 的 `pcie_virt_seqr.dl_seqr` | DUT DSP<i> |
+本示例 `use_unified_mem=0`，不需要 Host manager；Switch 的 DSP memory
+window 和 EP sparse memory 足够完成 BAR/读写演示。若测试 DUT/SVT EP 发起
+DMA 或需要统一 Host memory，Switch 只有一个 Root，显式绑定一次即可：
 
 ```systemverilog
-task run_phase(uvm_phase phase);
+host_mem_manager host0_mem;
+string bind_why;
+
+host0_mem = new("host0_mem");
+host0_mem.set_host_id(0);
+tl_cfg.use_unified_mem = 1'b1;
+if (!tl_cfg.bind_host_memory(0, 0, host0_mem, bind_why))
+  `uvm_fatal("HOST_MEM", bind_why)
+```
+
+`bind_host_memory(root_index, host_id, mem, why)` 的四个参数都必须提供。
+Host 数量不会改变五条物理链路或 SVT agent 数量；若将来扩展为多个 USP，
+必须为每个 active Root 显式绑定 manager，详见
+[`pcie_svt_4rc_dut_ep_integration.md`](pcie_svt_4rc_dut_ep_integration.md)
+§5。
+
+## 6. 五条链路的训练与 L0 等待
+
+backend 只创建/configure agent，不自动启动 LTSSM。因为五个链路的 SVT 端
+都是 active VIP，五个 agent 都要各自执行一次 `link_en`；DUT Switch 的
+LTSSM/物理训练由 DUT 自己完成。Host 不参与建链。
+
+```systemverilog
+task my_switch_test::run_phase(uvm_phase phase);
   pcie_svt_backend svt_be;
   phase.raise_objection(this);
 
   if (!$cast(svt_be, tl_env.backend_provider))
     `uvm_fatal("LINKUP", "backend provider 不是 pcie_svt_backend")
 
-  #10us;
+  #10us; // 等 HDL agent/复位初始化完成
 
-  // RC 与 4 个 EP 一视同仁：foreach 遍历 backend 的 link->agent 表，
-  // 每链启动一次 DL service sequence 并等待 L0。
-  foreach (svt_be.svt_agent_by_link[link_id]) begin
-    automatic string id = link_id;
-    fork begin
-      svt_pcie_dl_service_set_link_en_sequence en;
-      en = svt_pcie_dl_service_set_link_en_sequence::type_id::create(
-        {"link_en_", id});
-      en.enable = 1'b1;
-      en.start(svt_be.svt_agent_by_link[id].pcie_virt_seqr.dl_seqr);
+  fork : linkup_supervisor
+    begin
+      foreach (svt_be.svt_agent_by_link[link_id]) begin
+        automatic string id = link_id;
+        fork
+          begin
+            svt_pcie_dl_service_set_link_en_sequence en;
+            en = svt_pcie_dl_service_set_link_en_sequence::type_id::create(
+              {"link_en_", id});
+            en.enable = 1'b1;
+            en.start(svt_be.svt_agent_by_link[id].pcie_virt_seqr.dl_seqr);
 
-      wait (svt_be.svt_status_by_link[id]
-              .pcie_status.pl_status.link_up == 1'b1);
-      wait (svt_be.svt_status_by_link[id]
-              .pcie_status.pl_status.ltssm_state == svt_pcie_types::L0);
-      `uvm_info("LINKUP", {id, " 进入 L0"}, UVM_LOW)
-    end join_none
-  end
-
-  fork
-    wait fork;
-    begin #500us; `uvm_fatal("LINKUP", "Serial link-up 超时") end
+            wait (svt_be.svt_status_by_link[id]
+                    .pcie_status.pl_status.link_up == 1'b1);
+            wait (svt_be.svt_status_by_link[id]
+                    .pcie_status.pl_status.ltssm_state == svt_pcie_types::L0);
+            `uvm_info("LINKUP", {id, " 进入 L0"}, UVM_LOW)
+          end
+        join_none
+      end
+      // 这个 wait fork 位于拥有 join_none 子线程的外层线程中，
+      // 因而会等待五条链全部结束。
+      wait fork;
+    end
+    begin
+      #500us;
+      `uvm_fatal("LINKUP", "五条 SVT/DUT Serial 链路建链超时")
+    end
   join_any
+  disable linkup_supervisor;
 
-  // 5 条链全部 L0 后，TL 控制面从 Root 侧发起枚举：Config 经 DUT
-  // Switch 转发到各 DSP 下的 SVT EP；BAR/Memory 流量同样经 DUT 转发。
-  // 下行请求到达 SVT EP 后由 TL EP driver 生成 Completion 返回。
-  ...
+  // L0 后才能开始 §7 的枚举和业务流量。
+  run_enum_and_traffic();
   phase.drop_objection(this);
 endtask
 ```
 
-与四链路场景的差异：
+四条 DSP 链漏掉 `link_en` 时，USP 可能已经进入 L0，但 Config 请求仍然
+无法穿过 Switch 到达 EP；因此应以五个 L0 状态作为建链门禁。
 
-- 这里 SVT EP 侧也要启动 link_en——因为 DSP 链的 SVT 端是 VIP（四链路
-  场景 EP 端是 DUT 才不启动）。判断标准始终是"该端是不是 SVT"，与
-  RC/EP 角色无关。
-- 枚举/流量路径跨 DUT Switch：USP 链进入 L0 只保证第一跳；四条 DSP 链
-  都 L0 后 Config 转发才能到达 EP。超时预算应覆盖 5 条链的训练。
+## 7. BAR 枚举与 RC→Switch→EP 读写
 
-## 6. Host 绑定
+`pcie_tl_bar_enum_seq` 应在 RC sequencer 上启动，目标 BDF 来自
+`global_cfg.devices` 的 EP device image。Switch 的 DSP memory window 默认
+为 `0x8000_0000 + i*0x1000_0000`，所以枚举时把 BAR 分配窗口限制在对应
+DSP window，避免 BAR 地址被分配到 Switch 不会转发的区域。
 
-单 Root 场景：一个 Host manager 即可，legacy config-db `host_mem` 路径
-或 `tl_cfg.bind_host_memory(0, mem)` 均可。Host 数量不影响 5 个 SVT
-agent 的创建（Host 只是 memory domain，见四链路文档 §5）。
+下面的 task 展示 EP0~EP3 逐一枚举、写入 64 字节、再读回校验的完整路径；
+读写方向是 `TL RC → SVT RC → DUT USP → DUT Switch → DUT DSP → SVT EP`，
+Completion 沿反方向返回。
 
-## 7. 常见错误
+```systemverilog
+task my_switch_test::run_enum_and_traffic();
+  pcie_tl_virtual_sequencer vseqr = tl_env.v_seqr;
 
-| 现象 | 原因 |
+  for (int ep = 0; ep < 4; ep++) begin
+    pcie_device_cfg ep_cfg;
+    pcie_tl_bar_enum_seq enum_seq;
+    bit [31:0] bar0;
+    bit [31:0] win_base;
+    bit [31:0] win_size;
+
+    foreach (global_cfg.devices[i]) begin
+      if ((global_cfg.devices[i] != null) &&
+          (global_cfg.devices[i].role == PCIE_DEVICE_EP) &&
+          (global_cfg.devices[i].device_id == $sformatf("EP%0d", ep)))
+        ep_cfg = global_cfg.devices[i];
+    end
+    if (ep_cfg == null)
+      `uvm_fatal("ENUM", $sformatf("global_cfg 中缺少 EP%0d", ep))
+
+    win_base = tl_env.cfg.switch_cfg.ds_mem_base[ep];
+    win_size = tl_env.cfg.switch_cfg.ds_mem_limit[ep] - win_base + 1;
+    enum_seq = pcie_tl_bar_enum_seq::type_id::create(
+      $sformatf("ep%0d_bar_enum", ep));
+    enum_seq.target_bdf       = ep_cfg.bdf;
+    enum_seq.num_bars         = 6;
+    enum_seq.bar_region_base  = win_base;
+    enum_seq.bar_region_size  = win_size;
+    enum_seq.start(vseqr.rc_seqr_arr[0]);
+
+    if (!enum_seq.assigned_bar_base.exists(0))
+      `uvm_fatal("ENUM", $sformatf("EP%0d BAR0 未分配", ep))
+    bar0 = enum_seq.assigned_bar_base[0];
+
+    begin
+      pcie_tl_rw_seq wr, rd;
+      wr = pcie_tl_rw_seq::type_id::create($sformatf("rc_ep%0d_write", ep));
+      wr.op = PCIE_RW_WRITE;
+      wr.addr = {32'h0, bar0} + 64'h100;
+      wr.byte_len = 64;
+      wr.wdata = new[wr.byte_len];
+      foreach (wr.wdata[i]) wr.wdata[i] = 8'hA0 + ep*8'h10 + i;
+      wr.start(vseqr.rc_seqr_arr[0]);
+
+      rd = pcie_tl_rw_seq::type_id::create($sformatf("rc_ep%0d_read", ep));
+      rd.op = PCIE_RW_READ;
+      rd.addr = wr.addr;
+      rd.byte_len = wr.byte_len;
+      rd.rb_timeout_ns = 200_000;
+      rd.start(vseqr.rc_seqr_arr[0]);
+      if (rd.status != PCIE_RW_OK)
+        `uvm_fatal("TRAFFIC", $sformatf("EP%0d BAR0 read completion 失败", ep))
+      foreach (wr.wdata[i])
+        if ((i >= rd.rdata.size()) || (rd.rdata[i] != wr.wdata[i]))
+          `uvm_fatal("TRAFFIC", $sformatf(
+            "EP%0d BAR0 readback mismatch at byte %0d", ep, i))
+    end
+    `uvm_info("TRAFFIC", $sformatf(
+      "RC -> Switch -> EP%0d BAR0 readback PASS (BDF=%04h base=%08h)",
+      ep, ep_cfg.bdf, bar0), UVM_LOW)
+  end
+endtask
+```
+
+上面的 `run_enum_and_traffic()` 是普通 task，可在 `run_phase` 中紧接五条
+链路 L0 等待后调用。若只验证 Switch 路由而不需要真实 BAR，可把
+`use_unified_mem` 保持为 0，并直接使用 `ds_mem_base[ep]` 作为窗口地址；
+这与 `pcie_tl_switch_rw_readback_test` 的 sparse-memory 方式一致。
+
+## 8. Switch 运行前契约检查
+
+建议在 `end_of_elaboration_phase` 执行以下检查，尽早区分“拓扑/槽位配置
+错误”和“DUT 链路训练错误”：
+
+```systemverilog
+function void my_switch_test::check_switch_contract();
+  pcie_svt_backend svt_be;
+  bit seen_slot[int];
+
+  if ((global_cfg == null) || (global_cfg.runtime_num_links != 5))
+    `uvm_fatal("CONTRACT", "Switch runtime_num_links 必须为 5")
+  if ((tl_env == null) || !tl_env.cfg.switch_enable ||
+      (tl_env.cfg.switch_cfg == null) ||
+      (tl_env.cfg.switch_cfg.num_usp != 1) ||
+      (tl_env.cfg.switch_cfg.num_ds_ports != 4))
+    `uvm_fatal("CONTRACT", "TL env 未得到 1 USP + 4 DSP 的 Switch 配置")
+
+  foreach (global_cfg.links[i]) begin
+    pcie_link_cfg link = global_cfg.links[i];
+    int expected_slot;
+    string expected_vif;
+    bit expect_rc;
+
+    if (link == null)
+      `uvm_fatal("CONTRACT", $sformatf("link[%0d] 为空", i))
+    expect_rc = (link.link_id == "RC0_SW0_USP0");
+    expected_slot = expect_rc ? 0 : (link.upstream_port_index + 1);
+    expected_vif = expect_rc ?
+      $sformatf("link_%0d_vif_0", expected_slot) :
+      $sformatf("link_%0d_vif_1", expected_slot);
+
+    if (!link.enabled || !link.use_svt || !link.svt_role_valid ||
+        (link.svt_role != (expect_rc ? PCIE_DEVICE_RC : PCIE_DEVICE_EP)))
+      `uvm_fatal("CONTRACT", $sformatf("%s role/ownership 错误", link.link_id))
+    if (!link.has_hdl_slot || (link.hdl_slot != expected_slot))
+      `uvm_fatal("CONTRACT", $sformatf("%s hdl_slot 错误", link.link_id))
+    if (link.vif_key != expected_vif)
+      `uvm_fatal("CONTRACT", $sformatf("%s vif_key 错误", link.link_id))
+    if (link.max_gen != 4 ||
+        link.link_width != (expect_rc ? 16 : 4))
+      `uvm_fatal("CONTRACT", $sformatf("%s 必须是预期的 Gen4/x%s 链路",
+        link.link_id, expect_rc ? "16" : "4"))
+    if (seen_slot.exists(link.hdl_slot))
+      `uvm_fatal("CONTRACT", $sformatf("重复 hdl_slot=%0d", link.hdl_slot))
+    seen_slot[link.hdl_slot] = 1'b1;
+  end
+
+  if (!$cast(svt_be, tl_env.backend_provider))
+    `uvm_fatal("CONTRACT", "backend provider 不是 pcie_svt_backend")
+  if ((svt_be.created_rc_count != 1) || (svt_be.created_ep_count != 4))
+    `uvm_fatal("CONTRACT", $sformatf(
+      "期望 SVT RC=1/EP=4，实际 RC=%0d EP=%0d",
+      svt_be.created_rc_count, svt_be.created_ep_count))
+  if ((tl_env.v_seqr.rc_seqr_arr.size() != 1) ||
+      (tl_env.v_seqr.ep_seqr_arr.size() != 4))
+    `uvm_fatal("CONTRACT", "TL sequencer 数量不是 RC=1、EP=4")
+endfunction
+
+function void my_switch_test::end_of_elaboration_phase(uvm_phase phase);
+  super.end_of_elaboration_phase(phase);
+  check_switch_contract();
+endfunction
+```
+
+实际 test 中可把 §6 的 `run_phase` 与 §7 的 task 合并为：raise objection →
+五链 `link_en`/L0 → `run_enum_and_traffic()` → drop objection。不要在 DUT
+侧再创建一个“帮忙回包”的 SVT EP；四个 SVT EP 已由 backend 创建，TL EP
+driver 是它们唯一的业务响应入口。
+
+## 9. 常见错误与定位
+
+| 现象 | 优先检查 |
 |---|---|
-| build fatal "缺少 svt_pcie_vif" | DSP 链 `vif_key` 误写 `_vif_0`（EP 端必须 `_vif_1`） |
-| EP agent 数量不是 4 | DSP 链 `svt_role` 误设为 RC，或 `use_svt=0` |
-| `ep_agents` 序号与物理 DSP 对不上 | 手工按声明顺序索引；应信任规范端口序号（canonical_link_id） |
-| USP L0 但枚举读全超时 | DSP 链未启 link_en，Config 无法穿过 Switch 到达 EP |
-| build fatal "runtime_num_links 超上限" | 未定义 `PCIE_TOPO_SWITCH_1X16_4X4`（或 MAX_NUM_LINKS=5） |
+| `svt_pcie_vif` 缺失 | `update_if_variables` 的 link_id、port ID 与 `vif_key` 是否逐字符一致 |
+| `runtime_num_links exceeds ...` | `+define+PCIE_SVT_ENV_MAX_NUM_LINKS=5` 是否出现在 filelist 前 |
+| 只有 USP L0，EP 枚举超时 | 四个 SVT EP 是否都执行 `link_en`，DSP 复位/bit clock 是否释放 |
+| EP agent 序号错位 | 使用 `ep_agents[i]`/canonical DSP 槽位，不要按启用链声明顺序压缩 |
+| 重复 Completion | `svt_backend_cfg.target_auto_response` 应为 0，`tl_cfg.ep_auto_response` 应为 1 |
+| BAR 写入后内存读超时 | BAR 基址是否位于对应 `ds_mem_base/ds_mem_limit` window |
+| Passive Monitor 无数据 | 只接 reference clock；应显式提供 `rx_clk`/`tx_clk` bit clock |
+| global shadow 报错 | 仅官方 example env 才需要 `EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH`，并检查实例层次 |
