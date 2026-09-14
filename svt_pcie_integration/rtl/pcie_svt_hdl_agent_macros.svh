@@ -38,6 +38,62 @@
 
 `include "pcie_svt_hdl_slot_cfg.svh"
 
+//------------------------------------------------------------------------------
+// DUT scalar SerDes pad helpers.
+//
+// The pad_if argument is any interface exposing the same vector fields as
+// pcie_svt_serial_port_if (normally pcie_svt_serial_port_if #(16)).  It
+// deliberately names signals from the DUT boundary:
+//   pad_if.rx_* : SVT TX -> DUT RX
+//   pad_if.tx_* : DUT TX -> SVT RX
+// A real DUT top can therefore bind scalar pad names once, then connect any
+// x4/x8/x16 SVT Serial link to a lane slice without duplicating 16 assignments.
+// These helpers contain only serial data wiring; clocks, reset, PHY reference
+// clocks, clkreq/wake, and Passive Monitor setup remain top-level concerns.
+//------------------------------------------------------------------------------
+
+`define PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, lane) \
+  assign pad_prefix``_phy_rx``lane``_p = pad_if.rx_p[lane]; \
+  assign pad_prefix``_phy_rx``lane``_m = pad_if.rx_n[lane]; \
+  assign pad_if.tx_p[lane] = pad_prefix``_phy_tx``lane``_p; \
+  assign pad_if.tx_n[lane] = pad_prefix``_phy_tx``lane``_m;
+
+`define PCIE_SVT_BIND_PAD16_SCALAR(pad_if, pad_prefix) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 0) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 1) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 2) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 3) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 4) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 5) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 6) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 7) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 8) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 9) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 10) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 11) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 12) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 13) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 14) \
+  `PCIE_SVT_BIND_PAD16_SCALAR_LANE(pad_if, pad_prefix, 15)
+
+`define PCIE_SVT_CONNECT_DUT_SERDES_X4(svt_port, pad_if, base_lane) \
+  assign pad_if.rx_p[base_lane +: 4] = svt_port.rx_p; \
+  assign pad_if.rx_n[base_lane +: 4] = svt_port.rx_n; \
+  assign svt_port.tx_p = pad_if.tx_p[base_lane +: 4]; \
+  assign svt_port.tx_n = pad_if.tx_n[base_lane +: 4];
+
+`define PCIE_SVT_CONNECT_DUT_SERDES_X8(svt_port, pad_if, base_lane) \
+  assign pad_if.rx_p[base_lane +: 8] = svt_port.rx_p; \
+  assign pad_if.rx_n[base_lane +: 8] = svt_port.rx_n; \
+  assign svt_port.tx_p = pad_if.tx_p[base_lane +: 8]; \
+  assign svt_port.tx_n = pad_if.tx_n[base_lane +: 8];
+
+`define PCIE_SVT_CONNECT_DUT_SERDES_X16(svt_port, pad_if, base_lane) \
+  assign pad_if.rx_p[base_lane +: 16] = svt_port.rx_p; \
+  assign pad_if.rx_n[base_lane +: 16] = svt_port.rx_n; \
+  assign svt_port.tx_p = pad_if.tx_p[base_lane +: 16]; \
+  assign svt_port.tx_n = pad_if.tx_n[base_lane +: 16];
+
 `ifdef PCIE_SVT_HDL_PHY_PIPE
 
 //------------------------------------------------------------------------------

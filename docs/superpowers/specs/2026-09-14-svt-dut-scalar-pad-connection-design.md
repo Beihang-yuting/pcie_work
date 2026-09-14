@@ -14,15 +14,19 @@ Passive Monitor 与 bit clock 的要求。
   `padN_phy_tx<lane>_p/m`。
 - 保持现有 `pcie_svt_serial_port_if` 和
   `PCIE_SVT_DECLARE_HDL_AGENT_X4/X8/X16` 不变。
+- 复用已有 `pcie_svt_serial_port_if #(LANES=16)` 作为 pad 向量视图；新增的
+  scalar binder 与连接宏直接定义在
+  `svt_pcie_integration/rtl/pcie_svt_hdl_agent_macros.svh`，不额外引入
+  adapter 源文件或新的 interface 类型。
 - 不把 DUT PHY reference clock 混入 Serial data connector；reference clock
   由 DUT 顶层自行连接。
 
 ## Public interfaces
 
-新增 `pcie_svt_dut_pad_port_if #(LANES=16)`，字段与已有 Serial port 对齐：
+pad 向量复用已有 `pcie_svt_serial_port_if #(LANES=16)`，字段如下：
 
 ```systemverilog
-interface pcie_svt_dut_pad_port_if #(int LANES = 16);
+interface pcie_svt_serial_port_if #(int LANES = 16);
   logic [LANES-1:0] rx_p; // SVT TX -> DUT RX positive
   logic [LANES-1:0] rx_n; // SVT TX -> DUT RX negative
   logic [LANES-1:0] tx_p; // DUT TX -> SVT RX positive
@@ -38,7 +42,8 @@ SVT `tx_datap/tx_datan` drive `svt_port.rx_p/rx_n`, while DUT `tx_p/tx_n` drive
 ## Scalar pad binding
 
 `PCIE_SVT_BIND_PAD16_SCALAR(pad_if, pad_prefix)` maps all 16 scalar lanes of one
-DUT pad group to the vector view.  For `pad_prefix=pad0`, lane 0 expands to:
+DUT pad group to the `pcie_svt_serial_port_if #(16)` vector view.  For
+`pad_prefix=pad0`, lane 0 expands to:
 
 ```systemverilog
 assign pad0_phy_rx0_p = pad_if.rx_p[0];
@@ -99,9 +104,9 @@ the SVT Active VIP intended to feed a Passive Monitor or another VIP.  They are
 not the DUT PHY reference clock and are not driven by the scalar pad connector.
 
 The DUT PHY reference clock remains a DUT-specific top-level connection.  The
-connector may provide optional `PCIE_SVT_CONNECT_DUT_MON_CLOCKS_X4/X8/X16`
-helpers for the two external bit-clock vectors, but must never silently connect
-the reference clock to them.
+scalar pad/data connectors do not provide Passive Monitor clock helpers; if a
+Passive Monitor is enabled, its bit clocks must be wired explicitly at the DUT
+top according to the SVT monitor interface contract.
 
 ## Validation
 
