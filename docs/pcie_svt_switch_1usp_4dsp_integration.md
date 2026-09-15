@@ -64,6 +64,9 @@ module my_switch_top;
   `include "import_pcie_svt_uvm_pkgs.svi"
   `include `SVC_SOURCE_MAP_SUITE_UTIL_V(pcie_svc,PCIE,latest,svc_util_parms)
   `include `SVC_SOURCE_MAP_SUITE_MODEL_MODULE(pcie_svc,Include,latest,pciesvc_parms)
+  // Serial DUT 边界必须先提供接口类型和 lane 映射宏，再声明 HDL agent。
+  `include "pcie_svt_serial_port_if.sv"
+  `include "pcie_svt_serial_adapter.sv"
   `include "pcie_svt_hdl_agent_macros.svh"
 
   bit reset = 1'b1;
@@ -238,6 +241,96 @@ vcs -full64 -sverilog -ntb_opts uvm-1.2 \
 其它入口带有 `PCIE_TOPO_EP_X16`，不能只依赖 Switch 拓扑宏推导五个静态
 slot。若外层流程已经编译官方 package，再增加
 `+define+PCIE_SVT_PKG_EXTERNAL`，并保证 package 只编译一次。
+
+### 3.1 真实 Switch DUT + Serial 的 `pcie-work` filelist 顺序
+
+VCS 的外层输入顺序和用户 top 内的 include 顺序都必须固定。外层 filelist
+按下面顺序组织；`pcie_tl_svt_adapter.f` 是 source-only 基础，不能把 Switch
+DUT 或 test 放在它前面：
+
+```text
+1. 用户环境变量（DESIGNWARE_HOME、PCIE_SVT_ROOT、HOST_MEM_ROOT）
+2. 用户 prefix（只定义可选的 SVC_RANDOM_SEED_SCOPE 等宏，不 include package）
+3. -f svt_pcie_integration/sim/pcie_tl_svt_adapter.f
+4. 用户 Switch DUT top（包含 Serial interface/adapter/header，并连接 USP/DSP）
+5. 用户 UVM test
+```
+
+source-only adapter filelist 内部的关键关系为：
+
+```text
+pcie_tl_vip 基础 package/source
+  -> pcie_svt_vip_bootstrap.sv
+       -> svt_pcie.uvm.pkg
+            -> svt_pciesvc_source.svi
+                 -> pciesvc_global_shadow.svp
+                 -> pcie_device_agent_svt/sverilog/src/vcs/
+                    svt_pcie_single_port_device_agent_hdl.svp
+  -> pcie_svt_adapter_pkg.sv
+```
+
+bootstrap 由 `+define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME` 和
+`+define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS` 启用官方 source-map，直接
+加载 R-2020.12 的加密 `.svp` 模型。`+incdir+$PCIE_SVT_ROOT/sverilog/include`
+本身不会把这两个 HDL cell 放进 `work`。只有绕过 bootstrap 的外层流程才需要
+额外显式加入：
+
+```text
++libext+.v+.sv+.vp+.svp
+-y $PCIE_SVT_ROOT/verilog/src/vcs
+-y $PCIE_SVT_ROOT/sverilog/src/vcs
+-y $PCIE_SVT_ROOT/pcie_device_agent_svt/sverilog/src/vcs
+```
+
+用户 Switch top 内的 Serial include 顺序如下：
+
+```systemverilog
+`include "import_pcie_svt_uvm_pkgs.svi" // package 已由 bootstrap 编译
+`include `SVC_SOURCE_MAP_SUITE_UTIL_V(pcie_svc,PCIE,latest,svc_util_parms)
+`include `SVC_SOURCE_MAP_SUITE_MODEL_MODULE(pcie_svc,Include,latest,pciesvc_parms)
+`include "pcie_svt_serial_port_if.sv"
+`include "pcie_svt_serial_adapter.sv"
+`include "pcie_svt_hdl_agent_macros.svh"
+```
+
+其中 `import_pcie_svt_uvm_pkgs.svi` 是 SVT 安装提供的导入 helper，不是本仓库
+生成的文件；请通过 `$PCIE_SVT_ROOT/sverilog/include`（或内网安装的实际
+include 目录）查找，无需复制到 DUT 工程。
+
+其中 `pcie_svt_serial_port_if.sv` 定义 Serial 端口类型，
+`pcie_svt_serial_adapter.sv` 定义 `PCIE_SVT_MAP_SERDES_X4/X8/X16`，最后的
+`pcie_svt_hdl_agent_macros.svh` 才能展开五个 HDL agent。不要在 Switch top
+再次 include `svt_pcie.uvm.pkg`，否则会与 bootstrap 重复定义 package。
+
+当前仓库 Serial 声明宏使用 `SVT_PCIE_UI_PCIE_SPEC_VER_5_0`，因此未修改宏
+时需要在 Switch 外层 filelist 开启：
+
+```text
++define+SVT_PCIE_ENABLE_GEN5
++define+SVT_PCIE_ENABLE_SERDES_ARCH
+```
+
+若用户把 Serial 声明宏改为 PCIe 4.0 参数，则改用
+`+define+SVT_PCIE_ENABLE_GEN4`；Serial 场景不要无条件添加
+`SVT_PCIE_ENABLE_PIPE5`。`EXPERTIO_PCIESVC_INCLUDE_8G/16G` 和
+`SVT_PCIE_ENABLE_10_BIT_TAGS` 已在 `pcie_tl_svt_adapter.f` 中提供。
+
+可直接复制的命令如下：
+
+```sh
+export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
+export PCIE_SVT_ROOT=$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12
+export HOST_MEM_ROOT=/path/to/host_mem
+cd /path/to/pcie_work/svt_pcie_integration/sim
+vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+SVT_PCIE_ENABLE_GEN5 \
+  +define+SVT_PCIE_ENABLE_SERDES_ARCH \
+  +define+PCIE_TOPO_SWITCH_1X16_4X4 \
+  +define+PCIE_SVT_ENV_MAX_NUM_LINKS=5 \
+  /path/to/user/user_svt_pkg_prefix.sv \
+  -f pcie_tl_svt_adapter.f \
+  /path/to/user/my_switch_top.sv /path/to/user/my_switch_test.sv
+```
 
 | 宏 | 用途 | 本示例 |
 |---|---|---|
@@ -456,6 +549,166 @@ endtask
 
 四条 DSP 链漏掉 `link_en` 时，USP 可能已经进入 L0，但 Config 请求仍然
 无法穿过 Switch 到达 EP；因此应以五个 L0 状态作为建链门禁。
+
+### 6.1 用 AIP Tcl 编排五条链、EP 配置和枚举
+
+Switch 场景也可以只编译一次 UVM test，再由 Tcl 选择建链、配置和枚举步骤。
+使用 `aip-architecture-restructure` 的 `` `aip_cmd_user_seq `` 时，AIP
+只负责 factory `create`/`start` 和活动 sequence 登记；`link_en.enable`、
+link ID、RC sequencer 和 BDF 仍由用户 sequence 明确设置。AIP checkout、
+`aip_core_pkg.sv` 的 include 顺序、`-debug_access+r+w+f` 和
+`aip_tcl_bridge::run_loop()` 的接法与 4RC 文档 §6.1.1 完全相同。
+
+建议把下面三个静态句柄放到 Switch test 的 command context 中：
+
+```systemverilog
+`include "aip_core_pkg.sv"
+import aip_core_pkg::*;
+import pcie_topology_pkg::*;
+import pcie_tl_pkg::*;
+import pcie_svt_adapter_pkg::*;
+
+class switch_aip_cmd_sqr extends uvm_sequencer;
+  `uvm_component_utils(switch_aip_cmd_sqr)
+  static uvm_sequencer_base        cmd_sqr;
+  static pcie_svt_backend          svt_be;
+  static pcie_tl_virtual_sequencer tl_vseqr;
+  static pcie_global_cfg           global_cfg;
+  static pcie_tl_env               tl_env;
+
+  static function pcie_device_cfg find_ep_cfg(int ep);
+    foreach (global_cfg.devices[i]) begin
+      if ((global_cfg.devices[i] != null) &&
+          (global_cfg.devices[i].role == PCIE_DEVICE_EP) &&
+          (global_cfg.devices[i].device_id == $sformatf("EP%0d", ep)))
+        return global_cfg.devices[i];
+    end
+    return null;
+  endfunction
+
+  function new(string name = "switch_aip_cmd_sqr", uvm_component parent = null);
+    super.new(name, parent);
+  endfunction
+endclass
+```
+
+`switch_svt_link_up_seq` 应复用 4RC 文档中的 link wrapper，但命令句柄名改为
+`switch_link_up`：它按 `link=` 在 `svt_agent_by_link` 中查找对应 agent，创建
+官方 `svt_pcie_dl_service_set_link_en_sequence`，设置
+`enable = 1'b1`，再等待 `pcie_status.pl_status.link_up` 和
+`ltssm_state == svt_pcie_types::L0`。Switch 的 Config wrapper 则复用
+`pcie_tl_cfg_wr_seq`/`pcie_tl_cfg_rd_seq`，并始终从
+`switch_aip_cmd_sqr::tl_vseqr.rc_seqr_arr[0]` 启动；`reg` 参数仍是 DWORD 编号。
+注册方式如下：
+
+```systemverilog
+`aip_cmd_user_seq(switch_link_up, switch_svt_link_up_seq,
+                  switch_aip_cmd_sqr::cmd_sqr)
+`aip_cmd_user_seq(switch_ep_cfg, switch_ep_cfg_seq,
+                  switch_aip_cmd_sqr::cmd_sqr)
+`aip_cmd_user_seq(switch_enum, switch_enum_seq,
+                  switch_aip_cmd_sqr::cmd_sqr)
+```
+
+`switch_enum_seq` 的职责是遍历 `global_cfg.devices` 中的 EP0~EP3，为每个
+EP 创建 `pcie_tl_bar_enum_seq`，设置 `target_bdf`、对应
+`tl_env.cfg.switch_cfg.ds_mem_base[ep]`/`ds_mem_limit[ep]` 窗口，然后在 RC
+sequencer 上 `start()`。它不再创建第二个 env，也不直接操作 SVT agent：
+
+```systemverilog
+class switch_enum_seq extends uvm_sequence;
+  `uvm_object_utils(switch_enum_seq)
+  function new(string name = "switch_enum_seq"); super.new(name); endfunction
+
+  task body();
+    aip_cmd h = aip_cmd::get_handle("switch_enum");
+    if ((h == null) || (switch_aip_cmd_sqr::tl_vseqr == null)) begin
+      if (h != null) begin h.status = 1; h.result_out = "ERROR: TL vseqr is null"; end
+      return;
+    end
+    // 实际工程中从 test 共享只读的 global_cfg/tl_env 句柄；下面只保留
+    // 关键 sequence 调用。find_ep_cfg() 应按 device_id 查找 canonical EP，
+    // 不要用声明顺序猜 BDF；window 字段来自真实 Switch 配置。
+    for (int ep = 0; ep < 4; ep++) begin
+      pcie_device_cfg ep_cfg = switch_aip_cmd_sqr::find_ep_cfg(ep);
+      pcie_tl_bar_enum_seq e = pcie_tl_bar_enum_seq::type_id::create(
+        $sformatf("aip_ep%0d_enum", ep));
+      if (ep_cfg == null) begin
+        h.status = 1;
+        h.result_out = $sformatf("ERROR: EP%0d device image missing", ep);
+        return;
+      end
+      e.target_bdf       = ep_cfg.bdf;
+      e.num_bars        = 6;
+      e.bar_region_base = switch_aip_cmd_sqr::tl_env.cfg.switch_cfg.ds_mem_base[ep];
+      e.bar_region_size = switch_aip_cmd_sqr::tl_env.cfg.switch_cfg.ds_mem_limit[ep] -
+                          e.bar_region_base + 1;
+      e.start(switch_aip_cmd_sqr::tl_vseqr.rc_seqr_arr[0]);
+    end
+    h.status = 0;
+    h.result_out = "OK: switch EP0..EP3 BAR enumeration";
+  endtask
+endclass
+```
+
+`find_ep_cfg()` 必须按 `device_id` 查找真实 device image，不能用固定
+`EP0/EP1` 数组下标猜 BDF。`build_phase` 创建 `switch_aip_cmd_sqr`，
+`connect_phase` 绑定实际 backend/TL virtual sequencer，`run_phase` 保持唯一
+的 UVM objection：
+
+```systemverilog
+switch_aip_cmd_sqr aip_sqr;
+
+function void build_phase(uvm_phase phase);
+  super.build_phase(phase);
+  // ...按 §4 创建 tl_env...
+  aip_sqr = switch_aip_cmd_sqr::type_id::create("aip_sqr", this);
+endfunction
+
+function void connect_phase(uvm_phase phase);
+  super.connect_phase(phase);
+  if (!$cast(switch_aip_cmd_sqr::svt_be, tl_env.backend_provider))
+    `uvm_fatal("AIP", "backend provider 不是 pcie_svt_backend")
+  switch_aip_cmd_sqr::tl_vseqr = tl_env.v_seqr;
+  switch_aip_cmd_sqr::global_cfg = global_cfg;
+  switch_aip_cmd_sqr::tl_env = tl_env;
+  switch_aip_cmd_sqr::cmd_sqr = aip_sqr;
+endfunction
+
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  aip_tcl_bridge::run_loop();
+  phase.drop_objection(this);
+endtask
+```
+
+Tcl 必须把 USP 和四个 DSP 的 `link_en` 都启动并确认 L0 后，才能访问 EP
+配置空间或做 BAR 枚举。每行是同步 command；返回后 sequence 已经完成：
+
+```tcl
+source $env(AIP_CORE)/dist/aip_init_so.tcl
+
+switch_link_up link=RC0_SW0_USP0
+if {[aip_check_status] != 0} { error [aip_read_result] }
+switch_link_up link=SW0_DSP0_EP0
+switch_link_up link=SW0_DSP1_EP1
+switch_link_up link=SW0_DSP2_EP2
+switch_link_up link=SW0_DSP3_EP3
+
+# 选择安全的配置寄存器验证读写；reg 是 DWORD 编号，bdf 来自 global_cfg。
+switch_ep_cfg op=rd rc=0 bdf=0x0100 reg=0
+switch_ep_cfg op=wr rc=0 bdf=0x0100 reg=1 data=0x00000007
+switch_enum                         ;# 四个 DSP window 内做 BAR 枚举
+
+end_test drain=1000
+```
+
+不要在 Tcl `fork` 中重复调用同一个 `switch_link_up` 命令：该命令只有一个
+`args_in`/结果句柄。若需要五链并行，按物理链分别注册五个 command name，或
+在一个用户 sequence 内对五个官方 link-enable sequence 做受控 `fork/join`，
+并让该 sequence 统一等待五个 L0。AIP 不会自动启动 EP 链路、自动枚举 BAR，
+也不会把 `target_auto_response` 改成 1；Switch 的唯一 Completion 来源仍是
+§4 配置的 TL EP driver。
 
 ## 7. BAR 枚举与 RC→Switch→EP 读写
 

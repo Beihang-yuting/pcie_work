@@ -80,20 +80,20 @@ SVT agent 的占位 test/top。接入真实 DUT 时，应在用户工程自己�
 创建，既没有真实 SVT agent，也没有实际 TLP 或物理链路，不再作为回归入口。
 
 `pcie_svt_adapter_pkg.sv` 会导入官方 `svt_uvm_pkg` 和
-`svt_pcie_uvm_pkg`。因此在编译这个 source-only 列表前，用户必须先编译
-官方 `svt_pcie.uvm.pkg`，并在第一次 include 前定义与自己顶层层次相符的
-`EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH` 和 `SVC_RANDOM_SEED_SCOPE`。该列表
-不自动 include 官方 package，是因为它无法猜测用户的 global shadow/seed
-实例路径；把用户 top 仅追加在 `-f` 列表之后也不能满足 package 的编译顺序。
+`svt_pcie_uvm_pkg`。当前 source-only 列表已经包含
+`pcie_svt_vip_bootstrap.sv`，会在 adapter package 前自动 include 官方
+`svt_pcie.uvm.pkg`。用户 prefix 默认只定义可选宏，不要再次 include 官方
+package；`EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH` 只在官方 example
+env/interconnect 使用 global shadow 时需要，真实 DUT + backend 场景可以省略。
 
 推荐创建一个用户自有的 package-prefix 源文件（下面的层次名仅为示例），
 并把它放在 `-f` 之前：
 
 ```systemverilog
-// user_svt_pkg_prefix.sv -- 由用户工程维护
-`define EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH my_pcie_top.global_shadow0
-`define SVC_RANDOM_SEED_SCOPE                my_pcie_top.global_random_seed
-`include "svt_pcie.uvm.pkg"
+// user_svt_pkg_prefix.sv -- 由用户工程维护；只定义宏，不 include package
+`define SVC_RANDOM_SEED_SCOPE my_pcie_top.global_random_seed
+// 官方 example env/interconnect 才需要这一行：
+// `define EXPERTIO_PCIESVC_GLOBAL_SHADOW_PATH my_pcie_top.global_shadow0
 ```
 
 随后真实 DUT 工程可按如下顺序编译 source-only 列表：
@@ -109,9 +109,110 @@ SVT agent 的占位 test/top。接入真实 DUT 时，应在用户工程自己�
 工程统一使用外层 filelist，请把 prefix 源文件列在外层 filelist 的
 `-f pcie_tl_svt_adapter.f` 之前。
 
-如果用户顶层本身负责 include 官方 package，也必须把该源文件（或一个只
-包含 package 的 prefix）列在本列表之前，并保证宏已定义；不要依赖列表末尾
-的 test/top 反向提供 package。
+### 真实 DUT + Serial 的完整编译顺序
+
+外层顺序固定为“环境变量 → prefix → source-only adapter → DUT top → test”：
+
+```text
+1. DESIGNWARE_HOME、PCIE_SVT_ROOT、HOST_MEM_ROOT
+2. user_svt_pkg_prefix.sv（只定义宏）
+3. -f pcie_tl_svt_adapter.f
+4. 用户 DUT top
+5. 用户 UVM test
+```
+
+`pcie_tl_svt_adapter.f` 内部的关键依赖顺序为：
+
+```text
+TL source/package
+  -> pcie_svt_vip_bootstrap.sv
+       -> svt_pcie.uvm.pkg
+            -> svt_pciesvc_source.svi
+                 -> pciesvc_global_shadow.svp
+                 -> pcie_device_agent_svt/sverilog/src/vcs/
+                    svt_pcie_single_port_device_agent_hdl.svp
+  -> pcie_svt_adapter_pkg.sv
+```
+
+bootstrap 依赖 filelist 中的：
+
+```text
++define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME
++define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS
+```
+
+这两个定义让官方 source-map 找到 R-2020.12 的加密 `.svp` 模型；只设置
+`+incdir+$PCIE_SVT_ROOT/sverilog/include` 不会把
+`pciesvc_global_shadow` 或 `svt_pcie_single_port_device_agent_hdl` 加入
+`work`。只有完全绕过 bootstrap 时，才改用：
+
+```text
++libext+.v+.sv+.vp+.svp
+-y $PCIE_SVT_ROOT/verilog/src/vcs
+-y $PCIE_SVT_ROOT/sverilog/src/vcs
+-y $PCIE_SVT_ROOT/pcie_device_agent_svt/sverilog/src/vcs
+```
+
+用户 DUT top 内还要保持以下 Serial include 顺序。`pcie_svt_serial_port_if.sv`
+可以作为用户 filelist 源文件放在 DUT top 前，或者直接 include；
+`pcie_svt_serial_adapter.sv` 是宏定义文件，必须与使用它的 top 在同一编译
+作用域内 include，不能只把它作为排在 top 后面的独立源文件：
+
+```systemverilog
+`include "import_pcie_svt_uvm_pkgs.svi"
+`include `SVC_SOURCE_MAP_SUITE_UTIL_V(pcie_svc,PCIE,latest,svc_util_parms)
+`include `SVC_SOURCE_MAP_SUITE_MODEL_MODULE(pcie_svc,Include,latest,pciesvc_parms)
+`include "pcie_svt_serial_port_if.sv"
+`include "pcie_svt_serial_adapter.sv"
+`include "pcie_svt_hdl_agent_macros.svh"
+```
+
+最后才调用 `PCIE_SVT_DECLARE_HDL_AGENT_X4/X8/X16`。不要在 DUT top 末尾再次
+include `svt_pcie.uvm.pkg`，否则会与 bootstrap 产生 package 重复定义。
+
+当前仓库的 Serial 声明宏使用 PCIe 5.0 参数；未修改宏时，真实 DUT 的外层
+filelist 还要选择：
+
+```text
++define+SVT_PCIE_ENABLE_GEN5
++define+SVT_PCIE_ENABLE_SERDES_ARCH
+```
+
+如果工程分支将 Serial 声明宏改为 PCIe 4.0 参数，则改用
+`+define+SVT_PCIE_ENABLE_GEN4`。Serial filelist 不应无条件定义
+`SVT_PCIE_ENABLE_PIPE5`；该宏只用于 PIPE5 物理层。adapter filelist 已包含
+`SVT_PCIE_ENABLE_10_BIT_TAGS` 和 8G/16G SVC 模型选择。
+
+适用于单链路 Serial DUT 的命令模板如下；多链路只需按拓扑修改容量宏和
+用户 top/test：
+
+```sh
+export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
+export PCIE_SVT_ROOT=$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12
+export HOST_MEM_ROOT=/path/to/host_mem
+cd /path/to/pcie_work/svt_pcie_integration/sim
+vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+SVT_PCIE_ENABLE_GEN5 \
+  +define+SVT_PCIE_ENABLE_SERDES_ARCH \
+  +define+PCIE_SVT_ENV_MAX_NUM_LINKS=1 \
+  /path/to/user/user_svt_pkg_prefix.sv \
+  -f pcie_tl_svt_adapter.f \
+  /path/to/user/pcie_real_dut_top.sv \
+  /path/to/user/pcie_real_dut_test.sv
+```
+
+`-timescale` 应与用户 DUT/adapter 工程统一；如果外层 filelist 已明确设置
+其它精度，以外层工程的单一设置为准，不能让不同 compilation unit 随意混用。
+
+如果外层集成流程选择自行 include 官方 package，则必须在本列表之前编译该
+源文件（或一个只包含 package 的 prefix），同时增加
+`+define+PCIE_SVT_PKG_EXTERNAL` 让 bootstrap 跳过重复 include，并保证
+`svt_pcie.uvm.pkg` 只编译一次；不要依赖列表末尾的 test/top 反向提供 package。
+
+`import_pcie_svt_uvm_pkgs.svi` 是 SVT 安装提供的导入 helper（通过
+`$PCIE_SVT_ROOT/sverilog/include` 或用户工程的 include path 查找），不是本
+仓库生成的文件。用户 top 仍应按上面的顺序 include 它；若内网安装采用不同
+目录，应把实际安装目录加入 `+incdir+`，不需要复制或修改该 helper。
 
 ### 真实 DUT VIF 发布
 
@@ -307,6 +408,106 @@ uvm_config_db#(pcie_svt_backend_cfg)::set(
 MBI 和 FLIT logging 字段。backend 创建的是 active Device Agent；需要纯
 观察时，请在 test 中另建一个 `is_active=0` 且 `enable_monitor=1` 的 SVT
 agent。
+
+### AIP Tcl sequence 接入（建链 → Config/BAR/Memory）
+
+如果用户 test 采用 `aip-architecture-restructure` 分支的 AIP bridge，
+source-only filelist 仍只负责 TL/SVT package 和 adapter；AIP 是用户 test
+额外加入的 Tcl 编排层。其推荐顺序是：
+
+```text
+VCS source order: user prefix → pcie_tl_svt_adapter.f
+                   → user command/test source (its first AIP include is aip_core_pkg.sv)
+                   → DUT top/test
+run_phase:   create env/config → bind static command sequencer
+              → aip_tcl_bridge::run_loop()
+Tcl:         source AIP library → link_en/L0 → Config/BAR/Memory → end_test
+```
+
+AIP 分支 checkout 和发布库准备：
+
+```sh
+git clone https://github.com/Beihang-yuting/aip_core.git
+cd aip_core && git checkout feat/aip-architecture-restructure
+make -C dist all
+export AIP_CORE=$PWD
+```
+
+用户 command/test compilation unit 内的 AIP 入口必须先出现；但该源文件本身
+应放在 `pcie_tl_svt_adapter.f` 之后，因为 wrapper 会 import
+`pcie_tl_pkg`/`pcie_svt_adapter_pkg`。不要单独 include
+`aip_cmd.sv`/`aip_tcl_bridge.sv`：
+
+```systemverilog
+`include "aip_core_pkg.sv"
+import aip_core_pkg::*;
+import pcie_tl_pkg::*;
+import pcie_svt_adapter_pkg::*; // TL-only 用户可删除 svt_be 字段及此 import
+
+class pcie_aip_cmd_sqr extends uvm_sequencer;
+  `uvm_component_utils(pcie_aip_cmd_sqr)
+  static uvm_sequencer_base cmd_sqr;
+  static pcie_tl_virtual_sequencer tl_vseqr;
+  static pcie_svt_backend svt_be;
+  function new(string name = "pcie_aip_cmd_sqr", uvm_component parent = null);
+    super.new(name, parent);
+  endfunction
+endclass
+```
+
+为一次性建链、配置空间初始化或枚举注册 `` `aip_cmd_user_seq ``，不要用
+要求 `count/time` 的 `` `aip_cmd_seq ``。用户 sequence 的职责是：
+
+1. 从 `aip_cmd::get_handle("command").args_in` 读取 `link/rc/bdf/reg`；
+2. 在 `svt_agent_by_link[id].pcie_virt_seqr.dl_seqr` 上创建官方
+   `svt_pcie_dl_service_set_link_en_sequence` 并设置 `enable=1`；
+3. 等待 `link_up && ltssm_state == L0`，再启动
+   `pcie_tl_cfg_wr_seq/pcie_tl_cfg_rd_seq`、BAR 或 Memory sequence；
+4. 在失败时设置 `aip_cmd.status/result_out`，成功时返回明确结果。
+
+例如，两个命令的注册形态如下（具体 wrapper 见两个拓扑集成文档）：
+
+```systemverilog
+`aip_cmd_user_seq(svt_link_up, pcie_svt_link_up_cmd_seq,
+                  pcie_aip_cmd_sqr::cmd_sqr)
+`aip_cmd_user_seq(ep_cfg, pcie_tl_cfg_cmd_seq,
+                  pcie_aip_cmd_sqr::cmd_sqr)
+```
+
+`build_phase/connect_phase` 绑定 `pcie_aip_cmd_sqr::tl_vseqr = tl_env.v_seqr`
+和 `svt_be = tl_env.backend_provider`（TL-only 时保持 `svt_be=null`），
+`run_phase` 只需保持一份 objection：
+
+```systemverilog
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  aip_tcl_bridge::run_loop();
+  phase.drop_objection(this);
+endtask
+```
+
+Tcl 调度模板：
+
+```tcl
+source $env(AIP_CORE)/dist/aip_init_so.tcl
+svt_link_up link=RC0_EP0       ;# SVT backend：每条 physical link 重复
+ep_cfg op=rd rc=0 bdf=0x0100 reg=0
+ep_cfg op=wr rc=0 bdf=0x0100 reg=1 data=0x00000007
+end_test drain=500
+```
+
+TL-only 模式省略 `svt_link_up`，直接运行 `ep_cfg`/BAR/Memory；SVT backend
+模式则必须先让所有活动物理链进入 L0。AIP 不会自动修改
+`target_auto_response`、Host memory binding、Passive Monitor 或 SVT
+backend 配置，这些仍由用户 Env/config 和 HDL top 负责。
+
+编译 AIP Tcl bridge 时追加：
+
+```sh
+vcs ... -timescale=1ns/1ps -debug_access+r+w+f \
+  +incdir+$AIP_CORE +incdir+$AIP_CORE/src/sv \
+  -f pcie_tl_svt_adapter.f user_dut_top.sv user_test.sv -o simv
+```
 
 ## 静态契约检查
 

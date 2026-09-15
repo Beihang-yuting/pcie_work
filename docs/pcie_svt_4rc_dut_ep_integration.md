@@ -41,6 +41,9 @@ module my_4rc_dut_top;
   `include "import_pcie_svt_uvm_pkgs.svi"
   `include `SVC_SOURCE_MAP_SUITE_UTIL_V(pcie_svc,PCIE,latest,svc_util_parms)
   `include `SVC_SOURCE_MAP_SUITE_MODEL_MODULE(pcie_svc,Include,latest,pciesvc_parms)
+  // Serial DUT 边界必须先提供接口类型和 lane 映射宏，再声明 HDL agent。
+  `include "pcie_svt_serial_port_if.sv"
+  `include "pcie_svt_serial_adapter.sv"
   `include "pcie_svt_hdl_agent_macros.svh"
 
   bit reset = 1'b1;
@@ -194,12 +197,93 @@ example env 使用 global shadow 时必须指向真实层次；只接真实 DUT�
 `+define+PCIE_SVT_PKG_EXTERNAL`，并由外层流程在该 prefix 之后、adapter
 之前编译一次 `svt_pcie.uvm.pkg`，避免重复定义 package。
 
+### 3.1 真实 DUT + Serial 的 `pcie-work` filelist 顺序
+
+真实 DUT 接入时要区分 VCS 外层输入顺序和用户 top 内的 include 顺序。推荐的
+外层顺序如下；`pcie_tl_svt_adapter.f` 是 source-only 基础，不要把 DUT/test
+放到它之前：
+
+```text
+1. 用户环境变量（DESIGNWARE_HOME、PCIE_SVT_ROOT、HOST_MEM_ROOT）
+2. 用户 prefix（只定义可选的 SVC_RANDOM_SEED_SCOPE 等宏，不 include package）
+3. -f svt_pcie_integration/sim/pcie_tl_svt_adapter.f
+4. 用户 DUT top（包含 SVT Serial interface/adapter/header，并实例化 DUT）
+5. 用户 UVM test
+```
+
+列表第 3 项内部的关键编译顺序是：
+
+```text
+pcie_tl_vip 基础 package/source
+  -> pcie_svt_vip_bootstrap.sv
+       -> svt_pcie.uvm.pkg
+            -> svt_pciesvc_source.svi
+                 -> pciesvc_global_shadow.svp
+                 -> pcie_device_agent_svt/sverilog/src/vcs/
+                    svt_pcie_single_port_device_agent_hdl.svp
+  -> pcie_svt_adapter_pkg.sv
+```
+
+bootstrap 依赖 `+define+DESIGNWARE_INCDIR=$DESIGNWARE_HOME` 和
+`+define+SVT_LOADER_UTIL_ENABLE_DWHOME_INCDIRS`，通过官方 source-map 直接
+加载 R-2020.12 的 `.svp` 模型。因此截图中的 `Cannot find cell in liblist`
+不能靠 `+incdir+$PCIE_SVT_ROOT/sverilog/include` 单独解决；如果外层流程绕过
+bootstrap，才需要同时显式加入：
+
+```text
++libext+.v+.sv+.vp+.svp
+-y $PCIE_SVT_ROOT/verilog/src/vcs
+-y $PCIE_SVT_ROOT/sverilog/src/vcs
+-y $PCIE_SVT_ROOT/pcie_device_agent_svt/sverilog/src/vcs
+```
+
+用户 top 内的 Serial include 顺序也必须固定。`pcie_svt_serial_port_if.sv`
+定义端口类型，`pcie_svt_serial_adapter.sv` 定义 `PCIE_SVT_MAP_SERDES_X4/X8/X16`
+映射宏，最后才 include `pcie_svt_hdl_agent_macros.svh` 并调用
+`PCIE_SVT_DECLARE_HDL_AGENT_X4/X8/X16`：
+
+```systemverilog
+`include "import_pcie_svt_uvm_pkgs.svi" // package 已由 bootstrap 编译
+`include `SVC_SOURCE_MAP_SUITE_UTIL_V(pcie_svc,PCIE,latest,svc_util_parms)
+`include `SVC_SOURCE_MAP_SUITE_MODEL_MODULE(pcie_svc,Include,latest,pciesvc_parms)
+`include "pcie_svt_serial_port_if.sv"
+`include "pcie_svt_serial_adapter.sv"
+`include "pcie_svt_hdl_agent_macros.svh"
+```
+
+其中 `import_pcie_svt_uvm_pkgs.svi` 是 SVT 安装提供的导入 helper，不是本仓库
+生成的文件；请通过 `$PCIE_SVT_ROOT/sverilog/include`（或内网安装的实际
+include 目录）查找，无需复制到 DUT 工程。
+
+当前仓库 Serial 声明宏的参数是 `SVT_PCIE_UI_PCIE_SPEC_VER_5_0`，因此使用
+未修改的 `pcie_svt_hdl_agent_macros.svh` 时，外层 filelist 还应开启：
+
+```text
++define+SVT_PCIE_ENABLE_GEN5
++define+SVT_PCIE_ENABLE_SERDES_ARCH
+```
+
+如果用户已经把 Serial 声明宏改成 PCIe 4.0 参数，则改用
+`+define+SVT_PCIE_ENABLE_GEN4`，不要同时定义 `SVT_PCIE_ENABLE_PIPE5`；PIPE5
+只属于 PIPE 物理层。`EXPERTIO_PCIESVC_INCLUDE_8G/16G` 已由
+`pcie_tl_svt_adapter.f` 提供，`SVT_PCIE_ENABLE_10_BIT_TAGS` 也由该列表提供。
+
+不要在用户 top 再次 include `svt_pcie.uvm.pkg`；否则会与 bootstrap 造成
+package 重复定义。只有外层已经独立编译官方 package 时，才定义
+`PCIE_SVT_PKG_EXTERNAL`，并把那次 package 编译放在 adapter filelist 之前。
+
 ```sh
-vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+export DESIGNWARE_HOME=/home/ubuntu/synopsys/designware_vip_R-2020.12
+export PCIE_SVT_ROOT=$DESIGNWARE_HOME/vip/svt/pcie_svt/R-2020.12
+export HOST_MEM_ROOT=/path/to/host_mem
+cd /path/to/pcie_work/svt_pcie_integration/sim
+vcs -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1fs \
+  +define+SVT_PCIE_ENABLE_GEN5 \
+  +define+SVT_PCIE_ENABLE_SERDES_ARCH \
   +define+PCIE_SVT_ENV_MAX_NUM_LINKS=4 \
-  user_svt_pkg_prefix.sv \
-  -f svt_pcie_integration/sim/pcie_tl_svt_adapter.f \
-  my_4rc_dut_top.sv my_4rc_test.sv
+  /path/to/user/user_svt_pkg_prefix.sv \
+  -f pcie_tl_svt_adapter.f \
+  /path/to/user/my_4rc_dut_top.sv /path/to/user/my_4rc_test.sv
 ```
 
 这里的顺序是硬性要求：prefix（先定义宏）→ source-only adapter filelist →
@@ -504,6 +588,222 @@ endtask
 `pcie_tl_bar_enum_seq` 等 TL sequence 发起请求；DUT EP 侧由真实 RTL
 完成 BAR 命中、Completion 和 DMA 响应。不要再打开 `ep_auto_response`，
 也不要额外创建一个 SVT EP 来“帮 DUT 回包”。
+
+### 6.1 用 AIP Tcl 按顺序启动建链和 EP 配置
+
+如果希望“一次编译、多个 Tcl 用例”，可以在同一个 test 上接入
+`aip-architecture-restructure` 分支的 AIP Tcl bridge。AIP 不替用户猜测
+SVT 的 `enable`、link ID 或 BDF；这些动作放在用户定义的 zero-adaptation
+sequence 中，Tcl 只负责调度命令。当前使用的 AIP 接口是
+`` `aip_cmd_user_seq(cmd_name, seq_type, sequencer) ``，对应提交
+`f635185`（远程分支 `feat/aip-architecture-restructure`）。
+
+#### 6.1.1 编译和 Env 绑定
+
+先把 AIP checkout 到本机并准备 Tcl 发布库（若使用发布包可跳过 `dist` 构建）：
+
+```sh
+git clone https://github.com/Beihang-yuting/aip_core.git
+cd aip_core
+git checkout feat/aip-architecture-restructure
+make -C dist all
+export AIP_CORE=$PWD
+```
+
+用户 command/test compilation unit 内必须先 include AIP 统一入口；但该源文件
+本身要放在 `pcie_tl_svt_adapter.f` 之后，因为下面的 wrapper 会 import
+`pcie_tl_pkg`/`pcie_svt_adapter_pkg`。不要先单独 include `aip_cmd.sv` 或
+`aip_tcl_bridge.sv`。下面的静态 command sequencer 只作为 AIP sequence 的
+启动锚点，不承载 PCIe item；真正的 item 仍分别发到 SVT DL sequencer 或 TL RC
+sequencer。
+
+```systemverilog
+`include "aip_core_pkg.sv"
+import aip_core_pkg::*;
+import pcie_tl_pkg::*;
+import pcie_svt_adapter_pkg::*;
+
+class pcie_aip_cmd_sqr extends uvm_sequencer;
+  `uvm_component_utils(pcie_aip_cmd_sqr)
+  static uvm_sequencer_base       cmd_sqr;
+  static pcie_svt_backend         svt_be;
+  static pcie_tl_virtual_sequencer tl_vseqr;
+
+  function new(string name = "pcie_aip_cmd_sqr", uvm_component parent = null);
+    super.new(name, parent);
+  endfunction
+endclass
+```
+
+`svt_link_up` sequence 通过命令句柄读取 `link=`，自己创建官方
+`svt_pcie_dl_service_set_link_en_sequence`，并明确设置 `enable=1`。下面的
+配置命令示例同时覆盖 Config Write/Read；`reg` 是 DWORD 编号（例如 `reg=0`
+对应 byte offset `0x000`），不是字节地址。
+
+```systemverilog
+class pcie_aip_link_up_seq extends uvm_sequence;
+  `uvm_object_utils(pcie_aip_link_up_seq)
+  function new(string name = "pcie_aip_link_up_seq"); super.new(name); endfunction
+
+  task body();
+    aip_cmd h;
+    string args, link_id;
+    svt_pcie_dl_service_set_link_en_sequence link_en;
+    svt_pcie_device_status st;
+
+    h = aip_cmd::get_handle("svt_link_up");
+    args = (h == null) ? "" : h.args_in;
+    link_id = aip_cmd::get_arg(args, "link");
+    if ((h == null) || (pcie_aip_cmd_sqr::svt_be == null) ||
+        !pcie_aip_cmd_sqr::svt_be.svt_agent_by_link.exists(link_id)) begin
+      if (h != null) begin
+        h.status = 1;
+        h.result_out = $sformatf("ERROR: unknown SVT link %s", link_id);
+      end
+      return;
+    end
+
+    link_en = svt_pcie_dl_service_set_link_en_sequence::type_id::create(
+      {"link_en_", link_id});
+    link_en.enable = 1'b1; // 该字段必须由用户 sequence 设置
+    link_en.start(pcie_aip_cmd_sqr::svt_be.svt_agent_by_link[link_id]
+                  .pcie_virt_seqr.dl_seqr);
+
+    st = pcie_aip_cmd_sqr::svt_be.svt_status_by_link[link_id];
+    wait (st.pcie_status.pl_status.link_up == 1'b1);
+    wait (st.pcie_status.pl_status.ltssm_state == svt_pcie_types::L0);
+    h.status = 0;
+    h.result_out = $sformatf("OK: %s L0", link_id);
+  endtask
+endclass
+
+class pcie_aip_ep_cfg_seq extends uvm_sequence;
+  `uvm_object_utils(pcie_aip_ep_cfg_seq)
+  function new(string name = "pcie_aip_ep_cfg_seq"); super.new(name); endfunction
+
+  task body();
+    aip_cmd h;
+    string args, op;
+    int rc_index, reg_num, data;
+    bit [15:0] bdf;
+    uvm_sequencer_base rc_sqr;
+
+    h = aip_cmd::get_handle("ep_cfg");
+    args = (h == null) ? "" : h.args_in;
+    op = aip_cmd::get_arg(args, "op");
+    rc_index = aip_cmd::parse_int_arg(aip_cmd::get_arg(args, "rc"), 0);
+    reg_num = aip_cmd::parse_int_arg(aip_cmd::get_arg(args, "reg"), 0);
+    data = aip_cmd::parse_int_arg(aip_cmd::get_arg(args, "data"), 0);
+    bdf = aip_cmd::parse_int_arg(aip_cmd::get_arg(args, "bdf"), 0);
+
+    if ((h == null) || (pcie_aip_cmd_sqr::tl_vseqr == null) ||
+        (rc_index < 0) ||
+        (rc_index >= pcie_aip_cmd_sqr::tl_vseqr.rc_seqr_arr.size())) begin
+      if (h != null) begin h.status = 1; h.result_out = "ERROR: bad RC index"; end
+      return;
+    end
+    rc_sqr = pcie_aip_cmd_sqr::tl_vseqr.rc_seqr_arr[rc_index];
+
+    if (op == "wr") begin
+      pcie_tl_cfg_wr_seq wr = pcie_tl_cfg_wr_seq::type_id::create("ep_cfg_wr");
+      wr.target_bdf = bdf; wr.reg_num = reg_num; wr.wr_data = data;
+      wr.first_be = 4'hf; wr.is_type1 = 1'b0;
+      wr.start(rc_sqr);
+      h.status = (wr.status == PCIE_RW_OK) ? 0 : 1;
+      h.result_out = (h.status == 0) ?
+        $sformatf("OK: cfg wr bdf=%04h reg=%0d data=%08h", bdf, reg_num, data) :
+        $sformatf("ERROR: cfg wr status=%0d", wr.status);
+    end else if (op == "rd") begin
+      pcie_tl_cfg_rd_seq rd = pcie_tl_cfg_rd_seq::type_id::create("ep_cfg_rd");
+      rd.target_bdf = bdf; rd.reg_num = reg_num;
+      rd.first_be = 4'hf; rd.is_type1 = 1'b0;
+      rd.start(rc_sqr);
+      h.status = (rd.status == PCIE_RW_OK) ? 0 : 1;
+      h.result_out = (h.status == 0) ?
+        $sformatf("OK: cfg rd bdf=%04h reg=%0d data=%08h", bdf, reg_num, rd.rd_data) :
+        $sformatf("ERROR: cfg rd status=%0d", rd.status);
+    end else begin
+      h.status = 1;
+      h.result_out = $sformatf("ERROR: ep_cfg op must be wr or rd, got %s", op);
+    end
+  endtask
+endclass
+
+`aip_cmd_user_seq(svt_link_up, pcie_aip_link_up_seq, pcie_aip_cmd_sqr::cmd_sqr)
+`aip_cmd_user_seq(ep_cfg,      pcie_aip_ep_cfg_seq,   pcie_aip_cmd_sqr::cmd_sqr)
+```
+
+在 `build_phase/connect_phase` 创建静态锚点并绑定 backend/TL virtual sequencer，
+再由 `run_phase` 把 objection 生命周期交给 AIP：
+
+```systemverilog
+pcie_aip_cmd_sqr aip_sqr;
+
+function void build_phase(uvm_phase phase);
+  super.build_phase(phase);
+  // ...按 §4 创建 tl_env...
+  aip_sqr = pcie_aip_cmd_sqr::type_id::create("aip_sqr", this);
+endfunction
+
+function void connect_phase(uvm_phase phase);
+  super.connect_phase(phase);
+  if (!$cast(pcie_aip_cmd_sqr::svt_be, tl_env.backend_provider))
+    `uvm_fatal("AIP", "backend provider 不是 pcie_svt_backend")
+  pcie_aip_cmd_sqr::tl_vseqr = tl_env.v_seqr;
+  pcie_aip_cmd_sqr::cmd_sqr = aip_sqr;
+endfunction
+
+task run_phase(uvm_phase phase);
+  phase.raise_objection(this);
+  aip_tcl_bridge::run_loop(); // Tcl 的 end_test 返回后才释放 objection
+  phase.drop_objection(this);
+endtask
+```
+
+VCS 编译时把 AIP include 放在普通 include 路径中，并为 Tcl force/bridge
+打开完整 debug access：
+
+```sh
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  -timescale=1ns/1ps -debug_access+r+w+f \
+  +incdir+$AIP_CORE +incdir+$AIP_CORE/src/sv \
+  +define+SVT_PCIE_ENABLE_GEN5 \
+  +define+SVT_PCIE_ENABLE_SERDES_ARCH \
+  +define+PCIE_SVT_ENV_MAX_NUM_LINKS=4 \
+  /path/to/user_svt_pkg_prefix.sv \
+  -f /path/to/pcie_work/svt_pcie_integration/sim/pcie_tl_svt_adapter.f \
+  /path/to/my_4rc_dut_top.sv /path/to/my_4rc_dut_test.sv -o simv
+```
+
+#### 6.1.2 Tcl 调度顺序
+
+`aip_cmd_user_seq` 不解释 `count/time`，命令参数原样留在
+`aip_cmd::get_handle(...).args_in`。因此脚本必须先逐条建链，等每条 sequence
+确认 L0 后再访问 DUT EP 的配置空间：
+
+```tcl
+source $env(AIP_CORE)/dist/aip_init_so.tcl
+
+# 4 条物理链逐条执行；每条命令返回时已经 link_up && LTSSM=L0。
+svt_link_up link=RC0_EP0
+if {[aip_check_status] != 0} { error [aip_read_result] }
+svt_link_up link=RC1_EP1
+svt_link_up link=RC2_EP2
+svt_link_up link=RC3_EP3
+
+# L0 之后由 TL RC sequencer 访问真实 DUT EP 配置空间。
+ep_cfg op=rd rc=0 bdf=0x0100 reg=0       ;# Vendor/Device ID
+ep_cfg op=wr rc=0 bdf=0x0100 reg=1 data=0x00000007 ;# Command/Status 示例
+ep_cfg op=rd rc=3 bdf=0x0300 reg=0
+
+end_test drain=500
+```
+
+不要在 Tcl 中直接访问 `svt_agent_by_link` 或调用 SVT 私有 API；这些对象只能
+由 SV sequence 通过 backend 的公开关联数组使用。需要四链并行时，应为每条链
+注册独立 command name/sequence，使每个 AIP command 都有独立的 `args_in` 和
+活动登记；同一个 `svt_link_up` 命令不要在 Tcl `fork` 中并发调用。AIP watchdog
+只负责停滞 sequence 的清理，不会替用户补发 `link_en` 或自动跳过 L0 门禁。
 
 ## 7. 运行前检查清单
 
