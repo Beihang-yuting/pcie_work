@@ -13,6 +13,12 @@
 //                                    <name>_spd.vip_port_if.pipe_if 的
 //                                    逐 lane 信号；不生成 <name>_serial
 //
+// Serial 默认使用 VIP 内部发送 bit clock（TRANSMIT_BIT_CLOCK_MODE=0），
+// 匹配只连接 DUT 差分数据的集成方式；无需提供 ext_clk_if 发送时钟，
+// 也无需在 SVT cfg 中设置 disable_ext_bit_clock_mode=1。内部时钟归
+// active VIP 管理，DUT PHY 参考钟、复位和实例生命周期仍由顶层管理。
+// 这不改变独立 Passive Monitor 的采样时钟要求，也不自动启动建链。
+//
 // PIPE 模式下 PIPE/PCIe spec 版本与 Gen 档位联动（与
 // pcie_tl_svt_pipe_topology.sv 相同的档位宏）：
 //   （无档位宏）            → PCIe 3.0 + PIPE 4.3
@@ -159,7 +165,11 @@
 `else  // !PCIE_SVT_HDL_PHY_PIPE
 
 //------------------------------------------------------------------------------
-// SERDES（Serial）物理层版本——历史默认，展开产物与既有用户顶层兼容。
+// SERDES（Serial）物理层版本，展开产物与既有用户顶层兼容。
+// 三种宽度都显式选择内部发送 bit clock，避免旧 mode=1 在未提供外部
+// 发送时钟且未通过 cfg 禁用外部模式时，导致 PHY 无法开始训练。
+// 如需外部同步发送，应在用户专用封装中选择 mode=1、cfg disable=0，
+// 并驱动官方 ext_clk_if.tx_clk_*；不能把 DUT refclk 当作发送 bit clock。
 //------------------------------------------------------------------------------
 
 `define PCIE_SVT_DECLARE_HDL_AGENT_X4(instance_name, display_name, clkreq_signal, wake_signal, reset_signal, is_root, hierarchy) \
@@ -169,7 +179,7 @@
     .SVT_PCIE_UI_DISPLAY_NAME(display_name),                               \
     .SVT_PCIE_UI_PHY_INTERFACE_TYPE(                                       \
       `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES),                             \
-    .SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE(1'b1),                            \
+    .SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE(1'b0),                            \
     .SVT_PCIE_UI_ENABLE_CFG_BLOCK(1'b1),                                   \
     .SVT_PCIE_UI_CONNECT_ACTIVE_VIP(1'b1),                                 \
     .SVT_PCIE_UI_NUM_PHYSICAL_LANES(4),                                    \
@@ -188,7 +198,7 @@
     .SVT_PCIE_UI_DISPLAY_NAME(display_name),                               \
     .SVT_PCIE_UI_PHY_INTERFACE_TYPE(                                       \
       `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES),                             \
-    .SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE(1'b1),                            \
+    .SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE(1'b0),                            \
     .SVT_PCIE_UI_ENABLE_CFG_BLOCK(1'b1),                                   \
     .SVT_PCIE_UI_CONNECT_ACTIVE_VIP(1'b1),                                 \
     .SVT_PCIE_UI_NUM_PHYSICAL_LANES(8),                                    \
@@ -207,7 +217,7 @@
     .SVT_PCIE_UI_DISPLAY_NAME(display_name),                               \
     .SVT_PCIE_UI_PHY_INTERFACE_TYPE(                                       \
       `SVT_PCIE_UI_PHY_INTERFACE_TYPE_SERDES),                             \
-    .SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE(1'b1),                            \
+    .SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE(1'b0),                            \
     .SVT_PCIE_UI_ENABLE_CFG_BLOCK(1'b1),                                   \
     .SVT_PCIE_UI_CONNECT_ACTIVE_VIP(1'b1),                                 \
     .SVT_PCIE_UI_NUM_PHYSICAL_LANES(16),                                   \

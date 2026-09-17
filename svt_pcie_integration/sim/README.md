@@ -5,11 +5,15 @@
 
 ## 编译入口
 
-当前有三个可直接运行的 SVT 验证入口：
+当前有五个可直接运行的 SVT 验证入口：
 
 - `pcie_tl_svt_formal.f`：本项目 TL-root + SVT FULL_VIP 双向 Serial 门禁；
 - `pcie_tl_svt_pipe.f`：同一门禁的 PIPE 物理层版本（见下节）；
 - `pcie_svt_peer_traffic.f`：官方 SVT RC/EP peer-only Serial 自检。
+- `pcie_svt_aip_link.f`：AIP Tcl 启动双 SVT Serial 建链诊断，运行
+  `bash ./check_svt_aip_link.sh`，详见[复现说明](../../docs/pcie_svt_aip_link_diagnostic.md)。
+- `pcie_svt_aip_cmd.f`：可选通用 AIP seq 的 Config 与双向 Memory 门禁，
+  运行 `bash ./check_svt_aip_cmd.sh`，详见[参数和绑定说明](../../docs/pcie_svt_aip_sequences.md)。
 
 ## TL→SVT PIPE 双向门禁（Gen3/4/5）
 
@@ -50,7 +54,7 @@ pclk 方向由 `SVT_PCIE_ENABLE_PIPE5_PCLK_AS_PHY_OUTPUT_MODE` 编译宏联动
 ### 真实 DUT 集成宏的 PIPE 模式
 
 `PCIE_SVT_DECLARE_HDL_AGENT_X4/X8/X16` 是 Serial/PIPE 通用的声明入口：
-默认展开 SERDES（历史行为不变），加 `+define+PCIE_SVT_HDL_PHY_PIPE`
+默认展开 SERDES，加 `+define+PCIE_SVT_HDL_PHY_PIPE`
 即切换为 PIPE 展开——宏调用行、参数、`update_if_variables`、
 `vif_key` 约定完全不变。差异只有两点：
 
@@ -69,6 +73,21 @@ MPIPE 侧别由 is_root 自动推导（Root=spipe，Endpoint=mpipe）；PIPE/PCI
 spec 版本沿用上表的 `PCIE_PIPE_GEN4/GEN5` 档位宏。宏路线的双 SVT x4
 PIPE 门禁入口为 `pcie_tl_svt_pipe_macro.f` + `pcie_tl_svt_pipe_macro_top`
 （复用同一批门禁断言），已在 R-2020.12 上全绿。
+
+### 真实 DUT 集成宏的 Serial 时钟
+
+`PCIE_SVT_DECLARE_HDL_AGENT_X4/X8/X16` 的 Serial 分支统一显式设置
+`SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE=0`，由 active VIP 内部产生发送
+bit clock，匹配只连接差分数据的 DUT 集成。不需要额外设置
+`pcie_cfg.pl_cfg.disable_ext_bit_clock_mode=1` 或为此派生 backend。
+旧版 mode=1 配合 cfg 默认值 0 会等待外部发送时钟；无时钟时可能停在
+INITIAL。更新宏必须重新编译 HDL，不能只重跑旧 `simv`。
+
+DUT PHY reference clock 仍由用户独立提供；独立 Passive Monitor 的
+采样时钟要求不变，PIPE 分支也不受此修改影响。有意使用外部发送模式
+时，应在用户封装中选择 mode=1、cfg disable=0，并驱动
+`ext_clk_if.tx_clk_*`，不能拿 DUT reference clock 或 monitor 采样接口
+代替。完整配置关系见[4RC 集成说明 §2.2](../../docs/pcie_svt_4rc_dut_ep_integration.md#22-serial-时钟与-passive-monitor)。
 
 `pcie_tl_svt_adapter.f` 现在是 source-only 适配层 filelist。它只包含
 `pcie_tl_env`、SVT adapter package 和官方 SVT 支持源码，不再包含没有真实
@@ -411,6 +430,12 @@ agent。
 
 ### AIP Tcl sequence 接入（建链 → Config/BAR/Memory）
 
+新增接入推荐使用[可选通用 sequence 库](../../docs/pcie_svt_aip_sequences.md)：
+显式启用 `PCIE_ENABLE_AIP_CMDS`，由用户把命令注册到真实 DL/TL sequencer，
+支持严格的地址、长度、BE、payload 和超时检查。下文保留旧手工 wrapper
+说明；旧 `link/rc/reg` 参数与新接口不同，不能混用，也不要重复定义同名类。
+真实双 SVT Config/双向 Memory 验证入口为 `bash ./check_svt_aip_cmd.sh`。
+
 如果用户 test 采用 `aip-architecture-restructure` 分支的 AIP bridge，
 source-only filelist 仍只负责 TL/SVT package 和 adapter；AIP 是用户 test
 额外加入的 Tcl 编排层。其推荐顺序是：
@@ -459,7 +484,7 @@ endclass
 要求 `count/time` 的 `` `aip_cmd_seq ``。用户 sequence 的职责是：
 
 1. 从 `aip_cmd::get_handle("command").args_in` 读取 `link/rc/bdf/reg`；
-2. 在 `svt_agent_by_link[id].pcie_virt_seqr.dl_seqr` 上创建官方
+2. 在 `svt_agent_by_link[id].virt_seqr.pcie_virt_seqr.dl_seqr` 上创建官方
    `svt_pcie_dl_service_set_link_en_sequence` 并设置 `enable=1`；
 3. 等待 `link_up && ltssm_state == L0`，再启动
    `pcie_tl_cfg_wr_seq/pcie_tl_cfg_rd_seq`、BAR 或 Memory sequence；
@@ -513,8 +538,10 @@ vcs ... -timescale=1ns/1ps -debug_access+r+w+f \
 
 ```sh
 ./svt_pcie_integration/sim/check_tl_svt_bridge_contract.sh
+bash ./svt_pcie_integration/sim/check_svt_serial_clock_contract.sh
 git diff --check
 ```
 
 检查会确认 adapter package、公开 Mapper 端口和 TL-only filelist 隔离，
-避免旧 topology/unified 文件被重新带回生产路径。
+避免旧 topology/unified 文件被重新带回生产路径；Serial clock 检查另行
+锁定三个宽度的内部时钟参数及 PIPE 隔离，只做静态检查，不代表物理建链。

@@ -46,6 +46,7 @@ module my_4rc_dut_top;
   `include "pcie_svt_serial_adapter.sv"
   `include "pcie_svt_hdl_agent_macros.svh"
 
+  // 只驱动下面四个 SVT Serial agent 的高有效复位；DUT 复位另由顶层控制。
   bit reset = 1'b1;
   int unsigned global_random_seed = 0;
 
@@ -92,6 +93,7 @@ module my_4rc_dut_top;
   end
   // → 发布 link_0_vif_0 / link_1_vif_0 / link_2_vif_0 / link_3_vif_0
 
+  // 200ns 仅为示例；真实 DUT 须按 §2.3 的上电/PHY ready 契约安排时序。
   initial begin #200ns; reset = 1'b0; end
   initial run_test("my_4rc_dut_test");
 endmodule
@@ -153,8 +155,40 @@ width=16），并为每个链路保留唯一的 `hdl_slot`/`vif_key`。四条 x8
 x16 加四条 x4 都要求相应数量的独立 Endpoint 控制器，单个 x32 控制器不能
 仅靠物理连线拆分。
 
-PHY reference clock 仍由 DUT 顶层接入 DUT PHY，不接到这些 Serial 数据宏；
-本次宏也不创建 Passive Monitor 时钟连接。
+### 2.2 Serial 时钟与 Passive Monitor
+
+`PCIE_SVT_DECLARE_HDL_AGENT_X4/X8/X16` 的 Serial 分支统一使用：
+
+```systemverilog
+.SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE(1'b0),
+```
+
+这是 active SVT 的**内部发送 bit clock 模式**：SVT PHY 模型按当前链路
+速率自行产生发送时序，训练变速时随之调整，用户不需要另写高速时钟。
+本文只接 Serial 差分数据，因此不需要额外设置
+`svt_cfg.pcie_cfg.pl_cfg.disable_ext_bit_clock_mode = 1'b1`，也不需要为此
+派生 backend 或实现 `customize_svt_agent_cfg()`。该设置不自动启动训练，
+仍需正常释放复位并执行 §6 的 `link_en`。
+
+| HDL 参数 `SVT_PCIE_UI_TRANSMIT_BIT_CLOCK_MODE` | `pl_cfg.disable_ext_bit_clock_mode` | active SVT 发送时钟来源 |
+|---|---|---|
+| `0`（当前宏默认值） | 无需设置 | SVT 内部产生 |
+| `1` | `0`（cfg 默认值） | 用户通过 `ext_clk_if.tx_clk_*` 提供外部 bit clock |
+| `1` | `1` | 禁用外部时钟模式，改由 SVT 内部产生 |
+
+旧版三个 Serial 宏使用 HDL 参数 `1`；若 cfg 保持默认 `0` 且没有提供
+外部发送时钟，可能出现已经执行 `link_en`、但 LTSSM 停在 `INITIAL`、
+差分数据无活动的现象。更新宏后必须**重新编译 HDL**，仅重跑 Tcl 或
+旧 `simv` 不会生效；已有 cfg workaround 可以移除。PIPE 分支没有改动。
+如果项目有意使用外部发送 bit clock，应选择表中第二种组合，并按所用
+SVT 版本的 `ext_clk_if.tx_clk_*` 契约提供各速率时钟；不能用
+`serial.tx_clk/rx_clk` 代替，它们是 Serial monitor 的采样时钟输入。
+
+PHY reference clock 仍由 DUT 顶层独立接入 DUT PHY，不接到这些 Serial
+数据宏，也不能替代上述高速 bit clock。
+`active_tx_transmit_clk` 和 `active_rx_recovered_clk` 是 active SVT PHY
+model 输出给 monitor/其他 VIP 使用的时钟观察信号，不是 DUT reference
+clock，不需要用户驱动或回接到 DUT。
 
 SVT 侧的 Passive Monitor 是旁路观察器，只采样 Serial symbol、解码链路
 活动并向分析端口发布观察结果；它不驱动 TX/RX，也不会替 DUT 完成训练或
@@ -163,10 +197,60 @@ Passive Monitor。若后续确实要观察 DUT 侧波形，应在顶层单独实
 `is_active=UVM_PASSIVE` 且 `enable_monitor=1` 的 SVT agent，并按 SVT
 接口契约显式提供 bit clock：DUT TX transmit clock 接 monitor 的
 `rx_clk`，DUT RX recovered clock 接 monitor 的 `tx_clk`。DUT PHY reference
-clock 与这两个 bit clock 不是同一个信号。`active_tx_transmit_clk` 和
-`active_rx_recovered_clk` 是 active SVT PHY model 输出给 monitor/其他 VIP
-使用的时钟观察信号，不是 DUT reference clock，也不需要回接到 DUT。当前
-数据连接宏只连接 `rx_p/rx_n` 与 `tx_p/tx_n`，不会替用户驱动上述时钟字段。
+clock 与这两个 bit clock 不是同一个信号。active VIP 改用内部发送时钟
+不会免除 Passive Monitor 的采样时钟要求。当前数据连接宏只连接
+`rx_p/rx_n` 与 `tx_p/tx_n`，不会替用户驱动 monitor 的时钟字段。
+
+双 SVT 的 Tcl 建链复现方式及内部发送时钟验证记录，见
+[AIP Tcl 建链诊断](pcie_svt_aip_link_diagnostic.md)。该用例不替代真实 DUT 验证。
+
+### 2.3 Serial 复位与建链前置条件
+
+**内部发送时钟模式不等于内部自动复位。** mode=0 只免除外部 active TX
+bit clock；SVT 的 Serial reset 仍由用户顶层显式驱动，DUT 的 PHY reference
+clock、复位和 LTSSM 使能也仍由用户环境负责。
+
+| 对象/信号 | 谁驱动、何时有效 |
+|---|---|
+| 宏的第 5 个参数 `reset_signal` | 用户顶层提供；`1` 保持 SVT Serial 复位，`0` 释放 |
+| `<name>_spd.vip_port_if.ser_if.reset` | 声明宏已经用连续赋值连接到 `reset_signal`，不要再额外驱动 |
+| DUT PHY reference clock | 用户时钟环境提供；需满足 DUT PHY 的频率、稳定时间等要求 |
+| DUT reset / PERST# | 用户复位环境按 DUT 真实接口、极性和上电时序控制；宏不会连接或释放它 |
+| `link_en.enable=1` | 只使能对应 SVT 链路训练，不产生参考钟、不释放 SVT/DUT 复位 |
+
+§2 的四个 SVT agent 共用 `reset`，并在示例时间 `200ns` 释放，**并不表示
+DUT 的复位也已释放**。四个 RC 可以共用复位，也可以分别传入
+`svt_rc0_reset` 到 `svt_rc3_reset`；选择应与用户的独立复位域一致。
+
+若某条链确实要让 SVT 与 DUT 共用同一次 **fundamental reset**，且 DUT
+使用低有效 `ep0_perst_n`，可以在顶层做极性转换：
+
+```systemverilog
+// 集成片段：替换 §2 原来的 svt_rc0 声明，不要追加第二个同名实例。
+// ep0_perst_n 由用户已有复位控制器唯一驱动，且接到 DUT EP0 的 PERST#；
+// 控制器负责上电时先拉低，再在参考钟/供电等满足 DUT 要求后释放。
+wire svt_rc0_reset;
+assign svt_rc0_reset = ~ep0_perst_n;
+
+`PCIE_SVT_DECLARE_HDL_AGENT_X8(
+  svt_rc0, "SVT_RC0.", 1'b0, 1'b0, svt_rc0_reset, 1, 0)
+```
+
+不要再对 `svt_rc0_reset` 或 `svt_rc0_spd.vip_port_if.ser_if.reset` 写
+`initial`/`assign`，否则会形成重复驱动。其余 RC 可保留独立复位或按各自
+PERST# 做相同映射；SVT 与 DUT 并非必须共用复位。Hot Reset、FLR 等协议/
+功能级复位不等同于此 fundamental reset，不能都直接映射到 `ser_if.reset`。
+
+执行 §6 的建链 sequence（包括 Tcl 启动）前，需按每条链确认：
+
+1. SVT `ser_if.reset` 已明确为 `0`，不是 `X/Z`；
+2. DUT reference clock 已稳定，DUT 相关复位已按设计要求释放，PHY 已 ready；
+3. DUT LTSSM 的相关控制允许训练，再执行 SVT `link_en.enable=1`；
+4. 对 `link_up && LTSSM=L0` 做有界等待，超时报告具体 link ID 和状态。
+
+`#200ns` 和 §6 的 `#10us` 都只是示例延时，不是 PCIe/DUT 通用上电要求，也
+不能替代 ready 条件检查。真实项目应使用自身 clock/reset/PHY-ready 接口
+完成有超时的前置等待；不要靠不断放大固定延时掩盖未释放的复位。
 
 ## 3. 编译宏与 filelist 顺序
 
@@ -476,7 +560,8 @@ EP→RC DMA 或统一内存模型时才打开该选项并完成上述绑定。
 backend 只负责 agent 创建前的链路配置（速率/宽度/EQ 通过官方
 `set_link_speed_values` / `set_link_width_values` /
 `set_link_eq_attribute_values` 生效），**不会自动启动链路训练**。
-训练由 test 在 `run_phase` 显式启动：
+训练由 test 在 `run_phase` 显式启动。先满足 §2.3 的每链复位/PHY ready
+条件；`link_en` 不会代替这些前置操作：
 
 1. 只启动 SVT RC 侧的 DL service sequence——DUT EP 是真实 RTL，其 LTSSM
    自行训练；
@@ -498,7 +583,8 @@ task run_phase(uvm_phase phase);
   if (!$cast(svt_be, tl_env.backend_provider))
     `uvm_fatal("LINKUP", "backend provider 不是 pcie_svt_backend")
 
-  #10us;   // 等 Serial HDL model 出复位
+  // 仅为示例初始化裕量；真实 DUT 必须先完成 §2.3 的有超时 ready 检查。
+  #10us;
 
   fork : linkup_supervisor
     begin
@@ -512,7 +598,7 @@ task run_phase(uvm_phase phase);
             en = svt_pcie_dl_service_set_link_en_sequence::type_id::create(
               {"link_en_", id});
             en.enable = 1'b1;
-            en.start(svt_be.svt_agent_by_link[id].pcie_virt_seqr.dl_seqr);
+            en.start(svt_be.svt_agent_by_link[id].virt_seqr.pcie_virt_seqr.dl_seqr);
 
             wait (svt_be.svt_status_by_link[id]
                     .pcie_status.pl_status.link_up == 1'b1);
@@ -591,6 +677,11 @@ endtask
 
 ### 6.1 用 AIP Tcl 按顺序启动建链和 EP 配置
 
+推荐使用已提供的[可选通用 sequence](pcie_svt_aip_sequences.md)：包含
+`pcie_svt_aip_seqs.sv`，由用户注册命令并绑定真实 DL/TL sequencer，库内严格
+解析参数。该接口不接受 `host/rc`；用不同命令名绑定不同目标即可。本节保留
+手工 wrapper 展示原理，其参数格式/能力与新库不同，不要混用。
+
 如果希望“一次编译、多个 Tcl 用例”，可以在同一个 test 上接入
 `aip-architecture-restructure` 分支的 AIP Tcl bridge。AIP 不替用户猜测
 SVT 的 `enable`、link ID 或 BDF；这些动作放在用户定义的 zero-adaptation
@@ -667,7 +758,7 @@ class pcie_aip_link_up_seq extends uvm_sequence;
       {"link_en_", link_id});
     link_en.enable = 1'b1; // 该字段必须由用户 sequence 设置
     link_en.start(pcie_aip_cmd_sqr::svt_be.svt_agent_by_link[link_id]
-                  .pcie_virt_seqr.dl_seqr);
+                  .virt_seqr.pcie_virt_seqr.dl_seqr);
 
     st = pcie_aip_cmd_sqr::svt_be.svt_status_by_link[link_id];
     wait (st.pcie_status.pl_status.link_up == 1'b1);
@@ -805,6 +896,90 @@ end_test drain=500
 活动登记；同一个 `svt_link_up` 命令不要在 Tcl `fork` 中并发调用。AIP watchdog
 只负责停滞 sequence 的清理，不会替用户补发 `link_en` 或自动跳过 L0 门禁。
 
+#### 6.1.3 多 Host、多个参数与并发的边界
+
+这里先区分底层 sequence 能力和上面示例实际解析的 Tcl 参数：向命令追加
+`key=value` 不会自动给 sequence 同名字段赋值。`aip_cmd_user_seq` 只创建并
+启动 sequence，必须由 wrapper 显式解析、检查范围并赋给子 sequence。
+
+| 当前入口 | 同一条命令中生效的选择/数据 | 未实现或固定的部分 |
+|---|---|---|
+| `svt_link_up` 示例 | `link` 选择 backend 的物理链路 | 不解析 `host/rc`；`enable` 固定为 1 |
+| `ep_cfg` 示例 | `op/rc/bdf/reg`；写操作另加 `data` | 不解析 `host/addr/be/type1/timeout_ns`；`first_be=0xf`、`is_type1=0` |
+| `pcie_tl_rw_seq` 底层 SV 类 | 启动它的 RC sequencer，以及 `op/addr/byte_len/wdata/rb_timeout_ns` 等字段 | 本节尚未注册对应的通用 Tcl Memory 命令；不能直接在 Tcl 使用这些 SV 字段名 |
+
+**Root 选择与 Host 身份不是同一个参数。** `rc=N` 在当前 wrapper 中选择
+`tl_vseqr.rc_seqr_arr[N]`，决定请求从哪条 Root 路径发出；`bdf` 或 `addr`
+再决定该路径内的目标。多 Host 可以通过各自 Root 分别访问，但不能默认
+`host_id == rc`。例如 Root0、Root2 可以同属 Host0，Root1 属于 Host1。
+`bind_host_memory(root_index, host_id, manager, why)` 维护的是 Host memory
+绑定，不会替 Tcl 建立 `host=` 参数解析，也不应仅为 RC→EP 访问强制开启
+`use_unified_mem`。
+
+这里的 `rc` 严格说是 **`rc_seqr_arr` 下标**。本例四个 SVT RC 都存在，
+数组连续，才可与 Root0..Root3 一一对应。环境构建该数组时会跳过空 agent；
+混合 DUT/SVT 等稀疏 Root 场景不能把数组下标直接当成 canonical
+`root_index`，应在绑定时明确记录 Host/Root/link 与真实 sequencer 的关系。
+此外，上面静态 `tl_vseqr/svt_be` 只保存一套 env 句柄；若多个 Host 分布在
+不同 `tl_env` 实例中，需要分别绑定 context，或增加明确的目标句柄表，
+不能依次覆盖同一静态句柄后期待 `host=` 自动恢复原环境。
+
+当前示例可顺序执行如下组合；每次都要检查结果。两条独立 Root 路径中的
+EP 可以使用相同 BDF，不能只凭 BDF 猜测应该选择哪个 Host/Root：
+
+```tcl
+# 假设用户已确认 Host0 使用 rc=0，Host1 使用 rc=1，且两条链均已 L0。
+ep_cfg op=rd rc=0 bdf=0x0100 reg=0
+if {[aip_check_status] != 0} { error [aip_read_result] }
+ep_cfg op=rd rc=1 bdf=0x0100 reg=0
+if {[aip_check_status] != 0} { error [aip_read_result] }
+```
+
+地址也只在所选 Root 的地址域内解释，不能通过换地址绕过 Root 路由；
+在同一域内访问不同 Function 则使用其真实 BDF/BAR 配置。PCIe Memory
+sequence 产生总线事务，不等同于直接读写 testbench 的 Host memory manager。
+用户若要提供 `host=` 别名，应显式绑定 Host→Root 映射；同一 Host 对应
+多个 Root 时还必须指定 Root，不能静默选第一条。若同时提供 `host/rc/link`，
+wrapper 应检查它们是否指向同一路径，而不是让其中一个参数悄悄失效。
+
+“多个参数一起生效”也不等于“同名命令可并发”。AIP 当前按命令名共享
+`args_in/status/result_out` 和活动 sequence 登记：顺序调用同一命令可以，
+并行调用同名命令存在覆盖风险。若需要多 Host 并发，用户应注册不同命令名，
+每次创建独立 sequence，并在执行前固定本次目标句柄和参数。本文旧 wrapper
+用 `get_handle("ep_cfg")`/`get_handle("svt_link_up")` 写死了命令名；只改注册名
+还不够。通用 wrapper 可用 `aip_cmd::get_handle(get_name())`，因为当前 AIP
+注册宏以命令名创建 sequence；不要共享可变的“当前 Host/当前地址”静态字段。
+
+用户仍决定注册哪些命令、注册名及外层 sequencer。注册宏的第三个参数只是
+外层启动锚点，实际的 SVT DL/TL RC 子 sequencer 必须按绑定和选择参数获取；
+不能仅通过更换锚点切换 Host，且直接发送 item 的 sequence 必须匹配类型。
+
+将这些示例收敛成通用命令时，参数校验还必须覆盖以下事项：
+
+- AIP 的 `parse_int_arg` 对非法值可能回退默认值；不能把拼错的 `rc` 或
+  地址默认为 0 后继续访问。应拒绝未知参数、缺失字段、重复键和越界值。
+- 内存地址必须按无符号 64 位解析，不能复用 32 位 `parse_int_arg`；
+  `bdf` 为 16 位，`reg` 为 10 位 DWORD 编号，不能将字节 `offset` 直接赋给它。
+- 当前 Config 示例的 BE 和 Type0 是固定值；只有显式增加解析和赋值后，
+  `be/type1` 才可控。Switch 路径还需按实际总线拓扑选择配置请求类型。
+- `pcie_tl_rw_seq.byte_len` 是字节数，底层 `mem_rd/wr_seq.length` 是
+  DWORD 编码；地址、长度、BE、数据必须一起满足 4KB 边界及 MPS/MRRS。
+  `rw_seq` 当前不自动拆分跨界/超长请求，不能把字段允许的 1..4096 字节
+  当成所有链路下单个 TLP 都合法。当前底层 Memory TLP 的默认限制是
+  MPS=256 字节、MRRS=512 字节，通用封装还需匹配实际链路配置。
+  显式写数据应严格匹配请求字节数；现有 `rw_seq` 对短 `wdata` 补零、
+  对长 `wdata` 截断，不能将这种宽松行为误认为参数长度已经验证。
+- `requester_id/TC/attr` 等并非现有 Tcl wrapper 的可控参数；需要这些
+  变量时必须明确扩展到实际发出的 TLP，不能仅追加同名命令行字段。
+- Memory Write 是 posted，sequence 返回只表示本次发送流程完成；需要
+  确认 DUT 存储结果时必须追加合适的回读/检查。建链和非 posted 访问应有
+  有界超时，同时协调 AIP ack/watchdog 窗口，不能把旧结果当成本次成功。
+
+以上描述的是本节手工 wrapper 的静态接口审计，不代表其所有参数均已开放。
+新提供的[通用 sequence](pcie_svt_aip_sequences.md)采用另一项明确契约：
+用户按命令名绑定实际 sequencer，参数中不再选择 Host/RC；完整解析、边界和
+独立验证记录以该文档为准，双向双 SVT 验证也不等同于多 Host 拓扑验证。
+
 ## 7. 运行前检查清单
 
 建议在 `end_of_elaboration_phase` 或 `run_phase` 建链前做一次断言，尽早
@@ -857,8 +1032,11 @@ endclass
   全部是上游 RC；
 - backend 创建 4 个 SVT RC agent、0 个 SVT EP agent；TL env 暴露 4 个
   `rc_seqr_arr`，DUT EP 由 RTL 自己响应；
-- PHY reference clock 已接到 DUT，复位释放时序正确；本文的 Serial
-  connector 不会替你提供 reference clock 或 Passive Monitor bit clock；
+- PHY reference clock 已接到 DUT 并稳定，SVT 的高有效 reset 已释放，DUT
+  复位/PHY ready/LTSSM 控制满足 §2.3；本文的 Serial connector 不会替你
+  提供 reference clock、释放 DUT 复位或提供 Passive Monitor bit clock；
+- Serial HDL 宏已使用内部发送时钟默认值 `TRANSMIT_BIT_CLOCK_MODE=0`，
+  更新宏后已重新编译；若保留外部模式，必须满足 §2.2 的时钟契约；
 - 需要 EP→RC DMA 时才打开 `use_unified_mem`，并为 Root0~Root3 显式
   绑定 Host memory manager。
 
@@ -868,6 +1046,7 @@ endclass
 |---|---|
 | build fatal "缺少 svt_pcie_vif" | `vif_key` 与 `update_if_variables` 发布的 key 不一致 |
 | build fatal "runtime_num_links 超上限" | 未加 `+define+PCIE_SVT_ENV_MAX_NUM_LINKS=4` |
-| 链路一直不进 L0 | 忘记启动 RC 侧 link_en，或 DUT 侧复位/时钟未释放 |
+| 链路一直不进 L0 | 忘记启动 RC 侧 link_en，或 SVT reset 仍为 1，或 DUT 复位/参考钟/PHY ready/LTSSM 控制未满足 §2.3 |
+| 已执行 link_en，但停在 INITIAL、SVT 差分数据无活动 | 检查是否仍在使用旧版 HDL 参数 `1`，且 cfg 默认 `0`、外部 bit clock 未提供；按 §2.2 更新并重新编译 |
 | 只有一条链建起来 | `update_if_variables` 的数字 link_id 重复或与 hdl_slot 不对应 |
 | host memory 校验失败 | 多 Root 下只绑了部分 Root 的 manager |
