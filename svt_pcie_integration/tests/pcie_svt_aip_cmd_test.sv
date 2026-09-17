@@ -5,6 +5,8 @@
 // Tcl 注册命令触发。test 拥有 observer/Host buffer，静态 context 只借用；
 // observer 从接收端 monitor 记录实际穿过 Serial 的请求，而非请求端日志。
 // test-local pair_check 只初始化/检查 backing 和状态，不代替通用 seq 发包。
+// 最后两向读并行运行同一 access body；门禁必须核对两个命令的独立结果，
+// 防止一端的 timeout 清理误杀另一端后，被默认 OK 或 fork 汇总掩盖。
 //------------------------------------------------------------------------------
 `ifndef PCIE_SVT_AIP_CMD_TEST_SV
 `define PCIE_SVT_AIP_CMD_TEST_SV
@@ -57,6 +59,7 @@ class pcie_aip_cmd_context;
   static int checkpoint_ep;
   static bit setup_done;
   static bit rejection_checked;
+  static bit parallel_read_checked;
   static bit completed;
 endclass
 
@@ -181,8 +184,26 @@ class pcie_aip_pair_check_seq extends uvm_sequence #(uvm_sequence_item);
       `uvm_fatal("SVT_AIP_CMD", "configuration byte-enable backing mismatch")
   endfunction
 
+  // fork 的父结果只有汇总，不能据此证明两个子 sequence 都收到 Completion。
+  // 从真实注册句柄检查 SC 和完整读回字节；默认 OK、缺失数据或非零状态
+  // 都是失败。返回原始结果给 Tcl 重用原有 data 断言，不重新合成成功文本。
+  function string check_parallel_read(string command_name, string expected_data);
+    aip_cmd command;
+    command = aip_cmd::get_handle(command_name);
+    if (command == null)
+      `uvm_fatal("SVT_AIP_CMD", {"missing parallel read command: ", command_name})
+    if ((command.status != 0) ||
+        (aip_str::str_find(command.result_out, "COMPLETED cpl_status=SC ") != 0) ||
+        (aip_cmd::get_arg(command.result_out, "data") != expected_data))
+      `uvm_fatal("SVT_AIP_CMD", $sformatf(
+        "parallel read incomplete command=%s status=%0d result=%s expected_data=%s",
+        command_name, command.status, command.result_out, expected_data))
+    return command.result_out;
+  endfunction
+
   // setup 只分配并清零 Host buffer；checkpoint/rejected 检查负参没有发包；
-  // final 检查全部接收结果并释放本测试所有的 Host allocation。
+  // parallel_rc/parallel_ep 只回传对应命令的原始读结果，不产生额外请求；
+  // final 同时检查两个并行读的独立结果、全部接收请求并释放 Host allocation。
   task body();
     aip_cmd h;
     string stage;
@@ -219,10 +240,22 @@ class pcie_aip_pair_check_seq extends uvm_sequence #(uvm_sequence_item);
         pcie_aip_cmd_context::rejection_checked = 1;
         h.result_out = "REJECT_NO_PACKET_PASS";
       end
+      "parallel_rc": begin
+        h.result_out = check_parallel_read("rc_mem_rd",
+          "002030405060060708090a0b0c0d0e0f");
+      end
+      "parallel_ep": begin
+        h.result_out = check_parallel_read("ep_mem_rd",
+          "c0c1334455667788c8c9cacbcccdcecf");
+      end
       "final": begin
         #1us;
         if (!pcie_aip_cmd_context::setup_done || !pcie_aip_cmd_context::rejection_checked)
           `uvm_fatal("SVT_AIP_CMD", "missing setup or rejection check")
+        void'(check_parallel_read("rc_mem_rd", "002030405060060708090a0b0c0d0e0f"));
+        void'(check_parallel_read("ep_mem_rd", "c0c1334455667788c8c9cacbcccdcecf"));
+        pcie_aip_cmd_context::parallel_read_checked = 1;
+        $display("PARALLEL_READ_PASS rc=COMPLETED_SC ep=COMPLETED_SC data=checked");
         check_all_received();
         pcie_aip_cmd_context::root_mem.free(pcie_aip_cmd_context::host_addr);
         pcie_aip_cmd_context::completed = 1;
@@ -305,8 +338,8 @@ class pcie_svt_aip_cmd_test extends pcie_tl_svt_formal_link_test;
   // 即使 Tcl 提前 end_test，也不能把零 ERROR 汇总误判为完整门禁通过。
   function void report_phase(uvm_phase phase);
     super.report_phase(phase);
-    if (!pcie_aip_cmd_context::completed)
-      `uvm_fatal("SVT_AIP_CMD", "Tcl did not complete Serial/backing verification")
+    if (!pcie_aip_cmd_context::completed || !pcie_aip_cmd_context::parallel_read_checked)
+      `uvm_fatal("SVT_AIP_CMD", "Tcl did not complete parallel read/Serial/backing verification")
     `uvm_info("SVT_AIP_CMD", "SVT_AIP_CMD_REPORT_PASS", UVM_NONE)
   endfunction
 endclass

@@ -386,23 +386,30 @@ class pcie_aip_access_seq extends uvm_sequence #(pcie_tl_tlp);
       return;
     end
     finished = 0;
-    fork : request_deadline
+    // 每次调用建立独立父进程，再在其内竞争完成与期限。类方法里的具名
+    // disable 会波及其他实例；此处 disable fork 只取消本次竞争的剩余分支，
+    // 不影响同一 sequencer 上其他别名通过 wait=0 启动的访问或 UVM body 子进程。
+    fork
       begin
-        start_item(issued_tlp);
-        finish_item(issued_tlp);
-        if (issued_tlp.requires_completion()) wait (issued_tlp.rb_done);
-        finished = 1;
+        fork
+          begin
+            start_item(issued_tlp);
+            finish_item(issued_tlp);
+            if (issued_tlp.requires_completion()) wait (issued_tlp.rb_done);
+            finished = 1;
+          end
+          begin
+            #(timeout_ns * 1ns);
+            if (!finished) begin
+              command.status = 1;
+              command.result_out = {"ERROR ", get_name(), ": transaction timeout; pending state is not cancelled; simulation must stop"};
+              `uvm_fatal("PCIE_AIP_TIMEOUT", {command.result_out, " ", request_summary})
+            end
+          end
+        join_any
+        disable fork;
       end
-      begin
-        #(timeout_ns * 1ns);
-        if (!finished) begin
-          command.status = 1;
-          command.result_out = {"ERROR ", get_name(), ": transaction timeout; pending state is not cancelled; simulation must stop"};
-          `uvm_fatal("PCIE_AIP_TIMEOUT", {command.result_out, " ", request_summary})
-        end
-      end
-    join_any
-    disable request_deadline;
+    join
     if (!finished) return;
     if (!issued_tlp.requires_completion()) begin
       command.result_out = {"POSTED_SENT ", request_summary};
@@ -577,25 +584,31 @@ class pcie_aip_link_up_seq extends uvm_sequence #(uvm_sequence_item);
     end
     link_en.enable = enable[0];
     finished = 0;
-    fork : link_deadline
+    // 不使用跨实例可见的具名 disable；独立父进程把本次建链的完成/期限
+    // 竞争限定在局部，多个 Host/别名并发时，一条建链结束不能取消另一条。
+    fork
       begin
-        link_en.start(get_sequencer());
-        if (wait_l0)
-          wait (status.pcie_status.pl_status.link_up == 1'b1 &&
-                status.pcie_status.pl_status.ltssm_state == svt_pcie_types::L0);
-        finished = 1;
+        fork
+          begin
+            link_en.start(get_sequencer());
+            if (wait_l0)
+              wait (status.pcie_status.pl_status.link_up == 1'b1 &&
+                    status.pcie_status.pl_status.ltssm_state == svt_pcie_types::L0);
+            finished = 1;
+          end
+          begin
+            #(timeout_ns * 1ns);
+            if (!finished) begin
+              command.status = 1;
+              command.result_out = $sformatf("ERROR %s: link timeout link_up=%0b ltssm=%0d; simulation must stop",
+                get_name(), status.pcie_status.pl_status.link_up, status.pcie_status.pl_status.ltssm_state);
+              `uvm_fatal("PCIE_AIP_LINK_TIMEOUT", command.result_out)
+            end
+          end
+        join_any
+        disable fork;
       end
-      begin
-        #(timeout_ns * 1ns);
-        if (!finished) begin
-          command.status = 1;
-          command.result_out = $sformatf("ERROR %s: link timeout link_up=%0b ltssm=%0d; simulation must stop",
-            get_name(), status.pcie_status.pl_status.link_up, status.pcie_status.pl_status.ltssm_state);
-          `uvm_fatal("PCIE_AIP_LINK_TIMEOUT", command.result_out)
-        end
-      end
-    join_any
-    disable link_deadline;
+    join
     if (finished)
       command.result_out = $sformatf("%s enable=%0d wait_l0=%0d link_up=%0b ltssm=%0d sequencer=%s",
         wait_l0 ? "LINK_L0" : "LINK_ENABLE_SENT", enable, wait_l0,

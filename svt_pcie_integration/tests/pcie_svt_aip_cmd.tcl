@@ -153,9 +153,14 @@ cmd_reject rc_link_up enable=0 wait_l0=1
 cmd_ok pair_check stage=rejected
 puts "CMD_TCL_REJECTIONS_PASS count=$::cmd_reject_count"
 
-# 同名命令经历错参后仍能成功；多次调用不携带上一条的地址/BE/requester残留。
-cmd_expect_data [cmd_ok rc_mem_rd addr=$ea bytes=16 timeout_ns=100000] 002030405060060708090a0b0c0d0e0f
-cmd_expect_data [cmd_ok ep_mem_rd addr=$ha bytes=16 requester_id=0x0100 timeout_ns=100000] c0c1334455667788c8c9cacbcccdcecf
+# 同名命令经历错参后仍能成功；两向并发复用同一 access body，检查实例间
+# timeout/取消不会互相影响。请求数仍为原来的各一次，不新增额外访问。
+# fork 只返回汇总，因此只读 parallel_* 检查阶段返回各句柄原始读结果供
+# 此处保留完整数据/SC断言，final 亦逐个检查，不能把默认 OK 当作成功。
+cmd_ok fork rc_mem_rd addr=$ea bytes=16 timeout_ns=100000, \
+    ep_mem_rd addr=$ha bytes=16 requester_id=0x0100 timeout_ns=100000 join
+cmd_expect_data [cmd_ok pair_check stage=parallel_rc] 002030405060060708090a0b0c0d0e0f
+cmd_expect_data [cmd_ok pair_check stage=parallel_ep] c0c1334455667788c8c9cacbcccdcecf
 set final [cmd_ok pair_check stage=final]
 if {![string match "SERIAL_BIDIR_PASS*" $final]} {error "AIP_CMD_FAIL: $final"}
 puts "CMD_TCL_BIDIR_PASS"

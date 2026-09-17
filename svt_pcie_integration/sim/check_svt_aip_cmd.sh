@@ -85,6 +85,7 @@ for marker in BOOTSTRAP_DONE LINK_PASS CFG_PASS RC_EP_PASS EP_RC_PASS BIDIR_PASS
   require_line "$check_log" "^CMD_TCL_${marker}[[:space:]]*$"
 done
 require_line "$check_log" '^CMD_TCL_REJECTIONS_PASS count=34[[:space:]]*$'
+require_line "$check_log" '^PARALLEL_READ_PASS rc=COMPLETED_SC ep=COMPLETED_SC data=checked[[:space:]]*$'
 require_line "$check_log" '^CMD_TCL_RESULT command=pair_check status=0 result=SERIAL_BIDIR_PASS rc_to_ep=12 ep_to_rc=6 backing=checked fields=checked[[:space:]]*$'
 require_line "$check_log" '^UVM_INFO[[:space:]].*\[SVT_AIP_CMD\][[:space:]]+SVT_AIP_CMD_REPORT_PASS[[:space:]]*$'
 for command_name in rc_link_up ep_link_up rc_cfg_rd rc_cfg_wr rc_mem_rd rc_mem_wr ep_mem_rd ep_mem_wr; do

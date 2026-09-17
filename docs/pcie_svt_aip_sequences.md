@@ -147,6 +147,10 @@ Config 由 RC 发起，不支持注册成 EP→RC 配置访问。Memory 可双�
 不保存可变的“本次访问参数”。不同命令可绑定不同目标；AIP 同名命令共享
 命令句柄，仍禁止同名并发。参数对象独立不等于 AIP 同名调度天然线程安全。
 
+建链和访问的完成/超时竞争也按本次 sequence 实例隔离：一条命令完成时只
+取消自己的期限分支，不能终止另一命令的建链或 Completion 等待。多个实例
+并发时不能用类方法内的具名 `disable` 收尾，它可能影响同一方法的其他实例。
+
 ### 2.1 建链
 
 | 参数 | 默认值 | 约束 |
@@ -163,6 +167,20 @@ SVT reset 必须已释放，DUT reference clock、复位、PHY-ready 和 LTSSM �
 由用户管理，详见 [4RC 复位说明](pcie_svt_4rc_dut_ep_integration.md#23-serial-复位与建链前置条件)。
 双 active SVT 测试中两端都需 enable：可先分别调用 `wait_l0=0`，再确认双方
 L0；真实 DUT 场景只对 SVT 端执行，DUT 自己控制训练。
+
+使用已支持“逐命令 `wait`”的新 AIP 版本时，也可让 sequence 在后台继续
+等待 L0，而 Tcl 只等待启动确认：
+
+```tcl
+rc0_link_up enable=1 wait_l0=1 timeout_ns=1000000 wait=0
+# 返回 status=0 / STARTED: rc0_link_up；下一条未写 wait 的命令仍默认等待完成。
+```
+
+`wait` 由 AIP 调度层校验并剥离，不是本库参数；旧 AIP 未实现此功能时不能
+直接添加它。`wait=0` 与 `wait_l0=0` 不同：前者不等待整个 sequence 返回，
+后者改变 sequence 内部是否等待 L0。后台启动不代表链路就绪，依赖它的
+配置访问仍需先确认链路；sequence 自身的 `timeout_ns`/FATAL 继续有效。
+UCLI 停住时仿真也停住，需要下一条命令或 `run` 推进后台工作。
 
 ### 2.2 配置空间
 
@@ -240,6 +258,9 @@ RC driver 还有独立的 Completion 期限 `pcie_tl_env_config.cpl_timeout_ns`
 
 ## 3. 返回值与错误路径
 
+下列返回值指默认同步调用。`wait=0` 只返回启动确认，后台普通业务错误会
+写后台完成日志，不补发 Tcl 结果；需要捕获参数/访问结果时应保持 `wait=1`。
+
 - 参数错误：`status!=0`，结果包含命令名和错误原因，不发出请求。
 - 正常非 posted Completion：结果报告 Completion 状态；读还返回字节数据。
 - posted Memory Write：结果为 `POSTED_SENT`，只表示发送完成；确认 DUT/
@@ -276,6 +297,10 @@ SVT Serial 顶层。环境要求与 [AIP 建链诊断](pcie_svt_aip_link_diagnos
 RC→EP Config/Memory、EP→RC Memory、BE 与64位地址的实际请求字段、
 读回数据和 UVM report。两个方向有不同的 sequencer/命令绑定，但不等同于
 已经覆盖任意多 Root/多 Host 拓扑。
+
+最后两次恢复读通过 `fork ... join` 同时启动；SV 和 Tcl 分别校验两条命令
+的真实 `COMPLETED cpl_status=SC` 与读回数据，不能只根据 fork 的汇总成功
+判定通过。这组覆盖同一访问 sequence 方法的跨实例取消隔离，不增加请求数。
 
 在 53 上进入已加载 VCS/license 环境的 bash，设置 `AIP_CORE`、
 `HOST_MEM_ROOT`、`PCIE_SVT_ROOT`、`DESIGNWARE_HOME` 后执行：
@@ -323,7 +348,33 @@ adapter 环境，不是四个 Host 并发，也不是实际 DUT 或生产 backen
 `timeout.BjGegu/run.no_color.log`、`disabled/run.log` 和 `build.log`。
 53 上原始记录位于
 `/tmp/pcie_aip_cmd.Qrxmhp/pcie_work/svt_pcie_integration/sim/build/aip_cmd/`。
+
 最终脚本退出0，同时打印 `SVT_AIP_CMD_CHECK_PASS` 和
 `SVT_AIP_CMD_TIMEOUT_CHECK_PASS exit=3`。期间一次重复运行在进入 AIP bridge
 前发生运行期网络连接等待，保留为 `run.5OWKvW`，未计作通过；不改网络或
 许可证配置，以相同 binary 重启后得到上述最终结果。
+
+### 4.2 逐命令 wait 联调记录（2026-09-17）
+
+配套包含 `wait=0/1` 调度实现的 AIP 源码重新编译同一 1RC+1EP x16 Serial
+顶层，未复用旧 AIP binary。RC 命令使用 `wait_l0=1 wait=0`，10us 即收到
+`STARTED`，约16.939us 在后台完成；EP 未写 `wait`，约17.018us 到 L0 后才
+返回。正常组仍通过 12/6 双向请求、34 项拒参和最后两向并发读检查，
+UVM WARNING/ERROR/FATAL 全为零。
+
+同一新 binary 另运行原版同步 Tcl（RC 首次 `wait_l0=0`），相同业务门禁和
+UVM 零警告/错误检查亦通过，保留原有默认调用方式。
+
+同一 binary 分别以同步、后台方式只使能 RC、设置 `timeout_ns=1000`。
+两组都只触发一次 `PCIE_AIP_LINK_TIMEOUT`，WARNING=0、ERROR=0、FATAL=1，
+退出码3；后台组先返回 `STARTED` 再 FATAL，证明外层不等待不会屏蔽业务期限。
+
+本轮同时修复建链/访问类方法内具名 `disable` 的跨实例取消问题；期限竞争
+现在由独立父进程隔离。最小复现中，原写法让预期10ns的实例在5ns被另一个
+实例取消；修复后两实例分别在5ns和10ns完成，双SVT并行读也验证了真实路径。
+
+本地证据：`svt_pcie_integration/sim/build/aip_cmd_wait_evidence/`，包含重放
+脚本、源码 hash 和原始日志。53 对应目录为 `/tmp/pcie_aip_wait_svt.hSuqxo/`：
+正常组 `build/run.X2I1OH`、同步超时 `build/timeout_sync.Lu4WhY`、后台超时
+`build/timeout_async.d7yARa`、原版同步脚本 `build/canonical.h47DFL`。
+该结果不扩大到四 Host 或实际 DUT 的覆盖范围。
