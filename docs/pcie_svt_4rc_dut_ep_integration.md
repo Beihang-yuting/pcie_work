@@ -6,6 +6,14 @@ UVM env/config、SVT backend、链路训练和 RC→DUT EP 业务流量。文中
 4×x8 是一个可直接套用的完整示例；x4/x16 只需替换 HDL slot 与 topology
 中的链路宽度，连接规则见 §2.1。
 
+建链阶段如果需要从 Verdi/FSDB 的 HDL 层级定位 Detect、Polling、
+Configuration、Recovery、Equalization 和 L0，请先阅读
+[PCIe SVT 4RC LTSSM/SerDes HDL 调试工作指南](pcie_svt_4rc_ltssm_hdl_debug.md)。
+该文档以当前 R-2020.12 常见的实例层级
+svt_rcX_spd.m_ser.port0.pl0、SER_GEN_N.serdes 和 PCS_GEN_N.pcs 为例，
+并明确哪些路径需要在当前 simv 的 Design Browser 中确认；不依赖用户能否在
+波形中看到 pcie_svt_backend 的 UVM class 对象。
+
 对应 `docs/superpowers/specs/2026-09-06-svt-backend-configuration-design.md`
 §8 拓扑表第二行：**四条独立 DUT EP 链路 → 自动创建 4 个 SVT RC agent，
 DUT EP 侧不创建任何 SVT agent**。
