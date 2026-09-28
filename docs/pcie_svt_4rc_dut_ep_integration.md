@@ -519,12 +519,12 @@ svt_backend_cfg.direct_gen4_enable = 1'b1;
 svt_backend_cfg.fast_link_training = 1'b0; // 保持默认；旧用例设 1 仍有效
 ```
 
-两者先按 OR 合成旧开关请求，随后结合每条链路最终的 EQ 策略：
+两者按 OR 合成直达请求，与显式 `eq_mode=1/2/3` 独立；保留 EQ 总开关
+关闭时清零直达的旧行为：
 
 ```text
 effective_direct_speedup = (effective_max_gen == 4) && effective_enable_eq &&
-                           (direct_gen4_enable || effective_fast_link_training ||
-                            effective_eq_mode_requested == 2)
+                           (direct_gen4_enable || effective_fast_link_training)
 ```
 
 其中 `direct_gen4_enable` 是全局显式开关，`fast_link_training` 也是全局开关，
@@ -540,13 +540,26 @@ Gen4 的 EQ 策略必须区分：
 | 配置（enable_equalization=1） | 训练策略 |
 |---|---|
 | `eq_mode=0/1` | 保留 Full-EQ，是否直达由上述旧开关请求决定 |
-| `eq_mode=2` | 自动开启 Gen1→Gen4 直达，跳过 Gen3 EQ，**仍做 Gen4 EQ** |
+| `eq_mode=2` | 部分 EQ：只做 Phase 0/1，跳过 Phase 2/3；不改变直达开关 |
 | `eq_mode=3` | No-EQ，是否直达仍由 direct/fast 请求决定 |
 
 R-2020.12 下，Gen4 No-EQ 必须把 `set_link_eq_attribute_values()` 的第三参
 设为 0；仅修改第一参枚举不生效。新版 backend 已补齐该映射。旧版
 `enable_equalization=1, eq_mode=3` 第三参仍为 3，需要更新代码并重新编译。
-使用 `eq_mode=2` 不需要另外打开直达开关，但不能期待它跳过最高速率 EQ。
+部分 EQ 则把第三参设为 `1`。第三参 `0` 是不进入 EQ，不是“只做 Phase 0”。
+
+例如，DUT 只做 Phase 0/1，并保持 Gen1→Gen3→Gen4 路径：
+
+```systemverilog
+svt_backend_cfg.enable_equalization = 1'b1;
+svt_backend_cfg.eq_mode             = 2;    // Partial，不是速率 Bypass
+svt_backend_cfg.direct_gen4_enable  = 1'b0;
+svt_backend_cfg.fast_link_training  = 1'b0;
+```
+
+需要直达时另设 `direct_gen4_enable=1`；这不会把 Partial 改成 Full。
+若沿用旧版 `eq_mode=2` 的“直达 Gen4 且执行完整 EQ”，应改为
+`eq_mode=1, direct_gen4_enable=1`。该模式语义有意调整，升级时需要检查旧用例。
 
 例如，Gen4 No-EQ 但仍使用 Gen1→Gen4 直达：
 
@@ -558,9 +571,10 @@ svt_backend_cfg.direct_gen4_enable  = 1'b1;
 
 Gen5 不使用这两个字段作为 `2.5→32 GT/s` 的 direct API；即使打开
 `fast_link_training`，`effective_direct_speedup` 对 Gen5 仍为 0。Gen5 的
-Gen1→Gen5 最高速率路径由 `eq_mode=0` 的自动策略或显式 `eq_mode=2`
-（`EQ_BYPASS_TO_HIGHEST_RATE`）控制，但这不是 No-EQ，DUT 必须支持相应的
-最高速率 bypass/EQ 行为。
+Gen1→Gen5 最高速率路径仍由 `eq_mode=0` 的旧自动策略
+（`EQ_BYPASS_TO_HIGHEST_RATE`）控制，这不是 No-EQ。显式 `eq_mode=2` 在
+Gen5 也统一表示仅 Phase 0/1，使用 FULL 枚举与 phase=1，不再表示速率
+Bypass；旧 Gen5 `eq_mode=2` 的最高速率 Bypass 用例可改用 `eq_mode=0`。
 
 #### DUT 侧前置条件
 
@@ -569,8 +583,8 @@ Gen1→Gen5 最高速率路径由 `eq_mode=0` 的自动策略或显式 `eq_mode=
 
 - 从 Gen1 直接接受并执行 Gen4 的速率切换，而不是只等待 Gen2/Gen3 中间阶段；
 - 识别速率切换期间的 EIOS/EIEOS/FTS，并完成新的 TX UI、RX CDR/PLL 锁定；
-- Gen4 下的 EQ 策略与 SVT 一致。若使用 `eq_mode=1`，需要完整 EQ；若使用
-  `eq_mode=3`，DUT 必须确实支持 No-EQ；
+- Gen4 下的 EQ 策略与 SVT 一致：`eq_mode=1` 要求完整 EQ，`2` 要求双方
+  使用仅 Phase 0/1 的部分 EQ，`3` 则要求 DUT 确实支持 No-EQ；
 - 速率切换后重新接收 TS1/TS2，并使 LTSSM 正常进入 `Recovery.RcvrCfg`、
   `Recovery.Idle` 和 `L0`。
 
@@ -581,8 +595,8 @@ PLL/CDR 速率选择；具体字段取决于 DUT 厂商和 RTL 实现。它不�
 
 如果 DUT 不支持这种非标准的 Gen1→Gen4 直达，常见结果是停在
 `Recovery.Speed`、等待 Gen3 相关训练、PLL/CDR 失锁，或者重新回到 Detect。
-此时应将 `direct_gen4_enable` 和 `fast_link_training` 都设为 `0`，并避免
-`eq_mode=2`；按 DUT 能力选 `eq_mode=0/1` 或 No-EQ 的 `3`，先使用
+此时应将 `direct_gen4_enable` 和 `fast_link_training` 都设为 `0`；按 DUT
+能力选完整 EQ 的 `0/1`、部分 EQ 的 `2` 或 No-EQ 的 `3`，先使用
 标准的 Gen1→Gen3→Gen4 路径验证 DUT；不要通过放宽时钟容差掩盖该能力不匹配。
 
 关键约束（build 阶段 fatal，不静默降级）：

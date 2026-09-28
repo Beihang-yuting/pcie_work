@@ -392,18 +392,20 @@ svt_cfg.default_max_gen       = 4;
 svt_cfg.enable_equalization   = 1'b1;
 svt_cfg.direct_gen4_enable    = 1'b1; // Gen4：允许 Gen1 直接加速到 Gen4
 svt_cfg.fast_link_training    = 1'b0; // 旧别名，与 direct 取 OR，不必同时开
-svt_cfg.eq_mode               = 1;    // 1=Full, 2=Bypass, 3=No-Eq, 0=自动
+svt_cfg.eq_mode               = 1;    // 1=Full, 2=Partial(Phase0/1), 3=No-EQ, 0=自动
 svt_cfg.enable_transaction_log = 1'b1;
 svt_cfg.transaction_log_filename = "pcie_xact.log";
 uvm_config_db#(pcie_svt_backend_cfg)::set(
   this, "env", "pcie_svt_backend_cfg", svt_cfg);
 ```
 
-`eq_mode` 会映射到官方 `set_link_eq_attribute_values()` 的第一个参数，但
-R-2020.12 的此枚举只适用于支持 32 GT/s 的配置，Gen4 还必须映射 direct/phase。
-第二个参数是 SVT 特有的 `enable_direct_speed_up_from_2_5g_to_16g`，旧开关请求
-为 `direct_gen4_enable || effective_fast_link_training`；Gen4 显式 mode=2
-还会强制直达。不能用 `full_equalization_required` 代替这些参数。
+`eq_mode` 不是 SVT 枚举的直接编号映射。显式 `1/2/3` 分别控制完整 EQ、
+仅 Phase 0/1 的部分 EQ、No-EQ。R-2020.12 的
+`set_link_eq_attribute_values(mode, direct, highest_phase)` 第一参只适用于
+支持 32 GT/s 的配置；部分 EQ 在 Gen4/Gen5 都用 FULL 枚举 + phase=1。
+第二参是 Gen4 专用的 `enable_direct_speed_up_from_2_5g_to_16g`，请求为
+`direct_gen4_enable || effective_fast_link_training`，不再由 mode=2 强制开启。
+不能用 `full_equalization_required` 代替这些参数。
 `link_timeout` 会换算成 ns，同时写入
 `pcie_cfg.tl_cfg.completion_timeout_ns`、
 `pcie_cfg.tl_cfg.credit_starvation_timeout_ns`（RX/monitor 预算）以及
@@ -412,19 +414,25 @@ R-2020.12 的此枚举只适用于支持 32 GT/s 的配置，Gen4 还必须映�
 这两个 direct-speed-up 配置字段默认均为 `0`，只对 `effective_max_gen==4`
 生效；Gen5 不使用它们作为 `2.5→32 GT/s` 的 direct API。若
 `enable_equalization=0`，backend 会强制清零 SVT 的 direct-speed-up 参数。
-Gen5 的 Gen1→Gen5 最高速率路径使用 `eq_mode=0` 自动策略或显式
-`eq_mode=2`（`EQ_BYPASS_TO_HIGHEST_RATE`），这不等同于 No-EQ。
+Gen5 的 Gen1→Gen5 最高速率路径仍使用 `eq_mode=0` 的旧自动策略
+（`EQ_BYPASS_TO_HIGHEST_RATE`），这不等同于 No-EQ。新的显式 mode=2 是
+部分 EQ，不再表示绕过较低速率。
 
 | Gen4 配置 | SVT direct 参数 | SVT 最高 EQ phase | 行为 |
 |---|---:|---:|---|
 | enable=1，mode=0/1 | 旧 direct/fast 请求 | 3 | 保留原有 Full-EQ 策略 |
-| enable=1，mode=2 | 1 | 3 | 跳过 Gen3 EQ，仍执行 Gen4 EQ |
+| enable=1，mode=2 | 旧 direct/fast 请求 | 1 | 只做 Phase 0/1，直达与否单独控制 |
 | enable=1，mode=3 | 旧 direct/fast 请求 | 0 | No-EQ，直达与否单独控制 |
 | enable=0 | 0 | 0 | 保留原有总开关关闭行为 |
 
 `fast_link_training` 是兼容名称，没有独立缩短 LTSSM 定时器的作用。新配置
 可保持它为 0，只用 `direct_gen4_enable`；已有按 link 的 fast override
-仍有效，但 fast=0 不会否定全局 direct=1 或显式 mode=2。
+仍有效，但 fast=0 不会否定全局 direct=1。第三参 phase=0 表示不进入 EQ，
+不是“只做 Phase 0”；只做 Phase 0/1 要用 phase=1。
+
+模式迁移：`acc9cd4` 及之前的 mode=2 表示速率 Bypass；现在改为部分 EQ。
+旧 Gen4 用例若要保持“直达 + 完整 EQ”，改用 `eq_mode=1, direct_gen4_enable=1`；
+旧 Gen5 最高速率 Bypass 可用 `eq_mode=0` 的既有自动策略。默认配置不变。
 
 旧 backend 的 enable=1 分支把最高 phase 固定为 3，导致 Gen4 mode=3
 只改枚举、未真正关闭 EQ；更新后应在 `SVT_EQ_CFG` 中看到
@@ -479,6 +487,8 @@ vcs -full64 -sverilog -ntb_opts uvm-1.2 \
 ./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=3
 ./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=3 +SVT_EQ_DIRECT=1
 ./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=2
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=2 +SVT_EQ_DIRECT=1
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=2 +SVT_EQ_FAST=1
 ./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=1
 ./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=3 +SVT_EQ_FAST=1
 ./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_ENABLE=0 +SVT_EQ_MODE=2 +SVT_EQ_DIRECT=1 +SVT_EQ_FAST=1
@@ -499,14 +509,45 @@ Gen5 配置有效。
 `is_valid` 报速率超出编译能力区分，不能统一屏蔽 warning。
 
 建链测试使用生产 backend RC + 独立配置的外部 SVT EP，必须双方同时到达
-**16 GT/s L0**，再通过 5us 的定时稳定性检查，才打印
-`SVT_EQ_GEN4_LINK_PASS`；500us 仿真时间超时则 fatal。测试专用参数为
+**16 GT/s L0**，再通过 5us 稳定性检查和 EQ 轨迹断言，才打印
+`SVT_EQ_GEN4_LINK_PASS`；500us 仿真时间超时则 fatal。`SVT_EQ_TRACE` 按
+Gen3/Gen4 分别记录两端的阶段掩码（bit N 表示见过 Phase N）：Partial
+必须见到 Phase 1 且不得进入 Phase 2/3，Full 阳性对照必须见到 Gen4
+Phase 1/2/3；非直达 Partial 还检查 Gen3 Phase 1。测试也检查是否实际
+经过 Gen3 与 direct 开关一致。它使用 public status 事件观察，不靠最终
+L0 或固定间隔轮询证明阶段被跳过。测试专用参数为
 `SVT_EQ_MODE=0~3`（默认 3）、`SVT_EQ_ENABLE=0/1`（默认 1）、
 `SVT_EQ_DIRECT=0/1`/`SVT_EQ_FAST=0/1`（默认 0）。它们不是生产 backend 的
 plusarg。该测试只证明双 SVT 训练，不替代真实 DUT 的 EQ 能力验证，也不替代
 `pcie_tl_svt_formal_link_test` 的双向 TLP 回归。
 
-2026-09-28 在 53 上使用 VCS W-2024.09-SP1、SVT R-2020.12 的验证结果：
+当前 Partial 版本在 53 上使用 VCS W-2024.09-SP1、SVT R-2020.12，已完成
+70 项配置矩阵、cfg unit 与自动 backend 构建检查。以下七组真实 Gen4
+用例均通过阶段断言和双方
+16 GT/s L0 的 5us 稳定性检查，`UVM_ERROR/FATAL=0`：
+
+| 模式 | 最终 direct | 是否经过 Gen3（RC/EP） | Gen3 阶段掩码（RC/EP） | Gen4 阶段掩码（RC/EP） |
+|---|---:|---|---|---|
+| Full，mode=1 | 0 | 1/1 | 1110/1111 | 1110/1111 |
+| Partial，mode=2 | 0 | 1/1 | 0010/0011 | 0010/0011 |
+| Partial，分别使用 direct=1、fast=1 | 1 | 0/0 | 0000/0000 | 0010/0011 |
+| No-EQ，mode=3 | 0 | 1/1 | 0000/0000 | 0000/0000 |
+| No-EQ，mode=3 + direct=1 | 1 | 0/0 | 0000/0000 | 0000/0000 |
+| enable=0，mode=2、direct=1、fast=1 | 0 | 1/1 | 0000/0000 | 0000/0000 |
+
+掩码 bit N 表示观察到 Phase N；RC 与 EP 的 Phase 0 记录不必一致。
+Full 对照确认观察器能看到 Phase 2/3，Partial 则确认这些阶段被跳过；
+不能仅凭最终 link-up 判断 Partial 生效。Gen5 本轮仍只检查配置映射，
+不声称实际 32 GT/s 建链已验证。
+
+同一编译版本的 formal 默认和 `+SVT_DIRECT_GEN4` 两组双向 TLP 门禁均
+通过，每组四项 PASS，`UVM_WARNING/ERROR/FATAL=0`。配置矩阵保留 39 条
+SVT API 提醒（23 条 Gen4 枚举提醒、16 条 Gen5 phase=0 兼容提醒），
+没有 `is_valid`/编译能力不匹配告警，也没有屏蔽 warning。
+
+历史记录：2026-09-28 提交 `acc9cd4` 在 53 上使用 VCS W-2024.09-SP1、
+SVT R-2020.12 的结果如下。当时 mode=2 仍是速率 Bypass，以下记录不代表
+当前 Partial 语义已验证：
 
 - 70 项配置矩阵、既有 cfg unit 和自动 backend 构建检查通过；
 - 六组 Gen4 实际建链通过：Full、Bypass、普通 No-EQ、No-EQ + direct、

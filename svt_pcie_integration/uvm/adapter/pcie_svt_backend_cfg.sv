@@ -25,7 +25,7 @@ class pcie_svt_link_override_cfg extends uvm_object;
   bit enable_equalization;
 
   // 链路级 EQ mode 覆盖。0 表示按该链 Gen 自动选择（不是继承全局 mode），
-  // 1/2/3 对应 Full / Bypass / No-Equalization；has_eq_mode=1 才覆盖。
+  // 1/2/3 对应完整 EQ / 仅 Phase 0、1 / No-EQ；has_eq_mode=1 才覆盖。
   bit has_eq_mode;
   int unsigned eq_mode;
 
@@ -84,13 +84,14 @@ class pcie_svt_backend_cfg extends uvm_object;
   // 物理层均衡（EQ）策略。
   // --------------------------------------------------------------------------
   bit enable_equalization = 1'b1;
-  // 0：Gen4 Full / Gen5 Bypass；1：Full；2：仅最高速率 EQ；3：No-EQ。
-  // Gen4 的 2 自动启用直达（仍做 Gen4 EQ），3 设置最高 EQ phase=0。
-  // Gen5 由 SVT 的 EQ 枚举实现 2/3；总开关关闭时忽略 mode 并清零直达。
+  // 0：保留 Gen4 Full / Gen5 Bypass 的旧自动策略；1：完整 Phase 0~3；
+  // 2：仅 Phase 0/1（Gen4/Gen5 均为 FULL 枚举 + phase=1）；3：No-EQ。
+  // 显式 mode 不再强制直达 Gen4，该维度只由 direct/fast 请求控制。
+  // 总开关关闭时仍保留旧兼容行为：忽略 mode 并清零直达。
   int unsigned eq_mode = 0;
   // 仅保留既有配置名和默认值；当前不能用此字段控制 EQ，设 0 会被
   // validate 拒绝。应使用 enable_equalization/eq_mode；它也不是 SVT
-  // API 的 direct-speed-up 参数（后者结合 direct/fast 与 EQ 策略生成）。
+  // API 的 direct-speed-up 参数（后者由 direct/fast 请求及总开关生成）。
   bit full_equalization_required = 1'b1;
 
   // --------------------------------------------------------------------------
@@ -235,8 +236,8 @@ class pcie_svt_backend_cfg extends uvm_object;
     return 1'b1;
   endfunction
 
-  // 返回旧 direct/fast 开关组合，不含 EQ mode 对最终 API 参数的覆盖。
-  // backend 随后为 Gen4 mode=2 强制直达、为 EQ-off 强制清零。保留这个
+  // 返回 direct/fast 开关组合，与显式 EQ mode 独立；backend 只在
+  // EQ 总开关关闭时为兼容旧行为强制清零。保留这个
   // getter 的旧语义，避免破坏现有调用者。link 为空使用全局值；恒返回 1。
   // R-2020.12 的第二 API 参数仅描述 2.5→16 GT/s，故 Gen5 恒返回 0。
   function bit get_link_direct_speedup(

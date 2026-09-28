@@ -55,8 +55,9 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
   endfunction
 
   // 将项目级 EQ 策略转换成 R-2020.12 的公开枚举。该枚举只决定 API 的
-  // 第一个参数，不能代表 Gen4 的完整配置；direct/最高 phase 在 apply
-  // 中按代际解析。合法 mode 为 0~3，由 build 前校验保证。集中在纯函数中，
+  // 第一个参数，不等于项目 mode 编号；部分 EQ（mode=2）通过 FULL 枚举
+  // 加 phase=1 表达，不再映射为“跳过低速率 EQ”。direct/最高 phase 在
+  // apply 中分别解析。合法 mode 为 0~3，由 build 前校验保证。集中在纯函数中，
   // 便于配置契约测试覆盖 Gen4/Gen5 以及关闭 EQ 的边界，而无需创建
   // SVT agent 或依赖 HDL Unified VIF。
   protected function svt_pcie_pl_configuration::link_eq_mode_enum
@@ -67,8 +68,7 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
       return svt_pcie_pl_configuration::LINK_EQ_MODE_NO_EQUALIZATION_NEEDED;
 
     case (requested_mode)
-      1: return svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED;
-      2: return svt_pcie_pl_configuration::LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE;
+      1, 2: return svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED;
       3: return svt_pcie_pl_configuration::LINK_EQ_MODE_NO_EQUALIZATION_NEEDED;
       default:
         return (max_gen == 5) ?
@@ -587,18 +587,20 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
       direct_speedup = 1'b0;
       highest_enabled_eq_phase = 0;
     end
-    else if (max_gen == 4) begin
-      // R-2020.12：API 第一参 link_eq_mode 仅适用于支持 32 GT/s 的链。
-      // Gen4 Bypass 必须用第二参跳过 Gen3 EQ，但仍在 Gen4 执行 EQ；
-      // Gen4 No-EQ 必须用第三参 0，速率是否直达仍由旧开关决定。
-      // 0/1 保持现有 direct/fast 组合；显式 2 自带最高速率直达语义。
-      if (selected_eq_mode == 2)
-        direct_speedup = 1'b1;
-      if (selected_eq_mode == 3)
-        highest_enabled_eq_phase = 0;
+    else if (selected_eq_mode == 2) begin
+      // Gen4/Gen5 的“部分 EQ”统一为只做 Phase 0/1，不做 Phase 2/3。
+      // 必须使用 FULL 枚举 + phase=1，不能用速率 bypass 枚举替代。
+      // 不修改 direct_speedup：是否直达 Gen4 只由 direct/fast 请求控制。
+      highest_enabled_eq_phase = 1;
     end
-    // Gen5 沿用第一参的 Full/Bypass/No-EQ 策略，最高 phase 默认 3；
-    // get_link_direct_speedup 已保证 Gen5 不使用 Gen4 专用直达开关。
+    else if ((max_gen == 4) && (selected_eq_mode == 3)) begin
+      // R-2020.12 第一参仅适用于支持 32 GT/s 的链；Gen4 No-EQ 必须
+      // 额外设置第三参为 0。phase=0 是不进入 EQ，不是“仅执行 Phase 0”。
+      highest_enabled_eq_phase = 0;
+    end
+    // Gen5 mode=0 仍保留旧自动 Bypass、mode=3 仍由第一参关闭 EQ；
+    // mode=1/2 则用 FULL 枚举并由 phase 区分完整/部分 EQ。
+    // get_link_direct_speedup 保证 Gen5 不使用 Gen4 专用直达开关。
     svt_cfg.pcie_cfg.pl_cfg.set_link_eq_attribute_values(
       effective_eq_mode, direct_speedup, highest_enabled_eq_phase);
 

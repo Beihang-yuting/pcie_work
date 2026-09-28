@@ -36,6 +36,11 @@ class pcie_svt_backend_eq_link_test extends pcie_svt_backend_auto_link_test;
   int unsigned test_fast = 0;
   bit expected_direct;
   int unsigned expected_phase;
+  // 每个方向单独记录各速率的 EQ 子状态；bit[n] 对应 Phase n。
+  // status 属于 agent，测试仅观察；事件线程在训练/超时结束时一起回收。
+  bit [3:0] rc_gen3_phases, rc_gen4_phases;
+  bit [3:0] ep_gen3_phases, ep_gen4_phases;
+  bit rc_seen_gen3, ep_seen_gen3;
 
   // 透传名字；默认重现“Gen4 No-EQ，非直达”的修复场景。
   function new(string name = "pcie_svt_backend_eq_link_test",
@@ -58,8 +63,9 @@ class pcie_svt_backend_eq_link_test extends pcie_svt_backend_auto_link_test;
     svt_backend_cfg.direct_gen4_enable = bit'(test_direct);
     svt_backend_cfg.fast_link_training = bit'(test_fast);
 
-    expected_direct = test_enable && (test_mode == 2 || test_direct || test_fast);
-    expected_phase = (!test_enable || test_mode == 3) ? 0 : 3;
+    expected_direct = test_enable && (test_direct || test_fast);
+    expected_phase = (!test_enable || test_mode == 3) ? 0 :
+                     ((test_mode == 2) ? 1 : 3);
     external_endpoint_cfg.pcie_spec_ver =
       svt_pcie_device_configuration::PCIE_SPEC_VER_4_0;
     external_endpoint_cfg.pcie_cfg.pl_cfg.set_link_width_values(16, 32'h3f, 16);
@@ -67,8 +73,8 @@ class pcie_svt_backend_eq_link_test extends pcie_svt_backend_auto_link_test;
       (`SVT_PCIE_SPEED_2_5G | `SVT_PCIE_SPEED_5_0G |
        `SVT_PCIE_SPEED_8_0G | `SVT_PCIE_SPEED_16_0G),
       `SVT_PCIE_SPEED_16_0G, `SVT_PCIE_SPEED_16_0G);
-    // Gen4 的 enum 无行为效果；独立 EP 故意固定 FULL，验证真正决定
-    // No-EQ 的是第三参，而不是与 RC 使用相同 enum 恰巧掩盖错误。
+    // Gen4 的 enum 无行为效果；独立 EP 固定 FULL，验证真正决定完整/
+    // 部分/No-EQ 的是第三参，而不是与 RC 使用相同 enum 恰巧掩盖错误。
     external_endpoint_cfg.pcie_cfg.pl_cfg.set_link_eq_attribute_values(
       svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED,
       expected_direct, expected_phase);
@@ -97,6 +103,64 @@ class pcie_svt_backend_eq_link_test extends pcie_svt_backend_auto_link_test;
       external_endpoint_status.pcie_status.pl_status.negotiated_speed == svt_pcie_pl_status::SPEED_16_0G;
   endfunction
 
+  // 直接等待 public status 属性变化，不用 100ns 轮询来判定短暂 EQ 阶段。
+  // 按实际速率分别累计阶段；Full 用例作为观察器阳性对照，Partial 用例
+  // 必须看到 Gen4 Phase 1 且不能看到 Phase 2/3，避免仅凭 link-up 判通过。
+  // status 在 run_phase 中已校验；本 task 不自行返回，由训练 fork 回收。
+  task track_eq_phases(svt_pcie_device_status status,
+                       ref bit [3:0] gen3_phases,
+                       ref bit [3:0] gen4_phases,
+                       ref bit seen_gen3);
+    int last_state;
+    int last_speed;
+    int phase_index;
+
+    forever begin
+      last_state = int'(status.pcie_status.pl_status.ltssm_state);
+      last_speed = int'(status.pcie_status.pl_status.current_speed);
+      phase_index = -1;
+      case (last_state)
+        svt_pcie_types::RECOVERY_EQUALIZATION_0: phase_index = 0;
+        svt_pcie_types::RECOVERY_EQUALIZATION_1: phase_index = 1;
+        svt_pcie_types::RECOVERY_EQUALIZATION_2: phase_index = 2;
+        svt_pcie_types::RECOVERY_EQUALIZATION_3: phase_index = 3;
+        default: ;
+      endcase
+      if (last_speed == svt_pcie_pl_status::SPEED_8_0G) begin
+        seen_gen3 = 1;
+        if (phase_index >= 0)
+          gen3_phases[phase_index] = 1;
+      end
+      if (last_speed == svt_pcie_pl_status::SPEED_16_0G && phase_index >= 0)
+        gen4_phases[phase_index] = 1;
+      wait (int'(status.pcie_status.pl_status.ltssm_state) != last_state ||
+            int'(status.pcie_status.pl_status.current_speed) != last_speed);
+    end
+  endtask
+
+  // 在稳定 Gen4 L0 后检查阶段轨迹及速率路线；Full 的 Phase 2/3 阳性
+  // 对照必须成立，Partial 不仅要建链，还必须跳过两端的 Phase 2/3。
+  // 检查失败立即 fatal；打印掩码方便与 DUT/HDL 状态波形对照。
+  function void check_eq_trace();
+    `uvm_info("SVT_EQ_TRACE", $sformatf(
+      "mode=%0d phase=%0d direct=%0b Gen3_seen_RC_EP=%0b/%0b Gen3_phases_RC_EP=%04b/%04b Gen4_phases_RC_EP=%04b/%04b (bitN=PhaseN)",
+      test_mode, expected_phase, expected_direct, rc_seen_gen3, ep_seen_gen3,
+      rc_gen3_phases, ep_gen3_phases, rc_gen4_phases, ep_gen4_phases), UVM_NONE)
+    if (rc_seen_gen3 != !expected_direct || ep_seen_gen3 != !expected_direct)
+      `uvm_fatal("SVT_EQ_TRACE", "实际 Gen3 经过情况与 direct 开关不符")
+    if (test_enable && test_mode == 2) begin
+      if (!rc_gen4_phases[1] || !ep_gen4_phases[1] ||
+          (|rc_gen4_phases[3:2]) || (|ep_gen4_phases[3:2]) ||
+          (|rc_gen3_phases[3:2]) || (|ep_gen3_phases[3:2]))
+        `uvm_fatal("SVT_EQ_TRACE", "Partial 必须观察到 Gen4 Phase 1 且不能进入 Phase 2/3")
+      if (!expected_direct && (!rc_gen3_phases[1] || !ep_gen3_phases[1]))
+        `uvm_fatal("SVT_EQ_TRACE", "非直达 Partial 必须在 Gen3 也观察到 Phase 1")
+    end
+    if (test_enable && test_mode == 1 &&
+        (rc_gen4_phases[3:1] != 3'b111 || ep_gen4_phases[3:1] != 3'b111))
+      `uvm_fatal("SVT_EQ_TRACE", "Full 阳性对照必须观察到 Gen4 Phase 1/2/3")
+  endfunction
+
   // 复位释放后并行启动官方 link-enable sequence；500us 有界等待，随后
   // 每 100ns 采样检查 5us 稳定性。失败时 fatal，不静默降级为 Gen1 通过。
   task run_phase(uvm_phase phase);
@@ -119,6 +183,8 @@ class pcie_svt_backend_eq_link_test extends pcie_svt_backend_auto_link_test;
     rc_seq.enable = 1;
     ep_seq.enable = 1;
     fork : training_or_timeout
+      track_eq_phases(rc_status, rc_gen3_phases, rc_gen4_phases, rc_seen_gen3);
+      track_eq_phases(external_endpoint_status, ep_gen3_phases, ep_gen4_phases, ep_seen_gen3);
       begin
         // 与已验证的 AIP 双 SVT 用例相同，在 200ns reset 释放后留出启动裕量。
         #10us;
@@ -133,6 +199,7 @@ class pcie_svt_backend_eq_link_test extends pcie_svt_backend_auto_link_test;
           if (!both_at_gen4(rc_status))
             `uvm_fatal("SVT_EQ_LINK", "Gen4 L0 后稳定性检查掉链")
         end
+        check_eq_trace();
         `uvm_info("SVT_EQ_LINK", $sformatf(
           "SVT_EQ_GEN4_LINK_PASS mode=%0d enable=%0b direct=%0b fast=%0b highest_eq_phase=%0d both=16GT/s_L0",
           test_mode, test_enable, expected_direct, test_fast, expected_phase), UVM_NONE)
@@ -228,12 +295,13 @@ class pcie_svt_backend_eq_cfg_test extends uvm_test;
               cfg.fast_link_training = bit'(fast);
               if (!en || mode == 3)
                 expected_mode = svt_pcie_pl_configuration::LINK_EQ_MODE_NO_EQUALIZATION_NEEDED;
-              else if (mode == 2 || (mode == 0 && gen == 5))
+              else if (mode == 0 && gen == 5)
                 expected_mode = svt_pcie_pl_configuration::LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE;
               else
                 expected_mode = svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED;
-              expected_direct = en && gen == 4 && (mode == 2 || direct || fast);
-              expected_phase = (!en || (gen == 4 && mode == 3)) ? 0 : 3;
+              expected_direct = en && gen == 4 && (direct || fast);
+              expected_phase = (!en || (gen == 4 && mode == 3)) ? 0 :
+                               ((mode == 2) ? 1 : 3);
               check_case(cfg, link, expected_mode, expected_direct, expected_phase);
             end
           end
@@ -241,7 +309,7 @@ class pcie_svt_backend_eq_cfg_test extends uvm_test;
       end
     end
 
-    // 全局 Full + per-link No-EQ、Bypass，确认映射使用选中值而非全局字段。
+    // 全局 Full + per-link No-EQ、Partial，确认映射使用选中值而非全局字段。
     cfg.init_defaults();
     cfg.eq_mode = 1;
     link.max_gen = 4;
@@ -251,7 +319,7 @@ class pcie_svt_backend_eq_cfg_test extends uvm_test;
     ov.eq_mode = 3;
     check_case(cfg, link, svt_pcie_pl_configuration::LINK_EQ_MODE_NO_EQUALIZATION_NEEDED, 0, 0);
     ov.eq_mode = 2;
-    check_case(cfg, link, svt_pcie_pl_configuration::LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE, 1, 3);
+    check_case(cfg, link, svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED, 0, 1);
     // override=0 明确选择自动策略，不应继续继承全局的 No-EQ。
     cfg.eq_mode = 3;
     ov.eq_mode = 0;

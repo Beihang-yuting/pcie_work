@@ -1112,8 +1112,9 @@ Serial 集成。以 SVT R-2020.12 为例，可见源码中它们是 `reg [31:0]`
 则说明坏链路进入 Phase 2 后未满足退出条件，但仅凭状态路径不能认定是
 某个 complete 位没返回。还需核对协议序列、配置和锁定情况：
 
-1. 实际要求 Gen4 EQ（`enable_equalization=1, eq_mode=0/1/2`），而 DUT
-   配置成了 No-EQ；Bypass 只跳过较低速率的 EQ，最高速率仍需要 EQ；
+1. SVT 要求完整 EQ（Gen4 `enable_equalization=1, eq_mode=0/1`），而 DUT
+   只支持 Phase 0/1 或配置成了 No-EQ。部分 EQ 应选 `eq_mode=2`，它与
+   完全 No-EQ 的 `3` 不同，也与“跳过低速率 EQ”的速率 Bypass 不同；
 2. 旧 backend 即使收到了 `eq_mode=3`，也把最高 phase 固定为 3，Gen4
    No-EQ 没有落地。新版应看到 `highest_eq_phase=0`；再检查 link override
    与用户 hook 是否改写配置；
@@ -1121,17 +1122,20 @@ Serial 集成。以 SVT R-2020.12 为例，可见源码中它们是 `reg [31:0]`
    反馈，导致整个 x4/x8/x16 链路不能离开 Phase 2；
 4. Gen4 UI、PLL/CDR 或信号质量在系数更新时失锁，SVT 因而重新等待 EQ。
 
-建议先做隔离实验：
+先确认 DUT 配置里的“No-EQ”究竟是完全不进入 EQ，还是只跳过 Phase 2/3。
+好波形已经出现 `0x23` 时，不能仅凭没有 `0x24` 就把它认定为完全 No-EQ。
+如果 DUT 只做 Phase 0/1，可按部分 EQ 对齐：
 
 ~~~systemverilog
 svt_backend_cfg.enable_equalization = 1'b1;
-svt_backend_cfg.eq_mode             = 3;    // 明确 NO_EQUALIZATION_NEEDED
+svt_backend_cfg.eq_mode             = 2;    // Partial：仅 Phase 0/1
 svt_backend_cfg.direct_gen4_enable  = 1'b0;
 svt_backend_cfg.fast_link_training  = 1'b0;
 ~~~
 
-配置必须在 `pcie_tl_env` 创建、SVT agent build 之前发布。此实验通过支持
-“完整 EQ 路径存在问题”的判断，不能单凭它定位 DUT 的哪项反馈失败。若仍
+若 DUT 确实完全不进入 EQ，再选 `eq_mode=3`，不要将两种策略混用。
+配置必须在 `pcie_tl_env` 创建、SVT agent build 之前发布。对齐后通过只能支持
+“完整 EQ 路径/策略存在问题”的判断，不能单凭它定位 DUT 的哪项反馈失败。若仍
 进入 `0x24`，先按下文核对最终 API 参数，再检查双方 EQ TS1 和每 lane 锁定，
 而不是继续调整 TL sequence。
 
@@ -1150,7 +1154,7 @@ preset 的单个字段，而是一组训练序列、反馈和重新发送动作�
 | `enable_equalization=0` | 强制 `NO_EQUALIZATION_NEEDED` | 跳过 EQ 要求；`eq_mode` 此时不再生效 |
 | `enable_equalization=1, eq_mode=0` | 自动策略 | 当前实现中 Gen4 选择 Full，Gen5 选择 Bypass |
 | `enable_equalization=1, eq_mode=1` | `FULL_EQUALIZATION_REQUIRED` | 要求完整 EQ Phase 0~3，必须完成 preset/coefficients 反馈 |
-| `enable_equalization=1, eq_mode=2` | `EQ_BYPASS_TO_HIGHEST_RATE` | 只跳过较低速率 EQ，在最高速率仍执行 EQ；Gen4 同时强制 direct=1 |
+| `enable_equalization=1, eq_mode=2` | `FULL_EQUALIZATION_REQUIRED` + 最高 phase=1 | 部分 EQ：只做 Phase 0/1，跳过 Phase 2/3；不修改 direct 请求 |
 | `enable_equalization=1, eq_mode=3` | `NO_EQUALIZATION_NEEDED` | 明确跳过均衡要求，但仍需要速率切换、PLL 锁定和训练序列 |
 
 `eq_mode=1` 不是“选择 preset 1”，而是要求 SVT 和 DUT 完整执行均衡。完整
@@ -1165,6 +1169,29 @@ Recovery.Speed
   -> Recovery.RcvrCfg / Recovery.Idle
   -> L0
 ~~~
+
+部分 EQ 使用同一速率下的阶段裁剪，不是跳过 Gen3。R-2020.12 的
+`highest_enabled_equalization_phase=1` 明确启用 Phase 0/1；典型轨迹为：
+
+~~~
+Recovery.Speed
+  -> Recovery.Equalization_0
+  -> Recovery.Equalization_1
+  -> Recovery.RcvrLock / Recovery.RcvrCfg / Recovery.Idle
+  -> L0
+~~~
+
+其中 Phase 0 是初始 preset/进入高速均衡的准备，Phase 1 建立可解码的
+训练序列并交换能力；跳过 Phase 2/3 意味着不再执行双方接收方向的完整
+发送系数优化。双方必须配置一致，不能期待 SVT 单侧设置后自动修复 DUT。
+最高 phase=0 则是不进入 EQ，**不是仅做 Phase 0**。Gen5 还需结合第一参
+No-EQ 能力，不能只用 phase=0 替代其枚举策略。
+
+53 的双 SVT Gen4 对照中，非直达 Partial 的 Gen3、Gen4 阶段掩码均为
+RC=`0010`、EP=`0011`（bit N 表示观察到 Phase N）；Full 对照为
+RC=`1110`、EP=`1111`。因此判定 Partial 的关键是观察到 Phase 1 且不进入
+Phase 2/3，不要求两个方向都出现相同的 Phase 0 记录。该结果验证的是
+本测试夹具；真实 DUT 仍需逐端核对 HDL 状态和双方配置。
 
 均衡失败时常见的路径是：
 
@@ -1199,26 +1226,29 @@ PLL 和 Gen4 PHY 配置。No-EQ 通过本身不能证明完整 Gen4 EQ 协议已
 
 `direct_gen4_enable` 和 `fast_link_training` 控制从 2.5 GT/s 到 16 GT/s 的
 直接加速，当前功能重叠、取 OR，`fast_link_training` 没有独立缩短 LTSSM
-定时器的功能。默认/Full/No-EQ 使用该 OR 值；显式 Gen4 `eq_mode=2` 还会
-强制 direct=1，表达“仅在最高速率均衡”。无需同时打开两个开关。
+定时器的功能。默认/Full/Partial/No-EQ 均使用该 OR 值；`eq_mode=2` 不再
+强制 direct=1。无需同时打开两个开关。总开关 `enable_equalization=0`
+仍保留清零 direct 的旧兼容行为。
 
 #### Gen4/Gen5 的 API 差异与配置日志
 
 R-2020.12 的 `set_link_eq_attribute_values(mode, direct, highest_phase)`
 不能只看第一个枚举：官方说明 `mode` 只适用于支持 32 GT/s 的配置；最高
-速率为 Gen4 时，第二参用于跳过 Gen3 EQ，第三参设为 0 才是 No-EQ。
+速率为 Gen4 时，第二参用于直达 Gen4、跳过 Gen3，第三参 3/1/0 分别表示
+完整 EQ / 仅 Phase 0、1 / No-EQ。不要把“跳过速率”与“裁剪阶段”混为一谈。
 
 | backend 策略 | Gen4 最终 `(mode, direct, highest_phase)` | Gen5 最终参数 |
 |---|---|---|
 | enable=1，mode=0/1 | `(FULL, 旧开关OR, 3)` | mode=0 为 `(BYPASS,0,3)`；mode=1 为 `(FULL,0,3)` |
-| enable=1，mode=2 | `(BYPASS, 1, 3)` | `(BYPASS,0,3)` |
+| enable=1，mode=2 | `(FULL, 旧开关OR, 1)` | `(FULL,0,1)` |
 | enable=1，mode=3 | `(NO_EQ, 旧开关OR, 0)` | `(NO_EQ,0,3)`，由第一参关闭 EQ |
 | enable=0 | `(NO_EQ,0,0)` | `(NO_EQ,0,0)`，保留旧行为 |
 
-项目 mode=1/2/3 对应 SVT 枚举值 0/1/2。因此下面的日志不是映射错误：
+项目 mode 编号不能直接当作 SVT 枚举：mode=1/2 都使用 FULL（枚举值 0），
+由第三参区分完整/部分 EQ；mode=3 使用 NO_EQ（枚举值 2）。例如：
 
 ```text
-enable_eq=1 requested_eq=2 effective_eq=1(LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE) direct=1 highest_eq_phase=3
+enable_eq=1 requested_eq=2 effective_eq=0(LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED) direct=0 highest_eq_phase=1
 ```
 
 Gen4 No-EQ 应看到 `requested_eq=3 effective_eq=2(...) highest_eq_phase=0`。
@@ -1228,8 +1258,14 @@ Gen4 No-EQ 应看到 `requested_eq=3 effective_eq=2(...) highest_eq_phase=0`。
 `pl_cfg.enable_direct_speed_up_from_2_5g_to_16g`、
 `pl_cfg.highest_enabled_equalization_phase` 确认最终配置。
 
-旧版的主要遗漏是 enable=1 时最高 phase 总为 3：只把 requested=3 转成
-NO_EQ 枚举不能关闭 Gen4 EQ。新版还补齐了 Gen4 mode=2 到 direct=1 的映射。
+最早版本 enable=1 时最高 phase 总为 3，只把 requested=3 转成 NO_EQ 枚举
+不能关闭 Gen4 EQ；该问题已修正。随后 `acc9cd4` 把 mode=2 定义为速率
+Bypass 并强制 Gen4 direct=1。当前重新分离这两个维度：mode=2 改为
+Partial（phase=1），是否直达仍由现有开关控制。旧用例迁移规则：
+
+- 旧 Gen4 mode=2 的“直达 + 完整 EQ”：改为 `eq_mode=1, direct_gen4_enable=1`；
+- 旧 Gen5 mode=2 的“仅最高速率完整 EQ”：可使用 `eq_mode=0` 的既有自动策略；
+- DUT 仅 Phase 0/1：使用新的 `eq_mode=2`，并单独决定 Gen4 direct。
 
 #### No-EQ 与速率跳转的组合关系
 
@@ -1242,16 +1278,18 @@ backend 的实际组合如下：
 | Gen4 | `enable_equalization=0` | Gen1 → Gen3 → Gen4 | backend 会同时清零 Gen4 direct-speed-up；只关闭 EQ，不做直达加速 |
 | Gen4 | `enable_equalization=1, eq_mode=3`，且 `direct_gen4_enable=1` 或 `fast_link_training=1` | Gen1 → Gen4 | 明确 No-EQ，同时启用 SVT 的 Gen4 专用 2.5→16 GT/s 直达开关 |
 | Gen4 | `enable_equalization=1, eq_mode=3`，且 direct-speed-up=0 | Gen1 → Gen3 → Gen4 | No-EQ，但仍按普通速率训练路径切换 |
-| Gen4 | `enable_equalization=1, eq_mode=2` | Gen1 → Gen4 | 强制 direct=1；最高速率仍做 EQ，不适合要求 No-EQ 的 DUT |
-| Gen5 | `enable_equalization=1, eq_mode=0/2` | Gen1 → Gen5 | `eq_mode=0` 的 Gen5 自动策略和显式 `eq_mode=2` 都映射为 `EQ_BYPASS_TO_HIGHEST_RATE`；这是 Gen5 的最高速率 bypass 策略，不是 No-EQ |
+| Gen4 | `enable_equalization=1, eq_mode=2`，direct/fast=0 | Gen1 → Gen3 → Gen4 | Gen3 和 Gen4 都仅 Phase 0/1，不强制直达 |
+| Gen4 | `enable_equalization=1, eq_mode=2`，direct=1 或 fast=1 | Gen1 → Gen4 | 直达由单独开关控制，Gen4 仍仅 Phase 0/1 |
+| Gen5 | `enable_equalization=1, eq_mode=0` | Gen1 → Gen5 | 保留自动 `EQ_BYPASS_TO_HIGHEST_RATE`；只跳过低速率 EQ，最高速率仍完整 EQ |
+| Gen5 | `enable_equalization=1, eq_mode=2` | Gen1 → Gen3 → Gen4 → Gen5 | FULL 枚举保持逐级速率路径，phase=1 表示各高速阶段仅做部分 EQ |
 | Gen5 | `enable_equalization=0` 或 `enable_equalization=1, eq_mode=3` | 官方 No-EQ 示例为 Gen1 → Gen5 | 由第一参 `NO_EQUALIZATION_NEEDED` 协商，不靠 Gen4 专用 direct 开关；仍需双方支持 |
 
 所以，如果 DUT 的 PHY 明确是 No-EQ：
 
 - Gen4 可先用 `eq_mode=3` 验证 No-EQ，再单独决定是否打开
   `direct_gen4_enable`；
-- Gen5 不要把 `fast_link_training` 当成 Gen5 direct 开关。若使用
-  `eq_mode=2`，SVT 仍会在最高速率执行 bypass/EQ 策略，必须确认 DUT 支持；
+- Gen5 不要把 `fast_link_training` 当成 Gen5 direct 开关，也不要把新的
+  `eq_mode=2` 当成速率 bypass；它是部分 EQ，而不是完全 No-EQ；
 - 以上是 SVT 配置的目标策略，不是 DUT 一定成功的保证；应以双方
   `local_rate`、`last_bit_period`、LTSSM 和协商能力记录实际路径。
 

@@ -1,9 +1,11 @@
 //------------------------------------------------------------------------------
-// SVT backend 配置对象契约测试。
+// svt_pcie_integration/tests：SVT backend 配置对象契约测试。
 //
 // 该测试不创建 SVT agent，也不依赖物理 Serial 链路；它只锁定 backend
 // 配置层的优先级和 Gen4 快速建链语义。这样配置错误会在 agent 创建前被
 // 发现，避免把一个纯策略问题误判成链路训练问题。
+// 依赖 UVM、TL/topology 与 SVT adapter package；测试拥有局部配置和
+// provider 句柄，UVM 管理 test 生命周期，不改变 HDL 或启动建链 sequence。
 //------------------------------------------------------------------------------
 
 `include "uvm_macros.svh"
@@ -16,16 +18,20 @@ import pcie_svt_adapter_pkg::*;
 class pcie_svt_backend_cfg_unit_test extends uvm_test;
   `uvm_component_utils(pcie_svt_backend_cfg_unit_test)
 
+  // 透传 test 名字和父组件；配置对象在 run_phase 内创建。
   function new(string name = "pcie_svt_backend_cfg_unit_test",
                uvm_component parent = null);
     super.new(name, parent);
   endfunction
 
+  // 同步契约断言；condition 为假时立即 fatal，禁止错误配置继续通过。
   function void require(bit condition, string message);
     if (!condition)
       `uvm_fatal("SVT_CFG_CONTRACT", message)
   endfunction
 
+  // 验证默认值、模式解析、覆盖优先级与非法请求；保持 objection 直到
+  // 所有断言结束，任意失败 fatal，不推进物理链路。
   task run_phase(uvm_phase phase);
     pcie_svt_backend_cfg cfg;
     pcie_svt_link_override_cfg override_cfg;
@@ -85,6 +91,19 @@ class pcie_svt_backend_cfg_unit_test extends uvm_test;
     require(effective_mode ==
             svt_pcie_pl_configuration::LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE,
             "Gen5 default EQ must map to EQ_BYPASS_TO_HIGHEST_RATE");
+
+    // 部分 EQ 不是速率 bypass。两种代际都使用 FULL 枚举，阶段上限
+    // 由实际 setter 矩阵另验为 1；更改 mode 不能暗中开启 direct。
+    for (int gen = 4; gen <= 5; gen++) begin
+      effective_mode = backend.get_effective_equalization_mode(gen, 1'b1, 2);
+      require(effective_mode ==
+              svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED,
+              "partial EQ must use FULL enum with a separate phase limit");
+    end
+    cfg.eq_mode = 2;
+    void'(cfg.get_link_direct_speedup(link, direct_speedup));
+    require(direct_speedup == 1'b0,
+            "partial EQ must not enable direct speed-up implicitly");
 
     // 链路级覆盖必须优先于全局值；覆盖对象只修改明确置位的字段。
     cfg.direct_gen4_enable = 1'b1;
@@ -189,8 +208,8 @@ class pcie_svt_backend_cfg_unit_test extends uvm_test;
             "non-default full_equalization_required must be diagnosed");
     cfg.full_equalization_required = 1'b1;
 
-    // PIPE 已是受支持的 transport（双 SVT PIPE 门禁 Gen3/4/5 全绿），
-    // validate() 必须接受 PIPE override 而不再报错。
+    // 配置对象允许声明 PIPE；这不代表自动 backend 已实现 PIPE。
+    // validate() 只校验枚举，后续 backend 的能力检查仍可拒绝该模式。
     override_cfg.transport = PCIE_SVT_TRANSPORT_PIPE;
     cfg.validate(errors);
     require(errors.size() == 0,

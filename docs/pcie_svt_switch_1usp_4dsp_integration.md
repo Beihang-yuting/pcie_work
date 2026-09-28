@@ -516,11 +516,12 @@ backend 的关键映射如下：
 SVT Target App 不重复回包，TL EP driver 通过 SVT adapter 产生唯一的
 Completion。若把两者都打开，会出现重复 Completion 或 tag 状态不一致。
 
-Switch 各条 SVT 链路也使用相同 EQ 策略。最高 Gen4 时，`eq_mode=2` 表示
-自动直达 Gen4、跳过 Gen3 EQ，但仍做 Gen4 EQ；DUT 若配置为 No-EQ，应使用
-`enable_equalization=1, eq_mode=3`。新版 backend 为此同步设置最高 EQ
-phase=0，旧版仅改枚举不生效，需要重新编译。`direct_gen4_enable` 与旧
-`fast_link_training` 开关取 OR，不必同时开启；mode=2 自带直达语义。
+Switch 各条 SVT 链路也使用相同 EQ 策略：`eq_mode=1` 为完整 EQ，`2` 为
+只做 Phase 0/1 的部分 EQ，`3` 为 No-EQ；必须先打开 `enable_equalization`。
+Gen4 分别映射最高 EQ phase=3/1/0。`direct_gen4_enable` 与旧
+`fast_link_training` 开关取 OR，不必同时开启，`eq_mode=2` 不再强制直达。
+Gen5 的显式 mode=2 也使用 FULL 枚举 + phase=1；mode=0 保留旧自动策略。
+旧 Gen4 mode=2 若意在“直达且完整 EQ”，升级后改用 mode=1 + direct=1。
 可通过 `link_override[link_id]` 的 `has_eq_mode/eq_mode` 为 USP/DSP 对端
 分别配置，必须与对应 DUT 端口匹配。完整设置和日志判读见
 [4RC 集成说明](pcie_svt_4rc_dut_ep_integration.md#gen4-快速建链开关)。
