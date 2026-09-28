@@ -1,10 +1,13 @@
 //------------------------------------------------------------------------------
-// SVT backend 专用配置。
+// svt_pcie_integration/uvm/adapter：SVT backend 专用配置。
 //
 // 该对象只存在于 SVT integration package 中。拓扑、BDF、BAR 和 Host
 // binding 仍由 pcie_global_cfg / pcie_tl_env_config 管理；本对象只保存
 // Synopsys SVT transport 所需的参数，避免把 vendor 类型泄漏到 TL-only
 // package。
+// 由 pcie_svt_adapter_pkg 包含，依赖 UVM 与项目 link/transport 类型。
+// test 创建本对象并在 build 前经 config_db 发布；backend 持有句柄直到仿真
+// 结束。link_override 属于本配置对象，copy 时深拷贝以隔离各条链路的策略。
 //------------------------------------------------------------------------------
 
 class pcie_svt_link_override_cfg extends uvm_object;
@@ -21,8 +24,8 @@ class pcie_svt_link_override_cfg extends uvm_object;
   bit has_equalization;
   bit enable_equalization;
 
-  // 链路级 EQ mode 覆盖。0 表示沿用全局自动策略，1/2/3 对应 Full /
-  // Bypass / No-Equalization；只有 has_eq_mode 置位时才生效。
+  // 链路级 EQ mode 覆盖。0 表示按该链 Gen 自动选择（不是继承全局 mode），
+  // 1/2/3 对应 Full / Bypass / No-Equalization；has_eq_mode=1 才覆盖。
   bit has_eq_mode;
   int unsigned eq_mode;
 
@@ -72,6 +75,8 @@ class pcie_svt_backend_cfg extends uvm_object;
   pcie_svt_backend_mode_e backend_mode = PCIE_SVT_BACKEND_FULL_VIP;
 
   int unsigned default_max_gen = 4;
+  // Gen4 显式直达开关；fast_link_training 保留旧配置兼容，与本字段 OR。
+  // 不需要同时置 1。fast 可按 link 覆盖，但不能用 0 否定全局 direct=1。
   bit direct_gen4_enable = 1'b0;
   bit fast_link_training = 1'b0;
 
@@ -79,10 +84,13 @@ class pcie_svt_backend_cfg extends uvm_object;
   // 物理层均衡（EQ）策略。
   // --------------------------------------------------------------------------
   bit enable_equalization = 1'b1;
+  // 0：Gen4 Full / Gen5 Bypass；1：Full；2：仅最高速率 EQ；3：No-EQ。
+  // Gen4 的 2 自动启用直达（仍做 Gen4 EQ），3 设置最高 EQ phase=0。
+  // Gen5 由 SVT 的 EQ 枚举实现 2/3；总开关关闭时忽略 mode 并清零直达。
   int unsigned eq_mode = 0;
-  // 兼容既有项目配置名：该字段仅表示所选 EQ mode 是否要求完整均衡，
-  // 不对应 SVT set_link_eq_attribute_values() 的第二个参数。SVT 的
-  // direct-speed-up 选项由 direct_gen4_enable/fast_link_training 控制。
+  // 仅保留既有配置名和默认值；当前不能用此字段控制 EQ，设 0 会被
+  // validate 拒绝。应使用 enable_equalization/eq_mode；它也不是 SVT
+  // API 的 direct-speed-up 参数（后者结合 direct/fast 与 EQ 策略生成）。
   bit full_equalization_required = 1'b1;
 
   // --------------------------------------------------------------------------
@@ -188,9 +196,9 @@ class pcie_svt_backend_cfg extends uvm_object;
     return 1'b1;
   endfunction
 
-  // 返回链路最终采用的 transport。Serial 与 PIPE 均已支持：物理层由
-  // 静态 HDL 顶层的 PHY_INTERFACE_TYPE 决定，本字段用于策略声明与
-  // 校验一致性（PIPE 顶层见 pcie_tl_svt_pipe_top/topology）。
+  // 返回链路声明的 transport，优先使用链路覆盖；此 getter 不保证实现
+  // 支持该模式。自动 backend 当前只接受 Serial，独立 PIPE 顶层不代表
+  // backend 已支持 PIPE；静态 HDL 类型仍须与有效策略一致。
   function bit get_link_transport(
       pcie_link_cfg link,
       output pcie_svt_transport_e value);
@@ -214,7 +222,8 @@ class pcie_svt_backend_cfg extends uvm_object;
     return 1'b1;
   endfunction
 
-  // 返回链路最终 EQ mode；0 保留全局自动选择语义。
+  // 返回链路选择的 EQ mode；override 的 0 也是按代际自动选择，不继承
+  // 全局非零 mode。link 为空时返回全局值；恒返回 1，不修改配置对象。
   function bit get_link_eq_mode(
       pcie_link_cfg link,
       output int unsigned value);
@@ -226,9 +235,10 @@ class pcie_svt_backend_cfg extends uvm_object;
     return 1'b1;
   endfunction
 
-  // R-2020.12 的 direct-speed-up API 只描述 2.5 GT/s 到 16 GT/s，故仅
-  // 对 Gen4 返回 1。Gen5 即使打开 fast_link_training，也必须走正常的
-  // 32 GT/s 训练/均衡配置，不能复用该布尔参数。
+  // 返回旧 direct/fast 开关组合，不含 EQ mode 对最终 API 参数的覆盖。
+  // backend 随后为 Gen4 mode=2 强制直达、为 EQ-off 强制清零。保留这个
+  // getter 的旧语义，避免破坏现有调用者。link 为空使用全局值；恒返回 1。
+  // R-2020.12 的第二 API 参数仅描述 2.5→16 GT/s，故 Gen5 恒返回 0。
   function bit get_link_direct_speedup(
       pcie_link_cfg link,
       output bit value);

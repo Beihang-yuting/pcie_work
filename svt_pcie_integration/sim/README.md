@@ -389,8 +389,9 @@ Device Agent 前消费。常用字段示例：
 pcie_svt_backend_cfg svt_cfg;
 svt_cfg = pcie_svt_backend_cfg::type_id::create("svt_cfg");
 svt_cfg.default_max_gen       = 4;
-svt_cfg.direct_gen4_enable    = 1'b1; // 允许 Gen1 直接加速到 Gen4
-svt_cfg.fast_link_training    = 1'b1;
+svt_cfg.enable_equalization   = 1'b1;
+svt_cfg.direct_gen4_enable    = 1'b1; // Gen4：允许 Gen1 直接加速到 Gen4
+svt_cfg.fast_link_training    = 1'b0; // 旧别名，与 direct 取 OR，不必同时开
 svt_cfg.eq_mode               = 1;    // 1=Full, 2=Bypass, 3=No-Eq, 0=自动
 svt_cfg.enable_transaction_log = 1'b1;
 svt_cfg.transaction_log_filename = "pcie_xact.log";
@@ -398,13 +399,38 @@ uvm_config_db#(pcie_svt_backend_cfg)::set(
   this, "env", "pcie_svt_backend_cfg", svt_cfg);
 ```
 
-`eq_mode` 会映射到官方 `set_link_eq_attribute_values()` 的第一个参数；
-第二个参数是 SVT 特有的 `enable_direct_speed_up_from_2_5g_to_16g`，由
-`direct_gen4_enable || fast_link_training` 控制，不能用
-`full_equalization_required` 代替。`link_timeout` 会换算成 ns，同时写入
+`eq_mode` 会映射到官方 `set_link_eq_attribute_values()` 的第一个参数，但
+R-2020.12 的此枚举只适用于支持 32 GT/s 的配置，Gen4 还必须映射 direct/phase。
+第二个参数是 SVT 特有的 `enable_direct_speed_up_from_2_5g_to_16g`，旧开关请求
+为 `direct_gen4_enable || effective_fast_link_training`；Gen4 显式 mode=2
+还会强制直达。不能用 `full_equalization_required` 代替这些参数。
+`link_timeout` 会换算成 ns，同时写入
 `pcie_cfg.tl_cfg.completion_timeout_ns`、
 `pcie_cfg.tl_cfg.credit_starvation_timeout_ns`（RX/monitor 预算）以及
 `driver_cfg[0].completion_timeout_ns`（active Driver App 的真正 CTO）。
+
+这两个 direct-speed-up 配置字段默认均为 `0`，只对 `effective_max_gen==4`
+生效；Gen5 不使用它们作为 `2.5→32 GT/s` 的 direct API。若
+`enable_equalization=0`，backend 会强制清零 SVT 的 direct-speed-up 参数。
+Gen5 的 Gen1→Gen5 最高速率路径使用 `eq_mode=0` 自动策略或显式
+`eq_mode=2`（`EQ_BYPASS_TO_HIGHEST_RATE`），这不等同于 No-EQ。
+
+| Gen4 配置 | SVT direct 参数 | SVT 最高 EQ phase | 行为 |
+|---|---:|---:|---|
+| enable=1，mode=0/1 | 旧 direct/fast 请求 | 3 | 保留原有 Full-EQ 策略 |
+| enable=1，mode=2 | 1 | 3 | 跳过 Gen3 EQ，仍执行 Gen4 EQ |
+| enable=1，mode=3 | 旧 direct/fast 请求 | 0 | No-EQ，直达与否单独控制 |
+| enable=0 | 0 | 0 | 保留原有总开关关闭行为 |
+
+`fast_link_training` 是兼容名称，没有独立缩短 LTSSM 定时器的作用。新配置
+可保持它为 0，只用 `direct_gen4_enable`；已有按 link 的 fast override
+仍有效，但 fast=0 不会否定全局 direct=1 或显式 mode=2。
+
+旧 backend 的 enable=1 分支把最高 phase 固定为 3，导致 Gen4 mode=3
+只改枚举、未真正关闭 EQ；更新后应在 `SVT_EQ_CFG` 中看到
+`requested_eq=3 effective_eq=2(...) highest_eq_phase=0`。日志的 `pre-hook`
+表示用户 hook 仍可随后覆盖。完整协议说明见
+[4RC LTSSM 调试文档](../../docs/pcie_svt_4rc_ltssm_hdl_debug.md#512-recoveryequalization高速均衡)。
 
 `svt_verbosity` 通过 UVM 公共的
 `set_report_verbosity_level_hier()` 应用到自动创建的 Device Agent。
@@ -427,6 +453,76 @@ uvm_config_db#(pcie_svt_backend_cfg)::set(
 MBI 和 FLIT logging 字段。backend 创建的是 active Device Agent；需要纯
 观察时，请在 test 中另建一个 `is_active=0` 且 `enable_monitor=1` 的 SVT
 agent。
+
+#### EQ 配置与真实 Serial 回归
+
+配置矩阵同时覆盖 Gen4/Gen5，因此应使用测试专用
+`pcie_tl_svt_eq_gen5.f` 编译同一个 `pcie_tl_svt_formal_top`。该列表用
+`SVT_PCIE_ENABLE_GEN5` 替代默认 formal 列表的 `SVT_PCIE_ENABLE_GEN4`，
+并选择 Serial/32G 模型；不启用 PIPE5，也不改变默认生产 filelist。
+不要把两个最高代际宏叠加，否则 Gen5 配置可能仍被 SVT 按 Gen4 上限检查。
+
+在本目录且已设置前文三个环境变量的情况下编译：
+
+```bash
+mkdir -p build/eq
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+  -f pcie_tl_svt_eq_gen5.f -top pcie_tl_svt_formal_top \
+  -Mdir=build/eq/csrc -o build/eq/simv -l build/eq/compile.log
+```
+
+以下为可选的运行参数；并发运行时必须在各自独立目录中
+调用同一个 simv 的绝对路径，避免 SVT 默认的 symbol/log 文件互相覆盖：
+
+```bash
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_cfg_test
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=3
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=3 +SVT_EQ_DIRECT=1
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=2
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=1
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_MODE=3 +SVT_EQ_FAST=1
+./build/eq/simv +UVM_TESTNAME=pcie_svt_backend_eq_link_test +SVT_EQ_ENABLE=0 +SVT_EQ_MODE=2 +SVT_EQ_DIRECT=1 +SVT_EQ_FAST=1
+```
+
+配置测试遍历 Gen4/5、enable、mode、direct、fast 的 64 组合及 6 个 override
+用例，调用真实 backend 配置路径，读回 SVT 实际三个 EQ 参数，成功标记为
+`SVT_EQ_CFG_MATRIX_PASS cases=70`。不需要给生产代码增加测试专用配置 API。
+Gen5 在这里验证的是配置映射，不是 32 GT/s 实际建链。只跑 Gen4 链路用例
+时也可使用默认 `pcie_tl_svt_formal.f`；不能用其 Gen4 编译能力声称完整
+Gen5 配置有效。
+
+结果判定必须同时检查对应 PASS 标记和 `UVM_ERROR/UVM_FATAL` 均为 0，
+不能只看 simv 的进程退出码。R-2020.12 可能对 Gen4 的非 Full 枚举提示
+“应使用 direct/最高 phase 参数”；backend 保留旧枚举语义，并已同时设置
+这两项实际生效的参数。Gen5 总开关关闭时也保留旧 phase=0，可能收到
+“应使用 No-EQ 枚举”的提示（已同时传入 No-EQ）。这些 API 提醒应与
+`is_valid` 报速率超出编译能力区分，不能统一屏蔽 warning。
+
+建链测试使用生产 backend RC + 独立配置的外部 SVT EP，必须双方同时到达
+**16 GT/s L0**，再通过 5us 的定时稳定性检查，才打印
+`SVT_EQ_GEN4_LINK_PASS`；500us 仿真时间超时则 fatal。测试专用参数为
+`SVT_EQ_MODE=0~3`（默认 3）、`SVT_EQ_ENABLE=0/1`（默认 1）、
+`SVT_EQ_DIRECT=0/1`/`SVT_EQ_FAST=0/1`（默认 0）。它们不是生产 backend 的
+plusarg。该测试只证明双 SVT 训练，不替代真实 DUT 的 EQ 能力验证，也不替代
+`pcie_tl_svt_formal_link_test` 的双向 TLP 回归。
+
+2026-09-28 在 53 上使用 VCS W-2024.09-SP1、SVT R-2020.12 的验证结果：
+
+- 70 项配置矩阵、既有 cfg unit 和自动 backend 构建检查通过；
+- 六组 Gen4 实际建链通过：Full、Bypass、普通 No-EQ、No-EQ + direct、
+  No-EQ + fast，以及 EQ 总开关关闭但 mode/direct/fast 仍有请求；
+- 六组均确认双方为 16 GT/s L0 并通过 5us 稳定性检查，`UVM_ERROR/FATAL=0`；
+- 默认 Gen4 `pcie_tl_svt_formal.f` 重新编译通过，普通 No-EQ 再次通过；
+  `pcie_tl_svt_formal_link_test` 默认和 `+SVT_DIRECT_GEN4` 两种运行均通过
+  四项双向 TLP 门禁，`UVM_WARNING/ERROR/FATAL=0`；
+- 配置矩阵保留 44 条上述 API 提醒（28 条 Gen4 枚举提醒、16 条 Gen5
+  phase=0 提醒），没有 `is_valid`/编译能力不匹配告警。
+
+普通 No-EQ 用例的锁定周期依次为 0.400 ns、0.125 ns、0.0625 ns，即
+Gen1 → Gen3 → Gen4；最终双方报告 16 Gb/s L0。该文本日志没有逐项打印
+Equalization_0/1，不能据此声称 No-EQ 时完全不经过任何 EQ 协商子状态。
+
+该记录不代表内网 DUT 已验证，也不包含 Gen5 物理建链。
 
 ### AIP Tcl sequence 接入（建链 → Config/BAR/Memory）
 

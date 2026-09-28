@@ -314,6 +314,10 @@ pl_status、pl0_serdes_locked 和 TS1/TS2 计数器，只有卡在 Polling 或
 
 当前 R-2020.12 SerDes model 中常用状态编码如下：
 
+> 表中的数值使用十进制书写。如果 Verdi/UCLI 将 `ltssm_state` 显示为十六进制，
+> 例如 `a`、`10`、`23`，应先按十六进制转换再与本表比较：`a=10`、
+> `10=16`、`23=35`。这些数值是 LTSSM 阶段编码，不是 PCIe 链路速率。
+
 | 数值 | 英文状态 | 中文状态 | 主要作用 |
 |---:|---|---|---|
 | 99 | INITIAL | 初始内部状态 | SVT PHY 尚未开始 LTSSM |
@@ -879,6 +883,161 @@ R0.tx_bit_clk[0:7]
 R0.SER_GEN_N.serdes.recovered_bit_clk
 ~~~
 
+这些信号的含义不同，不能只看某一个原始整数值判断速率：
+
+| 观察信号 | 含义 | 使用方法 |
+|---|---|---|
+| `R0.pl0.local_rate` | 当前 PL 本地选择/正在切换的速率 | 看状态从 L0 进入 Recovery.Speed 前后是否发生变化；原始枚举值必须以当前 SVT 头文件为准 |
+| `R0.rate` | port 级当前/目标速率镜像 | 与 `local_rate` 对照，判断本地速率和目标速率是否一致 |
+| `R0.tx_bit_clk[0:7]` | SVT 各 lane 的发送 bit clock | 测量周期，确认 SVT 是否已经按新速率发送 |
+| `R0.SER_GEN_N.serdes.recovered_bit_clk` | 每条 lane 的接收恢复时钟 | 确认 DUT 返回的数据是否被 CDR/PLL 锁定 |
+| `R0.SER_GEN_N.serdes.last_bit_period` | 最近一次接收 bit 的周期，单位通常为 ns | 最直接的速率判定依据 |
+| `R0.SER_GEN_N.serdes.average_bit_period` | 一段时间的平均 bit 周期 | 判断速率是否稳定，避免把单个抖动边沿当成速率切换 |
+
+PCIe 速率与单 bit UI 的对应关系如下。这里的周期是串行 bit period，不能
+把它当成 100MHz reference clock 周期：
+
+`GT/s` 是 `Giga Transfers per second`，即每条 lane 每秒十亿次物理层
+传输。在 PCIe Gen1~Gen5 的 NRZ SerDes 中，一次 transfer 对应一个 UI，
+因此数值上通常等于原始串行 bit rate（例如 16 GT/s 对应 16 Gb/s/lane）。
+它不是 PCIe TLP 数量，也不是扣除编码、协议和流控开销后的有效吞吐量。
+
+计算公式为：
+
+```text
+UI(ns)       = 1 / Rate(GT/s)
+Rate(GT/s)   = 1 / UI(ns)
+UI(ps)       = 1000 / Rate(GT/s)
+```
+
+因为 `1 GT/s = 1e9 transfer/s`，而 `1 ns = 1e-9 s`，所以在使用 ns 和
+GT/s 时数值可以直接互为倒数。例如 Gen4 的 `16 GT/s`：
+`UI = 1 / 16 = 0.0625 ns = 62.5 ps`；如果波形测得
+`UI = 0.03125 ns`，则 `Rate = 1 / 0.03125 = 32 GT/s`，对应 Gen5。
+
+| 速率 | PCIe 代际 | bit period/UI |
+|---:|---|---:|
+| 2.5 GT/s | Gen1 | 0.400 ns = 400 ps |
+| 5.0 GT/s | Gen2 | 0.200 ns = 200 ps |
+| 8.0 GT/s | Gen3 | 0.125 ns = 125 ps |
+| 16.0 GT/s | Gen4 | 0.0625 ns = 62.5 ps |
+| 32.0 GT/s | Gen5 | 0.03125 ns = 31.25 ps |
+
+反过来，从波形测得的 UI 可以按下表判断代际：
+
+| 测得 UI | 计算出的线速率 | 代际 |
+|---:|---:|---|
+| 约 `0.400 ns` | `1/0.400 = 2.5 GT/s` | Gen1 |
+| 约 `0.200 ns` | `1/0.200 = 5.0 GT/s` | Gen2 |
+| 约 `0.125 ns` | `1/0.125 = 8.0 GT/s` | Gen3 |
+| 约 `0.0625 ns` | `1/0.0625 = 16.0 GT/s` | Gen4 |
+| 约 `0.03125 ns` | `1/0.03125 = 32.0 GT/s` | Gen5 |
+
+这里的 GT/s 是物理传输速率，不是扣除编码后的有效数据速率。Gen1/Gen2
+使用 8b/10b，本文涉及的 Gen3~Gen5 使用 128b/130b；编码只影响有效 payload 速率，
+不改变上述 UI 与 GT/s 的换算。
+
+按单 lane 粗略换算，编码后的有效数据速率为：
+
+| 代际 | 原始线速率 | 编码效率 | 编码后有效速率（约） |
+|---|---:|---:|---:|
+| Gen1 | 2.5 GT/s | 8b/10b = 80% | 2.0 Gb/s |
+| Gen2 | 5.0 GT/s | 8b/10b = 80% | 4.0 Gb/s |
+| Gen3 | 8.0 GT/s | 128b/130b ≈ 98.46% | 7.877 Gb/s |
+| Gen4 | 16.0 GT/s | 128b/130b ≈ 98.46% | 15.754 Gb/s |
+| Gen5 | 32.0 GT/s | 128b/130b ≈ 98.46% | 31.508 Gb/s |
+
+这是物理编码后的理论值，还没有扣除 TLP/DLLP、包头、流控和协议间隙。
+x4、x8、x16 链路的理论总速率分别约为单 lane 值的 4、8、16 倍。
+
+`local_rate`/`rate` 的具体枚举整数会随 SVT 版本和模型实现变化，不能直接
+假定“数值 1 就是 Gen1”。尤其 R-2020.12 的 `pl0.local_rate` 是 3 bit，
+不能直接拿 32 bit one-hot 的 `SVT_PCIE_SPEED_*` 配置宏比较。应核对模型的
+rate 编码定义，或读 public status 的带名枚举；波形调试时优先用
+`last_bit_period` 对照上表。Serial port 上还可以观察：
+
+~~~
+tb.svt_rc0_spd.vip_port_if.ser_if.active_tx_transmit_clk_0
+tb.svt_rc0_spd.vip_port_if.ser_if.active_rx_recovered_clk_0
+~~~
+
+这两个是 active PHY 的观察时钟，不是 DUT 的 reference clock，也不能用来
+替代 `local_rate` 或把它们回接到 DUT。
+
+#### 速率字段的数值如何解读
+
+需要区分三种不同的“数值”：
+
+1. `ltssm_state` 是训练阶段编码（例如 `16=L0`、`13=Recovery.Speed`），不表示
+   GT/s。
+2. `local_rate`、`rate` 或 PIPE `rate` 是速率选择/镜像字段。SVT 配置 API 的
+   `supported_speeds` 是**位图**，而 `target_speed`/`expected_speed` 是单个
+   速率常量；不能把位图 `0x1e` 当成“30 GT/s”。本项目 Gen4 配置的
+   `0x1e` 表示同时声明 Gen1~Gen4，目标值仍应使用
+   `SVT_PCIE_SPEED_16_0G` 宏，而不是填写 `16`。
+
+3. `last_bit_period`/`average_bit_period` 是测量结果，才适合直接从波形判断
+   实际串行速度。它们是模型中的 real，而不是自动随波形显示单位缩放的
+   time 信号；R-2020.12 `pciesvc_serdes` 为 1ns/1fs，日志按 ns 输出。
+
+在本项目使用的 PCIe Supported Link Speeds Vector 编码中，各个 SVT 速率宏
+对应的是 one-hot 位（这些是配置常量/位图含义，不是 `local_rate` 的通用
+ordinal 编码）：
+
+| SVT 宏 | 速率 | 位号 | 十六进制位值 |
+|---|---:|---:|---:|
+| `SVT_PCIE_SPEED_2_5G` | 2.5 GT/s | 1 | `0x00000002` |
+| `SVT_PCIE_SPEED_5_0G` | 5.0 GT/s | 2 | `0x00000004` |
+| `SVT_PCIE_SPEED_8_0G` | 8.0 GT/s | 3 | `0x00000008` |
+| `SVT_PCIE_SPEED_16_0G` | 16.0 GT/s | 4 | `0x00000010` |
+| `SVT_PCIE_SPEED_32_0G` | 32.0 GT/s | 5 | `0x00000020` |
+
+因此 Gen4 的 `supported_speeds = 0x1e` 是
+`0x02 | 0x04 | 0x08 | 0x10`；Gen5 再增加 `0x20`。如果供应商版本改变了
+宏定义，应以该版本头文件为准，但“supported 是位图、target/expected 是
+单个宏”的解释不变。
+
+如果当前 SVT PIPE interface 暴露的是 PIPE `rate` 字段，常见编码为：
+
+| PIPE `rate` | 串行速率 | PCIe 代际 | 单 bit UI |
+|---:|---:|---|---:|
+| `0` | 2.5 GT/s | Gen1 | 400 ps |
+| `1` | 5.0 GT/s | Gen2 | 200 ps |
+| `2` | 8.0 GT/s | Gen3 | 125 ps |
+| `3` | 16.0 GT/s | Gen4 | 62.5 ps |
+| `4` | 32.0 GT/s | Gen5 | 31.25 ps |
+
+该表只适用于当前 SVT/PIPE 版本明确采用上述 PIPE 编码的 `pipe_if.rate`；
+不要把它套用到 Serial `pl0.local_rate` 的原始整数上。Serial 模式下最稳妥
+的判定方法是：先观察 `local_rate` 是否发生预期变化，再测量
+`SER_GEN_N.serdes.last_bit_period`。例如约 `0.0625 ns` 才能证明已经到
+Gen4；只看到 `ltssm_state=16` 只能证明进入 L0，不能证明已经是 Gen4。
+
+对本项目 backend，目标速率来自：
+
+~~~systemverilog
+svt_cfg.pcie_cfg.pl_cfg.set_link_speed_values(
+  supported_speeds, selected_speed, selected_speed);
+// Gen4: selected_speed = `SVT_PCIE_SPEED_16_0G
+// Gen5: selected_speed = `SVT_PCIE_SPEED_32_0G
+~~~
+
+因此建议在波形中同时放置以下信号，而不是只看一个整数：
+
+~~~
+tb.svt_rc0_spd.m_ser.port0.pl0.ltssm_state
+tb.svt_rc0_spd.m_ser.port0.pl0.local_rate
+tb.svt_rc0_spd.m_ser.port0.SER_GEN_0.serdes.last_bit_period
+tb.svt_rc0_spd.m_ser.port0.SER_GEN_0.serdes.average_bit_period
+tb.svt_rc0_spd.m_ser.port0.SER_GEN_0.serdes.pll_locked
+tb.svt_rc0_spd.m_ser.port0.SER_GEN_0.serdes.serdes_locked
+~~~
+
+判断例子：`ltssm_state=0x0d`（Recovery.Speed）时，bit period 从约
+`0.4 ns` 变为约 `0.0625 ns`，并且 `pll_locked/serdes_locked` 恢复为 1，
+才说明速率切换真正完成；如果长期停留在 `0x0d`，或 bit period 没有变化，
+应查 DUT 的速率切换、参考时钟/时间精度和 PHY PLL，而不是修改 TL sequence。
+
 如果旧速率下正常、新速率下掉回 Detect：
 
 - DUT PHY 不支持或未正确切换目标速率；
@@ -909,20 +1068,192 @@ Gen3 及以上速率通常会经过：
 | Phase | 中文含义 | 主要协议动作 | 波形判定 |
 |---:|---|---|---|
 | 0 | 均衡启动/预设初始化 | 双方进入高速 EQ，发送带初始 preset 的 EQ TS1 | 状态进入 34，所有有效 lane 仍有 ordered set 和 lock |
-| 1 | 发送端预设评估 | 接收端对当前 preset 做评估并给出可接受/不可接受反馈 | `rx_eq_eval_requested`、preset/coeff 字段变化 |
-| 2 | 接收端请求/发送端调整 | 接收端请求新的 preset 或 coefficient，发送端更新 TX FIR | `rx_eq_eval_complete`、precursor/cursor/postcursor 稳定 |
-| 3 | 最终确认 | 双方确认最终系数并准备进入 Recovery.RcvrCfg/Idle | 所有有效 lane 完成，状态不反复回 Phase 0 |
+| 1 | 初始接收与能力交换 | 在目标速率建立可解码的 TS1 交换，交换均衡信息并决定后续流程 | 比较双方 EQ TS1 的 EC/能力信息；不能只看内部 eval 位 |
+| 2 | 下游端接收方向优化 | RC（Downstream Port）的 RX 评估 EP TX，必要时请求 EP 改 preset/coefficient | RC 发出的 EQ TS1 请求与 EP 返回的状态是否匹配，所有有效 lane 能否完成 |
+| 3 | 上游端接收方向优化 | EP（Upstream Port）的 RX 评估 RC TX，必要时请求 RC 调整 | EP 的请求与 RC 的反馈匹配；完成后退出均衡，不能把此阶段只当最终确认 |
 
-可观察的 SVT HDL 信号包括：
+可作为候选观察点的 SVT HDL 信号包括（内部名称/用途需按版本核对）：
 
 ~~~
 R0.pl0.ltssm_state
-R0.pl0.rx_eq_eval_requested[0:7]
-R0.pl0.rx_eq_eval_complete[0:7]
+R0.pl0.rx_eq_eval_requested[7:0]
+R0.pl0.rx_eq_eval_complete[7:0]
 R0.pl0.rx_precursor_coeff[0:7]
 R0.pl0.rx_cursor_coeff[0:7]
 R0.pl0.rx_postcursor_coeff[0:7]
 ~~~
+
+注意：上面的 `rx_eq_eval_requested`/`rx_eq_eval_complete` 不能无条件用于
+Serial 集成。以 SVT R-2020.12 为例，可见源码中它们是 `reg [31:0]`，但有
+加密实现，仅搜索到声明不能证明它们“未驱动”或“只供 PIPE 使用”。Serial
+波形中两者全 0 不足以判断 EQ 成败，也不能直接要求将 complete 拉高；应以
+`ltssm_state`、Serial PHY 的 `serdes.pll_locked`、`serdes.serdes_locked`、
+`serdes.sig_level_valid`、`last_bit_period`/`average_bit_period`，以及 DUT
+内部的 preset/coefficient/complete 信号为准。只有在确认所用接口模型确实驱动
+这些 `rx_eq_eval_*` 信号后，才把它们作为 EQ feedback 判据。
+
+如果好波形是：
+
+~~~
+0x23 (Equalization_1)
+  -> 0x0c (Recovery.RcvrLock)
+  -> 0x0e (Recovery.RcvrCfg)
+  -> 0x0f (Recovery.Idle)
+~~~
+
+而坏波形是：
+
+~~~
+0x23 (Equalization_1)
+  -> 0x24 (Equalization_2)
+  -> timeout
+~~~
+
+则说明坏链路进入 Phase 2 后未满足退出条件，但仅凭状态路径不能认定是
+某个 complete 位没返回。还需核对协议序列、配置和锁定情况：
+
+1. 实际要求 Gen4 EQ（`enable_equalization=1, eq_mode=0/1/2`），而 DUT
+   配置成了 No-EQ；Bypass 只跳过较低速率的 EQ，最高速率仍需要 EQ；
+2. 旧 backend 即使收到了 `eq_mode=3`，也把最高 phase 固定为 3，Gen4
+   No-EQ 没有落地。新版应看到 `highest_eq_phase=0`；再检查 link override
+   与用户 hook 是否改写配置；
+3. 只有某个 lane 没有发出/接收到合法的 preset、coefficient 或 complete
+   反馈，导致整个 x4/x8/x16 链路不能离开 Phase 2；
+4. Gen4 UI、PLL/CDR 或信号质量在系数更新时失锁，SVT 因而重新等待 EQ。
+
+建议先做隔离实验：
+
+~~~systemverilog
+svt_backend_cfg.enable_equalization = 1'b1;
+svt_backend_cfg.eq_mode             = 3;    // 明确 NO_EQUALIZATION_NEEDED
+svt_backend_cfg.direct_gen4_enable  = 1'b0;
+svt_backend_cfg.fast_link_training  = 1'b0;
+~~~
+
+配置必须在 `pcie_tl_env` 创建、SVT agent build 之前发布。此实验通过支持
+“完整 EQ 路径存在问题”的判断，不能单凭它定位 DUT 的哪项反馈失败。若仍
+进入 `0x24`，先按下文核对最终 API 参数，再检查双方 EQ TS1 和每 lane 锁定，
+而不是继续调整 TL sequence。
+
+#### `enable_equalization` 与 `eq_mode`
+
+均衡（Equalization）是 Gen3 及以上速率的高速链路训练过程。由于通道损耗
+会造成眼图闭合，双方通过 EQ TS1 评估接收质量，并调整发送端的
+precursor/cursor/postcursor 或接收端的均衡参数。它不是选择某一个固定
+preset 的单个字段，而是一组训练序列、反馈和重新发送动作。
+
+当前 backend 中，`enable_equalization` 是总开关，`eq_mode` 是打开总开关后
+采用的策略：
+
+| 配置 | backend 映射 | 训练行为 |
+|---|---|---|
+| `enable_equalization=0` | 强制 `NO_EQUALIZATION_NEEDED` | 跳过 EQ 要求；`eq_mode` 此时不再生效 |
+| `enable_equalization=1, eq_mode=0` | 自动策略 | 当前实现中 Gen4 选择 Full，Gen5 选择 Bypass |
+| `enable_equalization=1, eq_mode=1` | `FULL_EQUALIZATION_REQUIRED` | 要求完整 EQ Phase 0~3，必须完成 preset/coefficients 反馈 |
+| `enable_equalization=1, eq_mode=2` | `EQ_BYPASS_TO_HIGHEST_RATE` | 只跳过较低速率 EQ，在最高速率仍执行 EQ；Gen4 同时强制 direct=1 |
+| `enable_equalization=1, eq_mode=3` | `NO_EQUALIZATION_NEEDED` | 明确跳过均衡要求，但仍需要速率切换、PLL 锁定和训练序列 |
+
+`eq_mode=1` 不是“选择 preset 1”，而是要求 SVT 和 DUT 完整执行均衡。完整
+流程通常可观察为：
+
+~~~
+Recovery.Speed
+  -> Recovery.Equalization_0
+  -> Recovery.Equalization_1
+  -> Recovery.Equalization_2
+  -> Recovery.Equalization_3
+  -> Recovery.RcvrCfg / Recovery.Idle
+  -> L0
+~~~
+
+均衡失败时常见的路径是：
+
+~~~
+Equalization_1/2
+  -> Recovery.Speed
+  -> PLL/CDR 重新锁定失败
+  -> Detect
+~~~
+
+因此，`Recovery.Speed` 期间 SVT TX 短暂没有普通串行数据并不一定异常；速率
+切换时可能进入 Electrical Idle。只有在该状态长时间停留、`serdes_locked` 不
+恢复，或最终退回 Detect 时，才说明新速率或均衡没有完成。
+
+如果 DUT 明确配置为 No-EQ，可以使用：
+
+~~~systemverilog
+svt_cfg.enable_equalization = 1'b1;
+svt_cfg.eq_mode = 3;
+~~~
+
+或者关闭总开关：
+
+~~~systemverilog
+svt_cfg.enable_equalization = 1'b0;
+~~~
+
+前者表达“明确不需要 EQ”，后者表达“整个 SVT backend 不启用 EQ”。两者都
+适合作为定位 DUT 是否卡在 EQ 的实验配置；如果 No-EQ 可以稳定进入目标速率
+而 `eq_mode=1` 失败，应继续检查 DUT 的 EQ TS1、preset/coefficients、接收
+PLL 和 Gen4 PHY 配置。No-EQ 通过本身不能证明完整 Gen4 EQ 协议已经通过。
+
+`direct_gen4_enable` 和 `fast_link_training` 控制从 2.5 GT/s 到 16 GT/s 的
+直接加速，当前功能重叠、取 OR，`fast_link_training` 没有独立缩短 LTSSM
+定时器的功能。默认/Full/No-EQ 使用该 OR 值；显式 Gen4 `eq_mode=2` 还会
+强制 direct=1，表达“仅在最高速率均衡”。无需同时打开两个开关。
+
+#### Gen4/Gen5 的 API 差异与配置日志
+
+R-2020.12 的 `set_link_eq_attribute_values(mode, direct, highest_phase)`
+不能只看第一个枚举：官方说明 `mode` 只适用于支持 32 GT/s 的配置；最高
+速率为 Gen4 时，第二参用于跳过 Gen3 EQ，第三参设为 0 才是 No-EQ。
+
+| backend 策略 | Gen4 最终 `(mode, direct, highest_phase)` | Gen5 最终参数 |
+|---|---|---|
+| enable=1，mode=0/1 | `(FULL, 旧开关OR, 3)` | mode=0 为 `(BYPASS,0,3)`；mode=1 为 `(FULL,0,3)` |
+| enable=1，mode=2 | `(BYPASS, 1, 3)` | `(BYPASS,0,3)` |
+| enable=1，mode=3 | `(NO_EQ, 旧开关OR, 0)` | `(NO_EQ,0,3)`，由第一参关闭 EQ |
+| enable=0 | `(NO_EQ,0,0)` | `(NO_EQ,0,0)`，保留旧行为 |
+
+项目 mode=1/2/3 对应 SVT 枚举值 0/1/2。因此下面的日志不是映射错误：
+
+```text
+enable_eq=1 requested_eq=2 effective_eq=1(LINK_EQ_MODE_EQ_BYPASS_TO_HIGHEST_RATE) direct=1 highest_eq_phase=3
+```
+
+Gen4 No-EQ 应看到 `requested_eq=3 effective_eq=2(...) highest_eq_phase=0`。
+新版 backend 的 `SVT_EQ_CFG` 日志记录全部三个入参，并带 link ID 和 Gen。
+它标注 `pre-hook`，因为用户 `customize_svt_agent_cfg` 仍可能随后改写；若使用
+该 hook，应在 agent build 前读回 `pl_cfg.get_link_eq_attribute_values()`、
+`pl_cfg.enable_direct_speed_up_from_2_5g_to_16g`、
+`pl_cfg.highest_enabled_equalization_phase` 确认最终配置。
+
+旧版的主要遗漏是 enable=1 时最高 phase 总为 3：只把 requested=3 转成
+NO_EQ 枚举不能关闭 Gen4 EQ。新版还补齐了 Gen4 mode=2 到 direct=1 的映射。
+
+#### No-EQ 与速率跳转的组合关系
+
+关闭均衡表示“不要求完整均衡”，不等于没有训练序列或 LTSSM 状态，也不能
+把 Gen4 和 Gen5 的速率跳转规则混为一谈。当前
+backend 的实际组合如下：
+
+| 目标 | 配置 | 典型速率路径 | 说明 |
+|---|---|---|---|
+| Gen4 | `enable_equalization=0` | Gen1 → Gen3 → Gen4 | backend 会同时清零 Gen4 direct-speed-up；只关闭 EQ，不做直达加速 |
+| Gen4 | `enable_equalization=1, eq_mode=3`，且 `direct_gen4_enable=1` 或 `fast_link_training=1` | Gen1 → Gen4 | 明确 No-EQ，同时启用 SVT 的 Gen4 专用 2.5→16 GT/s 直达开关 |
+| Gen4 | `enable_equalization=1, eq_mode=3`，且 direct-speed-up=0 | Gen1 → Gen3 → Gen4 | No-EQ，但仍按普通速率训练路径切换 |
+| Gen4 | `enable_equalization=1, eq_mode=2` | Gen1 → Gen4 | 强制 direct=1；最高速率仍做 EQ，不适合要求 No-EQ 的 DUT |
+| Gen5 | `enable_equalization=1, eq_mode=0/2` | Gen1 → Gen5 | `eq_mode=0` 的 Gen5 自动策略和显式 `eq_mode=2` 都映射为 `EQ_BYPASS_TO_HIGHEST_RATE`；这是 Gen5 的最高速率 bypass 策略，不是 No-EQ |
+| Gen5 | `enable_equalization=0` 或 `enable_equalization=1, eq_mode=3` | 官方 No-EQ 示例为 Gen1 → Gen5 | 由第一参 `NO_EQUALIZATION_NEEDED` 协商，不靠 Gen4 专用 direct 开关；仍需双方支持 |
+
+所以，如果 DUT 的 PHY 明确是 No-EQ：
+
+- Gen4 可先用 `eq_mode=3` 验证 No-EQ，再单独决定是否打开
+  `direct_gen4_enable`；
+- Gen5 不要把 `fast_link_training` 当成 Gen5 direct 开关。若使用
+  `eq_mode=2`，SVT 仍会在最高速率执行 bypass/EQ 策略，必须确认 DUT 支持；
+- 以上是 SVT 配置的目标策略，不是 DUT 一定成功的保证；应以双方
+  `local_rate`、`last_bit_period`、LTSSM 和协商能力记录实际路径。
 
 如果 Gen1/Gen2 建链成功、Gen3/Gen4 失败，优先检查：
 

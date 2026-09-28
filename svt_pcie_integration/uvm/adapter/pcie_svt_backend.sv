@@ -1,5 +1,5 @@
 //------------------------------------------------------------------------------
-// 自动创建正式 SVT Device Agent 的 backend。
+// svt_pcie_integration/uvm/adapter：自动创建正式 SVT Device Agent 的 backend。
 //
 // 这个类是 pcie_tl_env 的可选 transport provider：
 //   1. 从 global_cfg.links[] 选择 enabled && use_svt 的物理链路；
@@ -8,7 +8,10 @@
 //   4. 将公共链路策略转换成 SVT R-2020.12 的公开配置 API。
 //
 // Host 数量、BAR 分配和 TL sequence 不在这里创建。这样 SVT backend 只
-// 承担 Serial/PIPE transport，pcie_tl_env 仍然是唯一控制面。
+// 承担 SVT transport（当前自动配置仅支持 Serial），pcie_tl_env 仍然是唯一控制面。
+// 本文件由 pcie_svt_adapter_pkg 包含，依赖 TL/topology 与 SVT UVM 类型。
+// provider 保存每条 link 的配置/状态句柄；agent/adapter 是 TL env 的子组件，
+// 生命周期由 UVM 管理。配置在 build 时应用，随后允许用户 hook 最后覆盖。
 //------------------------------------------------------------------------------
 
 class pcie_svt_backend extends pcie_tl_backend_provider;
@@ -51,7 +54,9 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
       svt_pcie_device_configuration svt_cfg);
   endfunction
 
-  // 将项目级 EQ 策略转换成 R-2020.12 的公开枚举。集中在纯函数中，
+  // 将项目级 EQ 策略转换成 R-2020.12 的公开枚举。该枚举只决定 API 的
+  // 第一个参数，不能代表 Gen4 的完整配置；direct/最高 phase 在 apply
+  // 中按代际解析。合法 mode 为 0~3，由 build 前校验保证。集中在纯函数中，
   // 便于配置契约测试覆盖 Gen4/Gen5 以及关闭 EQ 的边界，而无需创建
   // SVT agent 或依赖 HDL Unified VIF。
   protected function svt_pcie_pl_configuration::link_eq_mode_enum
@@ -445,9 +450,11 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
     return 1'b1;
   endfunction
 
-  // 将一条 backend-neutral link policy 映射为 SVT configuration。这里使用
-  // R-2020.12 已验证的 set_link_width_values/set_link_speed_values API，
-  // 不访问 SVT 私有字段。
+  // 将一条 backend-neutral link policy 映射为 SVT configuration，原地填充
+  // 调用者的 svt_cfg；空对象、非法代际/宽度/接口累加到 errors 后返回。
+  // 使用 R-2020.12 的公开 API；EQ 必须同时解析枚举、Gen4 direct 和最高
+  // phase 三个参数，因为仅修改 Gen5 EQ 枚举不会关闭 Gen4 Phase 2/3。
+  // 此配置发生在 agent 创建与用户 customize hook 之前，不修改 DUT。
   protected function void apply_link_configuration(
       int link_index,
       pcie_link_cfg link,
@@ -466,6 +473,7 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
     time selected_timeout;
     int unsigned selected_timeout_ns;
     svt_pcie_pl_configuration::link_eq_mode_enum effective_eq_mode;
+    int unsigned highest_enabled_eq_phase;
 
     if ((link == null) || (link_vif == null) || (svt_cfg == null)) begin
       errors.push_back("SVT link configuration received a null argument");
@@ -573,23 +581,34 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
     effective_eq_mode = resolve_equalization_mode(
       max_gen, selected_equalization, selected_eq_mode);
 
-    if (selected_equalization) begin
-      // eq_mode=0 保持项目原有的“按 Gen/快速建链策略自动选择”；
-      // 1/2/3 分别显式选择 Full、Bypass、No-Equalization。
-      // Gen5 没有 R-2020.12 的 2.5→16 GT/s 直达捷径。仍要发布其显式
-      // bypass 模式（含默认 eq_mode=0），确保 32 GT/s 路径不会从 VIF
-      // 继承 Gen4/full-EQ 默认值。
-      svt_cfg.pcie_cfg.pl_cfg.set_link_eq_attribute_values(
-        effective_eq_mode,
-        // SVT API 的第二个参数是“从 2.5 GT/s 直接加速到 16 GT/s”。
-        direct_speedup, 3);
+    highest_enabled_eq_phase = 3;
+    if (!selected_equalization) begin
+      // 保留总开关关闭时的既有行为：No-EQ、phase=0，且禁止直达。
+      direct_speedup = 1'b0;
+      highest_enabled_eq_phase = 0;
     end
-    else begin
-      // 关闭 EQ 时必须使用 NO_EQUALIZATION_NEEDED，并明确清零
-      // direct-speed-up；不能把“关闭 EQ”误编码成 Gen4 Full-EQ shortcut。
-      svt_cfg.pcie_cfg.pl_cfg.set_link_eq_attribute_values(
-        effective_eq_mode, 1'b0, 0);
+    else if (max_gen == 4) begin
+      // R-2020.12：API 第一参 link_eq_mode 仅适用于支持 32 GT/s 的链。
+      // Gen4 Bypass 必须用第二参跳过 Gen3 EQ，但仍在 Gen4 执行 EQ；
+      // Gen4 No-EQ 必须用第三参 0，速率是否直达仍由旧开关决定。
+      // 0/1 保持现有 direct/fast 组合；显式 2 自带最高速率直达语义。
+      if (selected_eq_mode == 2)
+        direct_speedup = 1'b1;
+      if (selected_eq_mode == 3)
+        highest_enabled_eq_phase = 0;
     end
+    // Gen5 沿用第一参的 Full/Bypass/No-EQ 策略，最高 phase 默认 3；
+    // get_link_direct_speedup 已保证 Gen5 不使用 Gen4 专用直达开关。
+    svt_cfg.pcie_cfg.pl_cfg.set_link_eq_attribute_values(
+      effective_eq_mode, direct_speedup, highest_enabled_eq_phase);
+
+    // 一次性记录三项真实 API 入参，避免把项目 mode 编号与 SVT 枚举混淆。
+    // 明确标注 pre-hook：用户 customize_svt_agent_cfg 仍可在后面覆盖配置。
+    `uvm_info("SVT_EQ_CFG", $sformatf(
+      "pre-hook link=%s gen=%0d enable_eq=%0b requested_eq=%0d effective_eq=%0d(%s) direct=%0b fast=%0b highest_eq_phase=%0d",
+      link.link_id, max_gen, selected_equalization, selected_eq_mode,
+      effective_eq_mode, effective_eq_mode.name(), direct_speedup,
+      fast_training, highest_enabled_eq_phase), backend_cfg.svt_verbosity)
 
     // TL env 是唯一配置空间控制者时默认关闭 SVT shadow lookup，避免
     // 动态 BDF 没有 shadow entry 的 warning；需要 SVT 自己管理配置空间的

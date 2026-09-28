@@ -466,6 +466,9 @@ class my_4rc_dut_test extends uvm_test;
     svt_backend_cfg.default_max_gen            = 4;
     svt_backend_cfg.enable_equalization        = 1'b1;
     svt_backend_cfg.eq_mode                    = 0; // 自动 EQ 策略
+    // 以下两个开关默认均为 0；只对 Gen4 链路生效。
+    svt_backend_cfg.direct_gen4_enable         = 1'b0; // Gen1 直达 Gen4
+    svt_backend_cfg.fast_link_training         = 1'b0; // 旧兼容别名，不必与 direct 同开
     svt_backend_cfg.enable_shadow_cfg_lookup   = 1'b0;
     svt_backend_cfg.enable_svt_monitor         = 1'b0;
     // target_app_enable=1 / target_auto_response=0 保持默认值；不要让
@@ -506,6 +509,82 @@ endfunction
 `run_phase` 和 §7 的检查函数应继续写在同一个 `my_4rc_dut_test` 类中；
 本文最后用 `endclass` 结束该类。
 
+#### Gen4 快速建链开关
+
+`pcie_svt_backend_cfg` 保留两个配置名以兼容已有用例，但它们控制的是同一
+Gen4 直达行为，不是必须同时开启的两项能力。新配置优先使用显式命名：
+
+```systemverilog
+svt_backend_cfg.direct_gen4_enable = 1'b1;
+svt_backend_cfg.fast_link_training = 1'b0; // 保持默认；旧用例设 1 仍有效
+```
+
+两者先按 OR 合成旧开关请求，随后结合每条链路最终的 EQ 策略：
+
+```text
+effective_direct_speedup = (effective_max_gen == 4) && effective_enable_eq &&
+                           (direct_gen4_enable || effective_fast_link_training ||
+                            effective_eq_mode_requested == 2)
+```
+
+其中 `direct_gen4_enable` 是全局显式开关，`fast_link_training` 也是全局开关，
+但可以通过 `pcie_svt_link_override_cfg.has_fast_link_training` 对单条链路覆盖。
+fast=0 不能否定全局 direct=1，且 fast 没有额外缩短 LTSSM 定时器的功能。
+默认值均为 `0` 且默认 mode=0，因此保留普通训练策略。只有在
+`enable_equalization=1` 时，backend 才会把该结果传给 SVT 的
+`enable_direct_speed_up_from_2_5g_to_16g`；如果设置 `enable_equalization=0`，
+backend 会强制清零该 SVT 参数。
+
+Gen4 的 EQ 策略必须区分：
+
+| 配置（enable_equalization=1） | 训练策略 |
+|---|---|
+| `eq_mode=0/1` | 保留 Full-EQ，是否直达由上述旧开关请求决定 |
+| `eq_mode=2` | 自动开启 Gen1→Gen4 直达，跳过 Gen3 EQ，**仍做 Gen4 EQ** |
+| `eq_mode=3` | No-EQ，是否直达仍由 direct/fast 请求决定 |
+
+R-2020.12 下，Gen4 No-EQ 必须把 `set_link_eq_attribute_values()` 的第三参
+设为 0；仅修改第一参枚举不生效。新版 backend 已补齐该映射。旧版
+`enable_equalization=1, eq_mode=3` 第三参仍为 3，需要更新代码并重新编译。
+使用 `eq_mode=2` 不需要另外打开直达开关，但不能期待它跳过最高速率 EQ。
+
+例如，Gen4 No-EQ 但仍使用 Gen1→Gen4 直达：
+
+```systemverilog
+svt_backend_cfg.enable_equalization = 1'b1;
+svt_backend_cfg.eq_mode             = 3;    // NO_EQUALIZATION_NEEDED
+svt_backend_cfg.direct_gen4_enable  = 1'b1;
+```
+
+Gen5 不使用这两个字段作为 `2.5→32 GT/s` 的 direct API；即使打开
+`fast_link_training`，`effective_direct_speedup` 对 Gen5 仍为 0。Gen5 的
+Gen1→Gen5 最高速率路径由 `eq_mode=0` 的自动策略或显式 `eq_mode=2`
+（`EQ_BYPASS_TO_HIGHEST_RATE`）控制，但这不是 No-EQ，DUT 必须支持相应的
+最高速率 bypass/EQ 行为。
+
+#### DUT 侧前置条件
+
+`fast_link_training` 只修改 SVT 发送端的训练策略，不能替 DUT 打开快速速率
+切换能力。使用真实 DUT 时，DUT 的 PCIe LTSSM/PHY 控制器至少需要支持：
+
+- 从 Gen1 直接接受并执行 Gen4 的速率切换，而不是只等待 Gen2/Gen3 中间阶段；
+- 识别速率切换期间的 EIOS/EIEOS/FTS，并完成新的 TX UI、RX CDR/PLL 锁定；
+- Gen4 下的 EQ 策略与 SVT 一致。若使用 `eq_mode=1`，需要完整 EQ；若使用
+  `eq_mode=3`，DUT 必须确实支持 No-EQ；
+- 速率切换后重新接收 TS1/TS2，并使 LTSSM 正常进入 `Recovery.RcvrCfg`、
+  `Recovery.Idle` 和 `L0`。
+
+通常这些能力配置在 DUT 的 PCIe PHY/PCS 控制器或 LTSSM 配置寄存器/仿真参数
+中，例如 Gen4 capability、direct-rate-change/fast-training 使能、EQ 模式和
+PLL/CDR 速率选择；具体字段取决于 DUT 厂商和 RTL 实现。它不是
+`disable_ext_bit_clock_mode`，也不是 100 MHz reference clock 的配置。
+
+如果 DUT 不支持这种非标准的 Gen1→Gen4 直达，常见结果是停在
+`Recovery.Speed`、等待 Gen3 相关训练、PLL/CDR 失锁，或者重新回到 Detect。
+此时应将 `direct_gen4_enable` 和 `fast_link_training` 都设为 `0`，并避免
+`eq_mode=2`；按 DUT 能力选 `eq_mode=0/1` 或 No-EQ 的 `3`，先使用
+标准的 Gen1→Gen3→Gen4 路径验证 DUT；不要通过放宽时钟容差掩盖该能力不匹配。
+
 关键约束（build 阶段 fatal，不静默降级）：
 
 - `vif_key` 必须与 HDL `update_if_variables` 发布的 key 逐字符一致；
@@ -520,6 +599,8 @@ endfunction
 pcie_svt_link_override_cfg ov =
   pcie_svt_link_override_cfg::type_id::create("ov");
 ov.has_max_gen = 1'b1;  ov.max_gen = 5;          // 让第 2 条链跑 Gen5
+ov.has_fast_link_training = 1'b1;
+ov.fast_link_training = 1'b0;                   // 关闭该链的旧 fast 请求，非全局 direct
 svt_backend_cfg.link_override["RC2_EP2"] = ov;    // key 是 link_id
 ```
 
