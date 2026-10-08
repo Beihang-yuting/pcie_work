@@ -390,11 +390,28 @@ pcie_svt_backend_cfg svt_cfg;
 svt_cfg = pcie_svt_backend_cfg::type_id::create("svt_cfg");
 svt_cfg.default_max_gen       = 4;
 svt_cfg.enable_equalization   = 1'b1;
-svt_cfg.direct_gen4_enable    = 1'b1; // Gen4：允许 Gen1 直接加速到 Gen4
+svt_cfg.direct_gen4_enable    = 1'b0; // 对齐 DUT：Gen1 -> Gen3 -> Gen4
 svt_cfg.fast_link_training    = 1'b0; // 旧别名，与 direct 取 OR，不必同时开
-svt_cfg.eq_mode               = 1;    // 1=Full, 2=Partial(Phase0/1), 3=No-EQ, 0=自动
+svt_cfg.eq_mode               = 2;    // Partial：只做 Phase 0/1
+svt_cfg.lf_value              = '{32{6'd9}};  // 8 GT/s Phase1
+svt_cfg.fs_value              = '{32{6'd24}};
+svt_cfg.preset_to_coefficients_mapping_table[0] = 18'h00543;
+svt_cfg.downstream_lanes_recovery_eq_phase1_timeout_ns = 500_000;
+svt_cfg.enable_equalization_verification_mode = 1'b0;
+svt_cfg.enable_equalization_coefficients_checks = 1'b1;
+svt_cfg.received_tlp_interface_mode = 1; // good TLP only
+svt_cfg.pcie_spec_version = 5; // Gen5-capable Device；目标速率仍由 default_max_gen 决定
+svt_cfg.remote_max_payload_size = 4096;
+svt_cfg.remote_extended_tag_field_enabled = 1'b1;
+svt_cfg.driver_max_payload_size_in_bytes = 128;
+svt_cfg.target_max_payload_size_in_bytes = 128;
+svt_cfg.target_max_read_cpl_data_size_in_bytes = 128;
+svt_cfg.target_min_mem_cpl_latency_ns = 0;
+svt_cfg.target_max_mem_cpl_latency_ns = 0;
+svt_cfg.target_force_split_cpl_delay_to_0 = 1'b1;
 svt_cfg.enable_transaction_log = 1'b1;
-svt_cfg.transaction_log_filename = "pcie_xact.log";
+svt_cfg.transaction_log_filename_by_link["RC0_EP0"] = "trans_rc0.log";
+svt_cfg.symbol_log_filename_by_link["RC0_EP0"] = "symbol_rc0.log";
 uvm_config_db#(pcie_svt_backend_cfg)::set(
   this, "env", "pcie_svt_backend_cfg", svt_cfg);
 ```
@@ -410,6 +427,30 @@ uvm_config_db#(pcie_svt_backend_cfg)::set(
 `pcie_cfg.tl_cfg.completion_timeout_ns`、
 `pcie_cfg.tl_cfg.credit_starvation_timeout_ns`（RX/monitor 预算）以及
 `driver_cfg[0].completion_timeout_ns`（active Driver App 的真正 CTO）。
+
+EQ TS1 值按速率分表：无后缀 `lf_value/fs_value` 和
+`preset_to_coefficients_mapping_table` 只对 8 GT/s 生效；16 GT/s 使用
+`*_16g`，32 GT/s 使用 `*_32g`。默认保持 R-2020.12 的
+LF=24、FS=48、preset mapping=`18'h0c900`、downstream Phase1 timeout=24000 ns。
+上例中的 `9/24/00543/500000` 是一组 DUT 对齐配置，不会自动
+改写 16G 字段。`eq_mode=3` 不进入 Phase1，这些值在 No-EQ 模式下
+不参与训练；需要复现“只做 Phase0/1”的 DUT 时使用 `eq_mode=2`。
+
+`enable_equalization_verification_mode` 和
+`enable_equalization_coefficients_checks` 只打开 SVT checker；
+`received_tlp_interface_mode=1/2/3` 分别发布 good/error/all TLP。
+`remote_max_payload_size`/Extended Tag 是对端 capability 期望，Driver/Target
+payload 与 Completion latency 用于 L0 后的 transaction/app 行为，这些字段
+不改变 LTSSM 建链。4RC 日志应用 `*_filename_by_link[link_id]` 指定
+独立文件，避免四个 agent 同时写入一个全局文件名。
+
+`device_is_root`、`pcie_spec_ver`和链宽由拓扑角色、`default_max_gen`和
+`link_width`生成。`pcie_spec_version=0` 表示自动跟随 max Gen；显式设为
+5 时可以表达“PCIe 5.0 Device，但 `default_max_gen=4` 只训练到
+16 GT/s”。当前 backend 只支持 Serial，02.png 的
+`pipe_spec_ver=5.1` 对 Serial 训练无效，不应为了对齐截图而强行
+写入。Target App 配置会落到 SVT cfg，但当前 TL-owned bridge 会拦截
+内建 Target App 的自动 Completion。
 
 这两个 direct-speed-up 配置字段默认均为 `0`，只对 `effective_max_gen==4`
 生效；Gen5 不使用它们作为 `2.5→32 GT/s` 的 direct API。若

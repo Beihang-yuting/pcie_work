@@ -462,9 +462,11 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
       svt_pcie_device_configuration svt_cfg,
       output string errors[$]);
     int unsigned max_gen;
+    int unsigned selected_pcie_spec_version;
     bit fast_training;
     bit direct_speedup;
     bit selected_equalization;
+    bit phase1_enabled;
     pcie_svt_transport_e selected_transport;
     int unsigned selected_eq_mode;
     bit [31:0] supported_widths;
@@ -481,6 +483,8 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
     end
 
     void'(backend_cfg.get_link_max_gen(link, max_gen));
+    selected_pcie_spec_version = (backend_cfg.pcie_spec_version == 0) ?
+      max_gen : backend_cfg.pcie_spec_version;
     void'(backend_cfg.get_link_fast_training(link, fast_training));
     void'(backend_cfg.get_link_direct_speedup(link, direct_speedup));
     void'(backend_cfg.get_link_transport(link, selected_transport));
@@ -494,6 +498,12 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
     if (!((max_gen == 4) || (max_gen == 5))) begin
       errors.push_back($sformatf(
         "SVT link '%s' effective Gen%0d 必须为 4 或 5", link.link_id, max_gen));
+      return;
+    end
+    if (selected_pcie_spec_version < max_gen) begin
+      errors.push_back($sformatf(
+        "SVT link '%s' PCIe spec Gen%0d 不能低于目标 Gen%0d",
+        link.link_id, selected_pcie_spec_version, max_gen));
       return;
     end
     if (selected_transport != PCIE_SVT_TRANSPORT_SERIAL) begin
@@ -532,6 +542,11 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
         "SVT link '%s' has null pcie_cfg.pl_cfg", link.link_id));
       return;
     end
+    if (svt_cfg.pcie_cfg.dl_cfg == null) begin
+      errors.push_back($sformatf(
+        "SVT link '%s' has null pcie_cfg.dl_cfg", link.link_id));
+      return;
+    end
     if ((backend_cfg.backend_mode == PCIE_SVT_BACKEND_FULL_VIP) &&
         (svt_cfg.pcie_cfg.tl_cfg == null)) begin
       errors.push_back($sformatf(
@@ -542,7 +557,7 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
     // Unified VIF 默认 PCIe 3.0，不足以支撑下面的 Gen4/Gen5 速率广告。
     // 在应用 PL 速率策略前，先让 device 级 spec 版本与所选最大 Gen
     // 保持一致。
-    svt_cfg.pcie_spec_ver = (max_gen == 5) ?
+    svt_cfg.pcie_spec_ver = (selected_pcie_spec_version == 5) ?
       svt_pcie_device_configuration::PCIE_SPEC_VER_5_0 :
       svt_pcie_device_configuration::PCIE_SPEC_VER_4_0;
     // FULL_VIP 的 Device Agent 自身就是被模拟设备，不应再声明 RTL
@@ -604,13 +619,76 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
     svt_cfg.pcie_cfg.pl_cfg.set_link_eq_attribute_values(
       effective_eq_mode, direct_speedup, highest_enabled_eq_phase);
 
+    // EQ TS1 系数与 Phase 1 超时在 setter 之后统一落地，避免
+    // set_initial_values_via_unified_vif() 或 EQ 策略 setter 保留 VIP 默认值。
+    // 8G/16G/32G 使用独立表；不根据 max_gen 只写最高速率，因为
+    // 逐级训练的 Gen4/Gen5 链路仍会先后消费低速率表。
+    foreach (backend_cfg.lf_value[lane]) begin
+      svt_cfg.pcie_cfg.pl_cfg.lf_value[lane] = backend_cfg.lf_value[lane];
+      svt_cfg.pcie_cfg.pl_cfg.fs_value[lane] = backend_cfg.fs_value[lane];
+      svt_cfg.pcie_cfg.pl_cfg.lf_value_16g[lane] =
+        backend_cfg.lf_value_16g[lane];
+      svt_cfg.pcie_cfg.pl_cfg.fs_value_16g[lane] =
+        backend_cfg.fs_value_16g[lane];
+      svt_cfg.pcie_cfg.pl_cfg.lf_value_32g[lane] =
+        backend_cfg.lf_value_32g[lane];
+      svt_cfg.pcie_cfg.pl_cfg.fs_value_32g[lane] =
+        backend_cfg.fs_value_32g[lane];
+    end
+    foreach (backend_cfg.preset_to_coefficients_mapping_table[preset]) begin
+      svt_cfg.pcie_cfg.pl_cfg.preset_to_coefficients_mapping_table[preset] =
+        backend_cfg.preset_to_coefficients_mapping_table[preset];
+      svt_cfg.pcie_cfg.pl_cfg.preset_to_coefficients_mapping_table_16g[preset] =
+        backend_cfg.preset_to_coefficients_mapping_table_16g[preset];
+      svt_cfg.pcie_cfg.pl_cfg.preset_to_coefficients_mapping_table_32g[preset] =
+        backend_cfg.preset_to_coefficients_mapping_table_32g[preset];
+    end
+    svt_cfg.pcie_cfg.pl_cfg.downstream_lanes_recovery_eq_phase1_timeout_ns =
+      backend_cfg.downstream_lanes_recovery_eq_phase1_timeout_ns;
+    svt_cfg.pcie_cfg.pl_cfg.enable_equalization_verification_mode =
+      backend_cfg.enable_equalization_verification_mode;
+    svt_cfg.pcie_cfg.pl_cfg.enable_equalization_coefficients_checks =
+      backend_cfg.enable_equalization_coefficients_checks;
+    svt_cfg.pcie_cfg.dl_cfg.received_tlp_interface_mode =
+      backend_cfg.received_tlp_interface_mode;
+    if (svt_cfg.pcie_cfg.tl_cfg != null) begin
+      svt_cfg.pcie_cfg.tl_cfg.remote_max_payload_size =
+        backend_cfg.remote_max_payload_size;
+      svt_cfg.pcie_cfg.tl_cfg.remote_extended_tag_field_enabled =
+        backend_cfg.remote_extended_tag_field_enabled;
+    end
+    // mode=3/总开关关闭时仍保留配置值，便于同一 cfg 在不同链路复用；
+    // 但 LTSSM 不进入 Phase 1，因此日志必须明确标出这些值当前不被消费。
+    phase1_enabled = selected_equalization && (selected_eq_mode != 3) &&
+                     (highest_enabled_eq_phase >= 1);
+
     // 一次性记录三项真实 API 入参，避免把项目 mode 编号与 SVT 枚举混淆。
     // 明确标注 pre-hook：用户 customize_svt_agent_cfg 仍可在后面覆盖配置。
     `uvm_info("SVT_EQ_CFG", $sformatf(
-      "pre-hook link=%s gen=%0d enable_eq=%0b requested_eq=%0d effective_eq=%0d(%s) direct=%0b fast=%0b highest_eq_phase=%0d",
-      link.link_id, max_gen, selected_equalization, selected_eq_mode,
+      "pre-hook link=%s gen=%0d spec_gen=%0d enable_eq=%0b requested_eq=%0d effective_eq=%0d(%s) direct=%0b fast=%0b highest_eq_phase=%0d",
+      link.link_id, max_gen, selected_pcie_spec_version,
+      selected_equalization, selected_eq_mode,
       effective_eq_mode, effective_eq_mode.name(), direct_speedup,
       fast_training, highest_enabled_eq_phase), backend_cfg.svt_verbosity)
+    `uvm_info("SVT_EQ_TS1_CFG", $sformatf(
+      {"pre-hook link=%s phase1_enabled=%0b 8g(lf0=%0d fs0=%0d preset0=0x%05h) ",
+       "16g(lf0=%0d fs0=%0d preset0=0x%05h) phase1_timeout=%0d ns"},
+      link.link_id, phase1_enabled, backend_cfg.lf_value[0],
+      backend_cfg.fs_value[0],
+      backend_cfg.preset_to_coefficients_mapping_table[0],
+      backend_cfg.lf_value_16g[0], backend_cfg.fs_value_16g[0],
+      backend_cfg.preset_to_coefficients_mapping_table_16g[0],
+      backend_cfg.downstream_lanes_recovery_eq_phase1_timeout_ns),
+      backend_cfg.svt_verbosity)
+    `uvm_info("SVT_PROTOCOL_CFG", $sformatf(
+      {"pre-hook link=%s eq_verify=%0b coeff_check=%0b rx_tlp_mask=%0d ",
+       "remote_mps=%0d remote_ext_tag=%0b"},
+      link.link_id, backend_cfg.enable_equalization_verification_mode,
+      backend_cfg.enable_equalization_coefficients_checks,
+      backend_cfg.received_tlp_interface_mode,
+      backend_cfg.remote_max_payload_size,
+      backend_cfg.remote_extended_tag_field_enabled),
+      backend_cfg.svt_verbosity)
 
     // TL env 是唯一配置空间控制者时默认关闭 SVT shadow lookup，避免
     // 动态 BDF 没有 shadow entry 的 warning；需要 SVT 自己管理配置空间的
@@ -638,6 +716,29 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
       return;
     end
     svt_cfg.driver_cfg[0].completion_timeout_ns = selected_timeout_ns;
+    svt_cfg.driver_cfg[0].max_payload_size_in_bytes =
+      backend_cfg.driver_max_payload_size_in_bytes;
+
+    // Target App 在 Device Configuration 中必须存在，但当前 adapter
+    // 会通过 callback 拦截其自动 Completion，把请求交给 TL-owned
+    // bridge。仍然写入图 02 的公开字段，以便 checker 和后续独立
+    // SVT 模式读到一致配置；这些字段不会替 DUT EP 生成响应。
+    if (!svt_cfg.target_cfg.exists(0) || (svt_cfg.target_cfg[0] == null)) begin
+      errors.push_back($sformatf(
+        "SVT link '%s' 缺少 target_cfg[0]，无法应用 Target App 配置",
+        link.link_id));
+      return;
+    end
+    svt_cfg.target_cfg[0].max_payload_size_in_bytes =
+      backend_cfg.target_max_payload_size_in_bytes;
+    svt_cfg.target_cfg[0].max_read_cpl_data_size_in_bytes =
+      backend_cfg.target_max_read_cpl_data_size_in_bytes;
+    svt_cfg.target_cfg[0].min_mem_cpl_latency_ns =
+      backend_cfg.target_min_mem_cpl_latency_ns;
+    svt_cfg.target_cfg[0].max_mem_cpl_latency_ns =
+      backend_cfg.target_max_mem_cpl_latency_ns;
+    svt_cfg.target_cfg[0].force_split_cpl_delay_to_0 =
+      backend_cfg.target_force_split_cpl_delay_to_0;
 
     // SVT 日志字段属于 Device configuration 的公开 API；只在用户提供
     // 非空文件名时覆盖默认名字，保持旧的层次化日志命名行为。
@@ -650,10 +751,16 @@ class pcie_svt_backend extends pcie_tl_backend_provider;
     svt_cfg.pcie_cfg.enable_mbi_logging = backend_cfg.enable_mbi_log;
     svt_cfg.pcie_cfg.enable_flit_transaction_logging =
       backend_cfg.enable_flit_transaction_log;
-    if (backend_cfg.transaction_log_filename != "")
+    if (backend_cfg.transaction_log_filename_by_link.exists(link.link_id))
+      svt_cfg.pcie_cfg.transaction_log_filename =
+        backend_cfg.transaction_log_filename_by_link[link.link_id];
+    else if (backend_cfg.transaction_log_filename != "")
       svt_cfg.pcie_cfg.transaction_log_filename =
         backend_cfg.transaction_log_filename;
-    if (backend_cfg.symbol_log_filename != "")
+    if (backend_cfg.symbol_log_filename_by_link.exists(link.link_id))
+      svt_cfg.pcie_cfg.symbol_log_filename =
+        backend_cfg.symbol_log_filename_by_link[link.link_id];
+    else if (backend_cfg.symbol_log_filename != "")
       svt_cfg.pcie_cfg.symbol_log_filename = backend_cfg.symbol_log_filename;
     if (backend_cfg.pl_history_log_filename != "")
       svt_cfg.pcie_cfg.pl_history_log_filename =

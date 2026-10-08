@@ -561,6 +561,128 @@ svt_backend_cfg.fast_link_training  = 1'b0;
 若沿用旧版 `eq_mode=2` 的“直达 Gen4 且执行完整 EQ”，应改为
 `eq_mode=1, direct_gen4_enable=1`。该模式语义有意调整，升级时需要检查旧用例。
 
+#### 对齐 DUT 的 Phase 1 LF/FS 与 preset 配置
+
+`pcie_svt_backend_cfg` 可以直接配置 active SVT 在 EQ TS1 中广播的
+LF/FS 和 preset-to-coefficients 表。下例对应已验证 DUT 环境的
+8 GT/s 配置：
+
+```systemverilog
+svt_backend_cfg.enable_equalization = 1'b1;
+svt_backend_cfg.eq_mode             = 2;    // 只做 Phase 0/1
+svt_backend_cfg.direct_gen4_enable  = 1'b0; // Gen1 -> Gen3 -> Gen4
+svt_backend_cfg.fast_link_training  = 1'b0;
+
+svt_backend_cfg.preset_to_coefficients_mapping_table[0] = 18'h00543;
+svt_backend_cfg.lf_value = '{32{6'd9}};
+svt_backend_cfg.fs_value = '{32{6'd24}};
+svt_backend_cfg.downstream_lanes_recovery_eq_phase1_timeout_ns = 500_000;
+```
+
+四条 RC 使用同一 `svt_backend_cfg` 时，上述值会在 agent build 前应用到
+每条链路。`lf_value/fs_value` 和无后缀 preset 表只用于
+8 GT/s（Gen3）Phase 1；16 GT/s 使用独立字段：
+
+```systemverilog
+svt_backend_cfg.lf_value_16g = '{32{6'd24}};
+svt_backend_cfg.fs_value_16g = '{32{6'd48}};
+svt_backend_cfg.preset_to_coefficients_mapping_table_16g[0] = 18'h0c900;
+```
+
+上面是 R-2020.12 的 16G 默认值。只有 DUT 的 16G Phase 1 确实
+配置了其他 LF/FS/preset 值时才覆盖，不能把 8G 的
+`9/24/00543` 无条件复制到 `_16g`。Gen5 同理使用 `_32g`
+字段。各数组默认覆盖 32 lane，x4/x8/x16 只消费活动 lane。
+
+`eq_mode=3` 在 Gen4 下会把最高 phase 设为 0，因而不会进入
+Phase 1；此时即使设置 LF/FS/preset 和 Phase1 timeout，也不会参与
+训练。如果 DUT 的通过配置是“只做 Phase 0/1”，必须使用
+`eq_mode=2`，不能因原始 SVT 代码中出现
+`LINK_EQ_MODE_NO_EQUALIZATION_NEEDED` 就选择项目 `eq_mode=3`：对于最高
+速率为 Gen4 的 R-2020.12 配置，真正决定 EQ 阶段的是第三参
+`highest_enabled_equalization_phase`。
+
+配置差异的影响边界如下：
+
+- `eq_mode/direct` 与 DUT 不一致，可以在进入 EQ 前卡在
+  `Recovery.RcvrCfg`，或在 Phase 2/3 超时，直接导致不建链；
+- LF/FS 或 preset 与 DUT 的 Phase 1 规则不一致，可能导致 TS1
+  检查、系数合法性或后续 phase 不能完成；
+- DUT 反应超过 VIP 默认 24 us 时，Phase1 timeout 会导致回退；
+  放宽到 500 us 用于对齐已验证环境，不应用来掩盖始终没有
+  有效 TS1/TS2 的问题。
+
+#### 02.png 中的 checker、TLP 与 App 配置
+
+02.png 中可由当前 backend 消费的字段可直接写入同一
+`pcie_svt_backend_cfg`：
+
+```systemverilog
+int unsigned mps;
+
+mps = 0; // 0/1/2/3/4/5 -> 128/256/512/1024/2048/4096 bytes
+
+svt_backend_cfg.enable_equalization_verification_mode = 1'b0;
+svt_backend_cfg.enable_equalization_coefficients_checks = 1'b1;
+svt_backend_cfg.received_tlp_interface_mode = 1; // 只发布 good TLP
+
+// 只在需要复现“Gen5-capable Device 限速到 Gen4”时显式设置。
+svt_backend_cfg.default_max_gen = 4;
+svt_backend_cfg.pcie_spec_version = 5;
+
+svt_backend_cfg.remote_max_payload_size = 4096;
+svt_backend_cfg.remote_extended_tag_field_enabled = 1'b1;
+
+svt_backend_cfg.driver_max_payload_size_in_bytes = 128 << mps;
+svt_backend_cfg.target_max_payload_size_in_bytes = 128 << mps;
+svt_backend_cfg.target_max_read_cpl_data_size_in_bytes = 128;
+svt_backend_cfg.target_min_mem_cpl_latency_ns = 0; // 可改为 DUT 对照值，<=5
+svt_backend_cfg.target_max_mem_cpl_latency_ns = 0; // >=min 且 <=10
+svt_backend_cfg.target_force_split_cpl_delay_to_0 = 1'b1;
+
+svt_backend_cfg.enable_transaction_log = 1'b1;
+svt_backend_cfg.enable_symbol_log = 1'b1;
+svt_backend_cfg.transaction_log_filename_by_link["RC0_EP0"] = "trans_rc0.log";
+svt_backend_cfg.transaction_log_filename_by_link["RC1_EP1"] = "trans_rc1.log";
+svt_backend_cfg.transaction_log_filename_by_link["RC2_EP2"] = "trans_rc2.log";
+svt_backend_cfg.transaction_log_filename_by_link["RC3_EP3"] = "trans_rc3.log";
+svt_backend_cfg.symbol_log_filename_by_link["RC0_EP0"] = "symbol_rc0.log";
+svt_backend_cfg.symbol_log_filename_by_link["RC1_EP1"] = "symbol_rc1.log";
+svt_backend_cfg.symbol_log_filename_by_link["RC2_EP2"] = "symbol_rc2.log";
+svt_backend_cfg.symbol_log_filename_by_link["RC3_EP3"] = "symbol_rc3.log";
+```
+
+`target_max_read_cpl_data_size_in_bytes` 在 R-2020.12 中只允许
+64~128 bytes。02.png 的 `128 << mps` 只在 `mps=0` 时合法；当
+`mps>0` 时仍应保持为 128，不能和 Driver/Target max payload 一起左移。
+
+02.png 的其他字段由 backend 从拓扑自动生成：
+
+| 02.png 字段 | 当前集成方式 |
+|---|---|
+| `device_is_root=1` | `link.svt_role=PCIE_DEVICE_RC`自动生成，用户不重复设置 |
+| `pcie_spec_ver=5.0` | 默认跟随 `default_max_gen`；若 DUT 是 Gen5-capable 但本次只训练到 Gen4，可设 `pcie_spec_version=5, default_max_gen=4` |
+| `pipe_spec_ver=5.1` | 当前是 Serial backend，该 PIPE-only 字段不参与建链，不提供虚假映射 |
+| `set_link_width_values(16)` | 由 topology 中的 `link_width=16`生成；4RC 示例则每链 x8 |
+
+`enable_equalization_*checks`、`received_tlp_interface_mode`、日志开关和
+Driver/Target payload 不改变 Detect/Polling/Recovery LTSSM，单独差异不会
+导致物理层不建链。`remote_max_payload_size`/Extended Tag 不一致主要
+导致 L0 之后的 TLP 约束或 checker 问题。真正可在 L0 前阻断建链的
+仍然是速率/链宽、`eq_mode/direct`、LF/FS/preset、Phase1 timeout、
+lane 连接和时钟锁定。
+
+`pcie_spec_version=5` 但 `default_max_gen=4` 会保持目标速率为 16 GT/s，
+同时使用 PCIe 5.0 Device capability/No-EQ 语义。这是用来对照 02.png
+的显式选项，不应在 DUT 只支持 PCIe 4.0 时盲目打开。若 DUT 对
+No-EQ 相关 TS2 capability bit 有严格检查，PCIe 4.0/5.0 语义差异可能造成
+“原始 TS2 已译码，但 qualified TS2 计数不增加”，并卡在
+`Recovery.RcvrCfg`。
+
+当前 adapter 会拦截 SVT Target App 的自动 Completion，由 TL-owned bridge
+处理反向请求。因此 `target_*` 字段会正确写入 SVT cfg，但在本
+4RC + DUT EP 模式下不会替 DUT 生成 Completion，也不是建链条件。
+
 例如，Gen4 No-EQ 但仍使用 Gen1→Gen4 直达：
 
 ```systemverilog

@@ -240,6 +240,8 @@ class pcie_svt_backend_eq_cfg_test extends uvm_test;
                           svt_pcie_pl_configuration::link_eq_mode_enum mode,
                           bit direct, int unsigned highest_phase);
     svt_pcie_device_configuration device_cfg;
+    string expected_transaction_log_filename;
+    string expected_symbol_log_filename;
     string errors[$];
 
     device_cfg = svt_pcie_device_configuration::type_id::create(
@@ -258,6 +260,91 @@ class pcie_svt_backend_eq_cfg_test extends uvm_test;
         device_cfg.pcie_cfg.pl_cfg.enable_direct_speed_up_from_2_5g_to_16g,
         device_cfg.pcie_cfg.pl_cfg.highest_enabled_equalization_phase,
         mode, direct, highest_phase))
+    if ((cfg.pcie_spec_version == 5) &&
+        (device_cfg.pcie_spec_ver !=
+         svt_pcie_device_configuration::PCIE_SPEC_VER_5_0))
+      `uvm_fatal("SVT_EQ_TEST", $sformatf(
+        "case=%0d explicit PCIe 5.0 spec version was not propagated",
+        checked_cases))
+    foreach (cfg.lf_value[lane]) begin
+      if ((device_cfg.pcie_cfg.pl_cfg.lf_value[lane] != cfg.lf_value[lane]) ||
+          (device_cfg.pcie_cfg.pl_cfg.fs_value[lane] != cfg.fs_value[lane]) ||
+          (device_cfg.pcie_cfg.pl_cfg.lf_value_16g[lane] !=
+           cfg.lf_value_16g[lane]) ||
+          (device_cfg.pcie_cfg.pl_cfg.fs_value_16g[lane] !=
+           cfg.fs_value_16g[lane]) ||
+          (device_cfg.pcie_cfg.pl_cfg.lf_value_32g[lane] !=
+           cfg.lf_value_32g[lane]) ||
+          (device_cfg.pcie_cfg.pl_cfg.fs_value_32g[lane] !=
+           cfg.fs_value_32g[lane]))
+        `uvm_fatal("SVT_EQ_TEST", $sformatf(
+          "case=%0d lane=%0d EQ LF/FS propagation mismatch", checked_cases,
+          lane))
+    end
+    foreach (cfg.preset_to_coefficients_mapping_table[preset]) begin
+      if ((device_cfg.pcie_cfg.pl_cfg.preset_to_coefficients_mapping_table[preset] !=
+           cfg.preset_to_coefficients_mapping_table[preset]) ||
+          (device_cfg.pcie_cfg.pl_cfg.preset_to_coefficients_mapping_table_16g[preset] !=
+           cfg.preset_to_coefficients_mapping_table_16g[preset]) ||
+          (device_cfg.pcie_cfg.pl_cfg.preset_to_coefficients_mapping_table_32g[preset] !=
+           cfg.preset_to_coefficients_mapping_table_32g[preset]))
+        `uvm_fatal("SVT_EQ_TEST", $sformatf(
+          "case=%0d preset=%0d coefficient-table propagation mismatch",
+          checked_cases, preset))
+    end
+    if (device_cfg.pcie_cfg.pl_cfg.downstream_lanes_recovery_eq_phase1_timeout_ns !=
+        cfg.downstream_lanes_recovery_eq_phase1_timeout_ns)
+      `uvm_fatal("SVT_EQ_TEST", $sformatf(
+        "case=%0d downstream Phase1 timeout propagation mismatch",
+        checked_cases))
+    if ((device_cfg.pcie_cfg.pl_cfg.enable_equalization_verification_mode !=
+         cfg.enable_equalization_verification_mode) ||
+        (device_cfg.pcie_cfg.pl_cfg.enable_equalization_coefficients_checks !=
+         cfg.enable_equalization_coefficients_checks) ||
+        (device_cfg.pcie_cfg.dl_cfg.received_tlp_interface_mode !=
+         cfg.received_tlp_interface_mode) ||
+        (device_cfg.pcie_cfg.tl_cfg.remote_max_payload_size !=
+         cfg.remote_max_payload_size) ||
+        (device_cfg.pcie_cfg.tl_cfg.remote_extended_tag_field_enabled !=
+         cfg.remote_extended_tag_field_enabled))
+      `uvm_fatal("SVT_EQ_TEST", $sformatf(
+        "case=%0d checker/DL/remote capability propagation mismatch",
+        checked_cases))
+    if ((device_cfg.driver_cfg[0].max_payload_size_in_bytes !=
+         cfg.driver_max_payload_size_in_bytes) ||
+        (device_cfg.target_cfg[0].max_payload_size_in_bytes !=
+         cfg.target_max_payload_size_in_bytes) ||
+        (device_cfg.target_cfg[0].max_read_cpl_data_size_in_bytes !=
+         cfg.target_max_read_cpl_data_size_in_bytes) ||
+        (device_cfg.target_cfg[0].min_mem_cpl_latency_ns !=
+         cfg.target_min_mem_cpl_latency_ns) ||
+        (device_cfg.target_cfg[0].max_mem_cpl_latency_ns !=
+         cfg.target_max_mem_cpl_latency_ns) ||
+        (device_cfg.target_cfg[0].force_split_cpl_delay_to_0 !=
+         cfg.target_force_split_cpl_delay_to_0))
+      `uvm_fatal("SVT_EQ_TEST", $sformatf(
+        "case=%0d Driver/Target App propagation mismatch", checked_cases))
+    if ((device_cfg.pcie_cfg.enable_transaction_logging !=
+         cfg.enable_transaction_log) ||
+        (device_cfg.pcie_cfg.enable_symbol_logging != cfg.enable_symbol_log))
+      `uvm_fatal("SVT_EQ_TEST", $sformatf(
+        "case=%0d transaction/symbol log enable mismatch", checked_cases))
+    expected_transaction_log_filename = cfg.transaction_log_filename;
+    if (cfg.transaction_log_filename_by_link.exists(link.link_id))
+      expected_transaction_log_filename =
+        cfg.transaction_log_filename_by_link[link.link_id];
+    expected_symbol_log_filename = cfg.symbol_log_filename;
+    if (cfg.symbol_log_filename_by_link.exists(link.link_id))
+      expected_symbol_log_filename =
+        cfg.symbol_log_filename_by_link[link.link_id];
+    if (((expected_transaction_log_filename != "") &&
+         (device_cfg.pcie_cfg.transaction_log_filename !=
+          expected_transaction_log_filename)) ||
+        ((expected_symbol_log_filename != "") &&
+         (device_cfg.pcie_cfg.symbol_log_filename !=
+          expected_symbol_log_filename)))
+      `uvm_fatal("SVT_EQ_TEST", $sformatf(
+        "case=%0d per-link log filename propagation mismatch", checked_cases))
     checked_cases++;
   endfunction
 
@@ -336,6 +423,35 @@ class pcie_svt_backend_eq_cfg_test extends uvm_test;
     ov.has_max_gen = 1;
     ov.max_gen = 5;
     check_case(cfg, link, svt_pcie_pl_configuration::LINK_EQ_MODE_NO_EQUALIZATION_NEEDED, 0, 3);
+
+    // 复现 1.png 中的 Gen3 Phase1 参数，验证 public backend cfg 能逐项落到
+    // 真实 PL cfg；16G 字段故意保留默认值，证明无后缀 8G 配置不会串速率。
+    cfg.init_defaults();
+    link.max_gen = 4;
+    cfg.eq_mode = 2;
+    cfg.pcie_spec_version = 5;
+    cfg.lf_value = '{32{6'd9}};
+    cfg.fs_value = '{32{6'd24}};
+    cfg.preset_to_coefficients_mapping_table[0] = 18'h00543;
+    cfg.downstream_lanes_recovery_eq_phase1_timeout_ns = 500_000;
+    cfg.enable_equalization_verification_mode = 1'b0;
+    cfg.enable_equalization_coefficients_checks = 1'b1;
+    cfg.received_tlp_interface_mode = 1;
+    cfg.remote_max_payload_size = 4096;
+    cfg.remote_extended_tag_field_enabled = 1'b1;
+    cfg.driver_max_payload_size_in_bytes = 128;
+    cfg.target_max_payload_size_in_bytes = 128;
+    cfg.target_max_read_cpl_data_size_in_bytes = 128;
+    cfg.target_min_mem_cpl_latency_ns = 2;
+    cfg.target_max_mem_cpl_latency_ns = 5;
+    cfg.target_force_split_cpl_delay_to_0 = 1'b1;
+    cfg.enable_transaction_log = 1'b1;
+    cfg.enable_symbol_log = 1'b1;
+    cfg.transaction_log_filename_by_link[link.link_id] = "trans_rc0.log";
+    cfg.symbol_log_filename_by_link[link.link_id] = "symbol_rc0.log";
+    check_case(cfg, link,
+      svt_pcie_pl_configuration::LINK_EQ_MODE_FULL_EQUALIZATION_REQUIRED,
+      0, 1);
 
     `uvm_info("SVT_EQ_TEST", $sformatf(
       "SVT_EQ_CFG_MATRIX_PASS cases=%0d", checked_cases), UVM_NONE)

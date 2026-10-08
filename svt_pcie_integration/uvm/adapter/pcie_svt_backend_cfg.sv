@@ -75,6 +75,11 @@ class pcie_svt_backend_cfg extends uvm_object;
   pcie_svt_backend_mode_e backend_mode = PCIE_SVT_BACKEND_FULL_VIP;
 
   int unsigned default_max_gen = 4;
+  // 0 表示跟随每条链路的 effective max_gen；4/5 表示显式声明
+  // Device PCIe 协议版本。允许 spec=5 但最高速率仍为 Gen4，用于
+  // 对齐一些 Gen5-capable DUT 在 16 GT/s 下的 No-EQ capability/TS 语义。
+  // 不允许 spec 低于 max_gen，否则速率广告与 Device capability 矛盾。
+  int unsigned pcie_spec_version = 0;
   // Gen4 显式直达开关；fast_link_training 保留旧配置兼容，与本字段 OR。
   // 不需要同时置 1。fast 可按 link 覆盖，但不能用 0 否定全局 direct=1。
   bit direct_gen4_enable = 1'b0;
@@ -93,6 +98,59 @@ class pcie_svt_backend_cfg extends uvm_object;
   // validate 拒绝。应使用 enable_equalization/eq_mode；它也不是 SVT
   // API 的 direct-speed-up 参数（后者由 direct/fast 请求及总开关生成）。
   bit full_equalization_required = 1'b1;
+
+  // EQ TS1 广播值与 preset 映射表直接对应 R-2020.12 PL cfg。
+  // active SVT 在 Phase 1 中发送这些值；8G/16G/32G 必须分开，
+  // 因为无后缀字段只用于 8 GT/s，不会自动覆盖 16 GT/s。固定
+  // 数组保留 32 lane/16 preset 的逐项配置能力；x4/x8/x16 链路只消费
+  // 实际活动 lane。默认值与 VIP 原生值一致，升级 backend 不会改变
+  // 既有训练行为。
+  bit [5:0] lf_value[32] = '{32{6'd24}};
+  bit [5:0] fs_value[32] = '{32{6'd48}};
+  bit [17:0] preset_to_coefficients_mapping_table[16] =
+    '{16{18'h0c900}};
+  bit [5:0] lf_value_16g[32] = '{32{6'd24}};
+  bit [5:0] fs_value_16g[32] = '{32{6'd48}};
+  bit [17:0] preset_to_coefficients_mapping_table_16g[16] =
+    '{16{18'h0c900}};
+  bit [5:0] lf_value_32g[32] = '{32{6'd24}};
+  bit [5:0] fs_value_32g[32] = '{32{6'd48}};
+  bit [17:0] preset_to_coefficients_mapping_table_32g[16] =
+    '{16{18'h0c900}};
+
+  // Downstream Port 等待 Phase 1 完成的协议超时，单位 ns。该字段
+  // 与 link_timeout 不同：后者是整体建链/transaction 预算，不能
+  // 代替 Phase 1 内部超时。默认 24 us 与 R-2020.12 一致。
+  int unsigned downstream_lanes_recovery_eq_phase1_timeout_ns = 24_000;
+
+  // EQ checker 只影响 SVT 对训练序列/系数的校验与报告，不会
+  // 改变 DUT 或替代 eq_mode 的 LTSSM 阶段选择。两项默认关闭与
+  // R-2020.12 一致；开启 coefficients check 前必须同步配置对端
+  // LF/FS/preset 期望，否则可能只是 checker 报错而非建链本身失败。
+  bit enable_equalization_verification_mode = 1'b0;
+  bit enable_equalization_coefficients_checks = 1'b0;
+
+  // Data Link 接收 analysis port 的 TLP 过滤 mask：bit0/bit1 分别为
+  // good/error packet。默认 2'b11 发布全部 TLP；1.png/02.png 中的
+  // 数值 1 只发布 good packet。该字段不影响链路协议处理。
+  int unsigned received_tlp_interface_mode = 3;
+
+  // TL 层对端 capability 期望，用于发包约束与 monitor check。
+  // remote_max_payload_size 必须与 DUT 有效 MPS 一致，不是本端
+  // Driver 实际最大 payload。
+  int unsigned remote_max_payload_size = 128;
+  bit remote_extended_tag_field_enabled = 1'b0;
+
+  // Driver App 约束本端主动请求大小。Target App 字段描述内建
+  // Completion 分包与延迟；当前 TL-owned bridge 会拦截 Target App 的
+  // 自动响应，因此 Target 字段不改变 DUT EP 的 Completion，但仍需要
+  // 落到 SVT cfg 以便 checker/后续独立 SVT 模式复用。
+  int unsigned driver_max_payload_size_in_bytes = 4096;
+  int unsigned target_max_payload_size_in_bytes = 128;
+  int unsigned target_max_read_cpl_data_size_in_bytes = 128;
+  int unsigned target_min_mem_cpl_latency_ns = 0;
+  int unsigned target_max_mem_cpl_latency_ns = 0;
+  bit target_force_split_cpl_delay_to_0 = 1'b0;
 
   // --------------------------------------------------------------------------
   // SVT 配置空间与 Target App 策略。
@@ -125,6 +183,11 @@ class pcie_svt_backend_cfg extends uvm_object;
   string pl_history_log_filename = "";
   string flit_transaction_log_filename = "";
 
+  // 4RC 不能共用同一个可写日志文件。关联表以 link_id 为 key，
+  // 命中时覆盖全局文件名；未命中则沿用上述全局值或 VIP 默认值。
+  string transaction_log_filename_by_link[string];
+  string symbol_log_filename_by_link[string];
+
   // 链路级覆盖优先于本对象的全局值，再由用户 hook 做最后修改。
   pcie_svt_link_override_cfg link_override[string];
 
@@ -142,11 +205,33 @@ class pcie_svt_backend_cfg extends uvm_object;
     transport = PCIE_SVT_TRANSPORT_SERIAL;
     backend_mode = PCIE_SVT_BACKEND_FULL_VIP;
     default_max_gen = 4;
+    pcie_spec_version = 0;
     direct_gen4_enable = 1'b0;
     fast_link_training = 1'b0;
     enable_equalization = 1'b1;
     eq_mode = 0;
     full_equalization_required = 1'b1;
+    lf_value = '{32{6'd24}};
+    fs_value = '{32{6'd48}};
+    preset_to_coefficients_mapping_table = '{16{18'h0c900}};
+    lf_value_16g = '{32{6'd24}};
+    fs_value_16g = '{32{6'd48}};
+    preset_to_coefficients_mapping_table_16g = '{16{18'h0c900}};
+    lf_value_32g = '{32{6'd24}};
+    fs_value_32g = '{32{6'd48}};
+    preset_to_coefficients_mapping_table_32g = '{16{18'h0c900}};
+    downstream_lanes_recovery_eq_phase1_timeout_ns = 24_000;
+    enable_equalization_verification_mode = 1'b0;
+    enable_equalization_coefficients_checks = 1'b0;
+    received_tlp_interface_mode = 3;
+    remote_max_payload_size = 128;
+    remote_extended_tag_field_enabled = 1'b0;
+    driver_max_payload_size_in_bytes = 4096;
+    target_max_payload_size_in_bytes = 128;
+    target_max_read_cpl_data_size_in_bytes = 128;
+    target_min_mem_cpl_latency_ns = 0;
+    target_max_mem_cpl_latency_ns = 0;
+    target_force_split_cpl_delay_to_0 = 1'b0;
     enable_shadow_cfg_lookup = 1'b0;
     enable_multi_endpoint_mode = 1'b0;
     target_app_enable = 1'b1;
@@ -167,6 +252,8 @@ class pcie_svt_backend_cfg extends uvm_object;
     symbol_log_filename = "";
     pl_history_log_filename = "";
     flit_transaction_log_filename = "";
+    transaction_log_filename_by_link.delete();
+    symbol_log_filename_by_link.delete();
     link_override.delete();
   endfunction
 
@@ -281,8 +368,59 @@ class pcie_svt_backend_cfg extends uvm_object;
       errors.push_back("SVT backend_mode 必须为 FULL_VIP 或 MAPPER_APP");
     if (!((default_max_gen == 4) || (default_max_gen == 5)))
       errors.push_back("SVT default_max_gen 必须为 Gen4 或 Gen5");
+    if (!((pcie_spec_version == 0) || (pcie_spec_version == 4) ||
+          (pcie_spec_version == 5)))
+      errors.push_back("SVT pcie_spec_version 必须为 0(auto)/4/5");
+    if ((pcie_spec_version != 0) &&
+        (pcie_spec_version < default_max_gen))
+      errors.push_back(
+        "SVT pcie_spec_version 不能低于 default_max_gen");
     if (eq_mode > 3)
       errors.push_back("SVT eq_mode 必须为 0~3");
+    if (downstream_lanes_recovery_eq_phase1_timeout_ns == 0)
+      errors.push_back(
+        "SVT downstream_lanes_recovery_eq_phase1_timeout_ns 必须大于 0");
+    if (!((received_tlp_interface_mode == 1) ||
+          (received_tlp_interface_mode == 2) ||
+          (received_tlp_interface_mode == 3)))
+      errors.push_back(
+        "SVT received_tlp_interface_mode 必须是 1(good)/2(error)/3(all)");
+    if (!(remote_max_payload_size inside
+          {128, 256, 512, 1024, 2048, 4096}))
+      errors.push_back("SVT remote_max_payload_size 必须是 128~4096 的标准 MPS");
+    if (!(driver_max_payload_size_in_bytes inside
+          {128, 256, 512, 1024, 2048, 4096}))
+      errors.push_back(
+        "SVT driver_max_payload_size_in_bytes 必须是 128~4096 的标准 MPS");
+    if (!(target_max_payload_size_in_bytes inside
+          {128, 256, 512, 1024, 2048, 4096}))
+      errors.push_back(
+        "SVT target_max_payload_size_in_bytes 必须是 128~4096 的标准 MPS");
+    if (!(target_max_read_cpl_data_size_in_bytes inside {[64:128]}))
+      errors.push_back(
+        "SVT target_max_read_cpl_data_size_in_bytes 必须在 64~128 bytes");
+    if (target_max_read_cpl_data_size_in_bytes >
+        target_max_payload_size_in_bytes)
+      errors.push_back(
+        "SVT target max read Completion 不能大于 target max payload");
+    if (target_min_mem_cpl_latency_ns > 5)
+      errors.push_back("SVT target_min_mem_cpl_latency_ns 不能大于 5 ns");
+    if (target_max_mem_cpl_latency_ns > 10)
+      errors.push_back("SVT target_max_mem_cpl_latency_ns 不能大于 10 ns");
+    if (target_max_mem_cpl_latency_ns < target_min_mem_cpl_latency_ns)
+      errors.push_back(
+        "SVT target_max_mem_cpl_latency_ns 不能小于 min latency");
+    foreach (transaction_log_filename_by_link[link_id]) begin
+      if ((link_id == "") ||
+          (transaction_log_filename_by_link[link_id] == ""))
+        errors.push_back(
+          "SVT transaction_log_filename_by_link 不允许空 key/value");
+    end
+    foreach (symbol_log_filename_by_link[link_id]) begin
+      if ((link_id == "") || (symbol_log_filename_by_link[link_id] == ""))
+        errors.push_back(
+          "SVT symbol_log_filename_by_link 不允许空 key/value");
+    end
 
     // 当前 TL-root backend 始终创建 active Device Agent，并把 Target App
     // 的请求交给 pcie_tl_env 统一处理。R-2020.12 没有一个名为
@@ -386,11 +524,44 @@ class pcie_svt_backend_cfg extends uvm_object;
     transport = source.transport;
     backend_mode = source.backend_mode;
     default_max_gen = source.default_max_gen;
+    pcie_spec_version = source.pcie_spec_version;
     direct_gen4_enable = source.direct_gen4_enable;
     fast_link_training = source.fast_link_training;
     enable_equalization = source.enable_equalization;
     eq_mode = source.eq_mode;
     full_equalization_required = source.full_equalization_required;
+    lf_value = source.lf_value;
+    fs_value = source.fs_value;
+    preset_to_coefficients_mapping_table =
+      source.preset_to_coefficients_mapping_table;
+    lf_value_16g = source.lf_value_16g;
+    fs_value_16g = source.fs_value_16g;
+    preset_to_coefficients_mapping_table_16g =
+      source.preset_to_coefficients_mapping_table_16g;
+    lf_value_32g = source.lf_value_32g;
+    fs_value_32g = source.fs_value_32g;
+    preset_to_coefficients_mapping_table_32g =
+      source.preset_to_coefficients_mapping_table_32g;
+    downstream_lanes_recovery_eq_phase1_timeout_ns =
+      source.downstream_lanes_recovery_eq_phase1_timeout_ns;
+    enable_equalization_verification_mode =
+      source.enable_equalization_verification_mode;
+    enable_equalization_coefficients_checks =
+      source.enable_equalization_coefficients_checks;
+    received_tlp_interface_mode = source.received_tlp_interface_mode;
+    remote_max_payload_size = source.remote_max_payload_size;
+    remote_extended_tag_field_enabled =
+      source.remote_extended_tag_field_enabled;
+    driver_max_payload_size_in_bytes =
+      source.driver_max_payload_size_in_bytes;
+    target_max_payload_size_in_bytes =
+      source.target_max_payload_size_in_bytes;
+    target_max_read_cpl_data_size_in_bytes =
+      source.target_max_read_cpl_data_size_in_bytes;
+    target_min_mem_cpl_latency_ns = source.target_min_mem_cpl_latency_ns;
+    target_max_mem_cpl_latency_ns = source.target_max_mem_cpl_latency_ns;
+    target_force_split_cpl_delay_to_0 =
+      source.target_force_split_cpl_delay_to_0;
     enable_shadow_cfg_lookup = source.enable_shadow_cfg_lookup;
     enable_multi_endpoint_mode = source.enable_multi_endpoint_mode;
     target_app_enable = source.target_app_enable;
@@ -411,6 +582,14 @@ class pcie_svt_backend_cfg extends uvm_object;
     symbol_log_filename = source.symbol_log_filename;
     pl_history_log_filename = source.pl_history_log_filename;
     flit_transaction_log_filename = source.flit_transaction_log_filename;
+    transaction_log_filename_by_link.delete();
+    foreach (source.transaction_log_filename_by_link[link_id])
+      transaction_log_filename_by_link[link_id] =
+        source.transaction_log_filename_by_link[link_id];
+    symbol_log_filename_by_link.delete();
+    foreach (source.symbol_log_filename_by_link[link_id])
+      symbol_log_filename_by_link[link_id] =
+        source.symbol_log_filename_by_link[link_id];
 
     link_override.delete();
     foreach (source.link_override[link_id]) begin
