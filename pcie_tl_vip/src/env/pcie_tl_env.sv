@@ -1,5 +1,8 @@
 //-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - Top-level Environment
+// src/env：组织公共 PCIe TL agent、共享管理器、内存与检查组件的顶层环境。
+// 依赖 env_config/backend provider 和公共 adapter；env 拥有本地组件，外部 provider
+// 与注入 memory 的所有权由创建方保留。build 建对象、connect 接观察流、run 驱动响应。
+// bridge 与 TLM loopback 互斥；SCB 的发送预登记及单侧观察补足在 connect 集中处理。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_env extends uvm_env;
@@ -915,6 +918,7 @@ class pcie_tl_env extends uvm_env;
     //=========================================================================
     // Connect Phase
     //=========================================================================
+    // 注入共享依赖并连接每个 root 的接收观察流，最后补 bridge 发送预登记与单侧观察。
     function void connect_phase(uvm_phase phase);
         super.connect_phase(phase);
 
@@ -1310,6 +1314,92 @@ class pcie_tl_env extends uvm_env;
                             ep_agent.ep_driver.mem = dm;
                     end
                 end
+            end
+        end
+        connect_bridge_scoreboard_tx();
+    endfunction
+
+    // 返回 EP 实际接入的 SCB 索引，严格沿用 connect_phase 的直连 pair/标量及
+    // switch DSP owner 规则。负值表示无有效映射，由调用者跳过未创建的 SCB。
+    protected function int bridge_ep_scoreboard_index(int ep_index);
+        int	owner;
+
+        if (cfg.switch_enable) begin
+            if ((cfg.switch_cfg == null) || (ep_index < 0) ||
+                (ep_index >= cfg.switch_cfg.num_ds_ports))
+                return -1;
+            owner = cfg.switch_cfg.dsp_owner[ep_index];
+            return configured_ep_root_index(ep_index, owner);
+        end
+        return (ep_index < scbs.size()) ? ep_index : 0;
+    endfunction
+
+    // bridge 不经过 loopback，故本地发送必须在送入 adapter 前建立 pending。
+    // 完整双 BFM 仅用接收 monitor 计数；没有对端 monitor 的单侧环境才以 TX
+    // 补足对端观察流，包含 posted 数据及本地 responder 发出的 Completion。
+    // 这里只判断每个 root 的观察完整性：同一 switch root 混合有/无 monitor EP
+    // 时，按 TLP 路由选择观察点需要额外路由信息，不属于本次单侧/完整 root 支持范围。
+    // TLM 不调用新增观察路径；SCB 关闭或稀疏 agent 槽位为空时安全跳过。
+    protected function void connect_bridge_scoreboard_tx();
+        bit	rc_observed[];
+        bit	ep_observed[];
+
+        if (!bridge_required || (scbs.size() == 0))
+            return;
+        rc_observed = new[scbs.size()];
+        ep_observed = new[scbs.size()];
+
+        foreach (rc_agents[r]) begin
+            if ((r < scbs.size()) && (rc_agents[r] != null) &&
+                (rc_agents[r].monitor != null))
+                rc_observed[r] = 1'b1;
+        end
+        foreach (ep_agents[i]) begin
+            int	owner;
+
+            owner = bridge_ep_scoreboard_index(i);
+            if ((owner >= 0) && (owner < scbs.size()) &&
+                (ep_agents[i] != null) && (ep_agents[i].monitor != null))
+                ep_observed[owner] = 1'b1;
+        end
+        // 标量 EP 仅在没有直连 EP 数组，或旧 switch 标量入口存在时单独接入。
+        // 若它只是数组元素的别名，后面的对象比较会阻止 TX 重复连接。
+        if ((ep_agent != null) && (ep_agent.monitor != null) &&
+            (cfg.switch_enable || (ep_agents.size() == 0)))
+            ep_observed[0] = 1'b1;
+
+        foreach (rc_agents[r]) begin
+            if ((r >= scbs.size()) || (scbs[r] == null) ||
+                (rc_agents[r] == null) || (rc_agents[r].rc_driver == null))
+                continue;
+            rc_agents[r].rc_driver.tx_ap.connect(scbs[r].pending_imp);
+            if (!ep_observed[r])
+                rc_agents[r].rc_driver.tx_ap.connect(scbs[r].ep_imp);
+        end
+        foreach (ep_agents[i]) begin
+            int	owner;
+
+            owner = bridge_ep_scoreboard_index(i);
+            if ((owner < 0) || (owner >= scbs.size()) || (scbs[owner] == null) ||
+                (ep_agents[i] == null) || (ep_agents[i].ep_driver == null))
+                continue;
+            ep_agents[i].ep_driver.tx_ap.connect(scbs[owner].pending_imp);
+            if (!rc_observed[owner])
+                ep_agents[i].ep_driver.tx_ap.connect(scbs[owner].rc_imp);
+        end
+        if ((ep_agent != null) && (ep_agent.ep_driver != null) &&
+            (scbs[0] != null) && (cfg.switch_enable || (ep_agents.size() == 0))) begin
+            bit	array_alias;
+
+            array_alias = 1'b0;
+            foreach (ep_agents[i]) begin
+                if (ep_agents[i] == ep_agent)
+                    array_alias = 1'b1;
+            end
+            if (!array_alias) begin
+                ep_agent.ep_driver.tx_ap.connect(scbs[0].pending_imp);
+                if (!rc_observed[0])
+                    ep_agent.ep_driver.tx_ap.connect(scbs[0].rc_imp);
             end
         end
     endfunction
@@ -1970,6 +2060,8 @@ class pcie_tl_env extends uvm_env;
         // Scoreboard (per-root)
         foreach (scbs[r]) begin
             if (scbs[r] == null) continue;
+            // TLM EP 请求由 loopback 在转发前登记；bridge 则允许仅有 EP 的 RX 登记。
+            scbs[r].ep_rx_pending_enable    = bridge_required;
             scbs[r].ordering_check_enable   = cfg.ordering_check_enable;
             scbs[r].completion_check_enable = cfg.completion_check_enable;
             scbs[r].data_integrity_enable   = cfg.data_integrity_enable;

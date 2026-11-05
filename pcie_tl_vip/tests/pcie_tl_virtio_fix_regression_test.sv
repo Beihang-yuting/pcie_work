@@ -1,3 +1,6 @@
+// tests：公共 driver/monitor/SCB 的缺陷回归与 bridge pending 定向验证。
+// 依赖 pcie_tl_pkg、公共 base_test 与 UVM；各 test 拥有 probe 组件，临时请求归测试，
+// SCB 保存独立快照。负向旧回归用 catcher 限定预期错误，新 bridge 单元测试不屏蔽报告。
 import uvm_pkg::*;
 import pcie_tl_pkg::*;
 `include "uvm_macros.svh"
@@ -349,6 +352,7 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
         tag_mgr.free_tag(reused_tag, 0);
     endfunction
 
+    // 验证未声明的 UR 作为失败终止，并释放该 Requester/Tag 对应的状态。
     function void check_scoreboard_error_completion();
         pcie_tl_mem_tlp req;
         pcie_tl_cpl_tlp cpl;
@@ -374,8 +378,8 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
             `uvm_error("FIX_SCB_STATUS", $sformatf(
                 "MRd->UR accounting matched=%0d mismatched=%0d expected=0/1",
                 scb_probe.matched, scb_probe.mismatched))
-        if (scb_probe.pending_requests.exists(req.tag) ||
-            scb_probe.cpl_trackers.exists(req.tag))
+        if (scb_probe.pending_requests.exists(scb_probe.request_key(req)) ||
+            scb_probe.cpl_trackers.exists(scb_probe.request_key(req)))
             `uvm_error("FIX_SCB_STATUS",
                        "MRd->UR did not terminate scoreboard tracking")
 
@@ -384,6 +388,7 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
         scb_probe.mismatched = 0;
     endfunction
 
+    // 验证读请求收到成功无数据响应时报告错误，并释放复合键跟踪项。
     function void check_scoreboard_missing_read_data();
         pcie_tl_mem_tlp req;
         pcie_tl_cpl_tlp cpl;
@@ -409,8 +414,8 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
             `uvm_error("FIX_SCB_NODATA", $sformatf(
                 "MRd->no-data-SC accounting matched=%0d mismatched=%0d expected=0/1",
                 scb_probe.matched, scb_probe.mismatched))
-        if (scb_probe.pending_requests.exists(req.tag) ||
-            scb_probe.cpl_trackers.exists(req.tag))
+        if (scb_probe.pending_requests.exists(scb_probe.request_key(req)) ||
+            scb_probe.cpl_trackers.exists(scb_probe.request_key(req)))
             `uvm_error("FIX_SCB_NODATA",
                        "MRd->no-data-SC did not terminate scoreboard tracking")
 
@@ -418,6 +423,7 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
         scb_probe.mismatched = 0;
     endfunction
 
+    // 验证配置写的合法无数据响应成功终止，并释放复合键跟踪项。
     function void check_scoreboard_no_data_write_completion();
         pcie_tl_cfg_tlp req;
         pcie_tl_cpl_tlp cpl;
@@ -442,14 +448,15 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
             `uvm_error("FIX_SCB_NODATA", $sformatf(
                 "CfgWr->no-data-SC accounting matched=%0d mismatched=%0d expected=1/0",
                 scb_probe.matched, scb_probe.mismatched))
-        if (scb_probe.pending_requests.exists(req.tag) ||
-            scb_probe.cpl_trackers.exists(req.tag))
+        if (scb_probe.pending_requests.exists(scb_probe.request_key(req)) ||
+            scb_probe.cpl_trackers.exists(scb_probe.request_key(req)))
             `uvm_error("FIX_SCB_NODATA",
                        "CfgWr->no-data-SC did not terminate scoreboard tracking")
 
         scb_probe.matched = 0;
     endfunction
 
+    // 验证请求显式声明的 CA 被视为预期终止，并释放复合键跟踪项。
     function void check_scoreboard_expected_error_completion();
         pcie_tl_mem_tlp req;
         pcie_tl_cpl_tlp cpl;
@@ -476,8 +483,8 @@ class pcie_tl_virtio_fix_unit_test extends pcie_tl_base_test;
             `uvm_error("FIX_SCB_EXPECTED", $sformatf(
                 "expected MRd->CA accounting matched=%0d mismatched=%0d expected=1/0",
                 scb_probe.matched, scb_probe.mismatched))
-        if (scb_probe.pending_requests.exists(req.tag) ||
-            scb_probe.cpl_trackers.exists(req.tag))
+        if (scb_probe.pending_requests.exists(scb_probe.request_key(req)) ||
+            scb_probe.cpl_trackers.exists(scb_probe.request_key(req)))
             `uvm_error("FIX_SCB_EXPECTED",
                        "expected MRd->CA did not terminate scoreboard tracking")
 
@@ -618,6 +625,168 @@ class pcie_tl_virtio_fix_order_test extends pcie_tl_base_test;
         if (probe.ordering_failures != 0)
             `uvm_error("FIX_ORDER",
                        "endpoint ingress handled read before preceding posted write")
+        phase.drop_objection(this);
+    endtask
+endclass
+
+// 独立于业务 env 的 SCB 定向测试：精确控制 TX/RX 两次观察和双 requester 分片交错，
+// 防止端到端分配池恰好给出不同 Tag 而掩盖碰撞。无需新 filelist，沿用本文件编译入口。
+class pcie_tl_bridge_scoreboard_unit_test extends uvm_test;
+    `uvm_component_utils(pcie_tl_bridge_scoreboard_unit_test)
+
+    pcie_tl_scoreboard	scb;
+
+    // 构造测试；所有组件交由 UVM 管理生命周期。
+    function new(string name = "pcie_tl_bridge_scoreboard_unit_test",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    // 仅创建待测 SCB，避免额外 env 流量干扰精确统计断言。
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        scb = pcie_tl_scoreboard::type_id::create("scb", this);
+    endfunction
+
+    // 构造完整 DWORD 有效的读请求；测试只传入 1..4 DWORD，不涉及边界随机化。
+    function pcie_tl_mem_tlp make_read(bit [15:0] requester,
+                                      bit [9:0] tag,
+                                      bit [63:0] address,
+                                      int dwords);
+        pcie_tl_mem_tlp	req;
+
+        req = pcie_tl_mem_tlp::type_id::create("bridge_read");
+        req.kind         = TLP_MEM_RD;
+        req.fmt          = FMT_3DW_NO_DATA;
+        req.requester_id = requester;
+        req.tag          = tag;
+        req.addr         = address;
+        req.length       = dwords;
+        req.first_be     = 4'hf;
+        req.last_be      = (dwords == 1) ? 4'h0 : 4'hf;
+        return req;
+    endfunction
+
+    // 按原请求及已消耗跨度构造一片 CplD；bytes 必须为正的 DWORD 整数倍。
+    // payload 置零，本测试关注身份和分片生命周期，不建立已知写入数据。
+    function pcie_tl_cpl_tlp make_split(pcie_tl_mem_tlp req,
+                                       int offset, int bytes);
+        pcie_tl_cpl_tlp	cpl;
+
+        cpl = pcie_tl_cpl_tlp::type_id::create("bridge_split");
+        cpl.kind         = TLP_CPLD;
+        cpl.fmt          = FMT_3DW_WITH_DATA;
+        cpl.cpl_status   = CPL_STATUS_SC;
+        cpl.requester_id = req.requester_id;
+        cpl.tag          = req.tag;
+        cpl.length       = bytes / 4;
+        cpl.byte_count   = req.length * 4 - offset;
+        cpl.lower_addr   = (req.addr + offset) & 7'h7f;
+        cpl.payload      = new[bytes];
+        return cpl;
+    endfunction
+
+    // 首次 TX 登记后同时修改原对象并接收缺少期望元数据的副本。
+    // SCB 必须保留首次 CA 契约和原地址，且 TX 预登记不能增加请求统计。
+    function void check_snapshot_metadata();
+        pcie_tl_mem_tlp	req;
+        pcie_tl_mem_tlp	received;
+        pcie_tl_mem_tlp	snapshot;
+        pcie_tl_cpl_tlp	cpl;
+        pcie_tl_scoreboard::request_key_t	key;
+
+        req = make_read(16'h0120, 10'h2a, 64'h9000, 1);
+        req.expected_cpl_status = CPL_STATUS_CA;
+        key = scb.request_key(req);
+        scb.pending_imp.write(req);
+        if ((scb.total_requests != 0) || (scb.pending_requests.size() != 1))
+            `uvm_error("BRIDGE_SCB_PENDING", "TX registration changed request count")
+        if (!$cast(received, req.clone()))
+            `uvm_fatal("BRIDGE_SCB_CLONE", "cannot clone receiver request")
+        received.expected_cpl_status = CPL_STATUS_SC;
+        req.expected_cpl_status      = CPL_STATUS_SC;
+        req.addr                     = 64'hdead0000;
+        req.length                   = 4;
+        scb.write_ep(received);
+        if (!$cast(snapshot, scb.pending_requests[key]))
+            `uvm_fatal("BRIDGE_SCB_SNAPSHOT", "snapshot lost Memory TLP subtype")
+        if ((snapshot == req) || (snapshot == received) ||
+            (snapshot.expected_cpl_status != CPL_STATUS_CA) ||
+            (snapshot.addr != 64'h9000) || (snapshot.length != 1))
+            `uvm_error("BRIDGE_SCB_SNAPSHOT", "first-observation metadata was overwritten")
+
+        cpl = pcie_tl_cpl_tlp::type_id::create("expected_ca");
+        cpl.kind         = TLP_CPL;
+        cpl.fmt          = FMT_3DW_NO_DATA;
+        cpl.cpl_status   = CPL_STATUS_CA;
+        cpl.requester_id = received.requester_id;
+        cpl.tag          = received.tag;
+        scb.write_rc(cpl);
+        if ((scb.matched != 1) || (scb.mismatched != 0) ||
+            (scb.pending_requests.size() != 0) || (scb.cpl_trackers.size() != 0))
+            `uvm_error("BRIDGE_SCB_METADATA", "expected error did not close original contract")
+    endfunction
+
+    // 两个 Requester 共用 Tag，先交错收到首片，再逐笔结束；每次检查另一笔仍存活。
+    // 最后重用已释放的 Requester/Tag，验证快照释放不会阻止合法的新事务。
+    function void check_requester_splits();
+        pcie_tl_mem_tlp	rc_req;
+        pcie_tl_mem_tlp	ep_req;
+        pcie_tl_mem_tlp	rc_received;
+        pcie_tl_mem_tlp	ep_received;
+        pcie_tl_cpl_tlp	cpl;
+        pcie_tl_scoreboard::request_key_t	rc_key;
+        pcie_tl_scoreboard::request_key_t	ep_key;
+
+        rc_req = make_read(16'h0100, 10'h33, 64'ha000, 4);
+        ep_req = make_read(16'h0200, 10'h33, 64'ha020, 3);
+        rc_key = scb.request_key(rc_req);
+        ep_key = scb.request_key(ep_req);
+        scb.pending_imp.write(rc_req);
+        scb.pending_imp.write(ep_req);
+        if ((scb.pending_requests.size() != 2) || (scb.total_requests != 1))
+            `uvm_error("BRIDGE_SCB_KEY", "same Tag requests collided or TX counted twice")
+        if (!$cast(rc_received, rc_req.clone()) || !$cast(ep_received, ep_req.clone()))
+            `uvm_fatal("BRIDGE_SCB_CLONE", "cannot clone split requests")
+        scb.write_ep(rc_received);
+        scb.write_rc(ep_received);
+        rc_req.addr   = 64'hb000;
+        rc_req.length = 1;
+        rc_req.last_be = 0;
+        ep_req.length = 1;
+
+        scb.write_rc(make_split(rc_received, 0, 8));
+        scb.write_ep(make_split(ep_received, 0, 4));
+        if ((scb.cpl_trackers.size() != 2) ||
+            (scb.cpl_trackers[rc_key].received_bytes != 8) ||
+            (scb.cpl_trackers[ep_key].received_bytes != 4))
+            `uvm_error("BRIDGE_SCB_SPLIT", "interleaved first splits lost requester identity")
+        scb.write_rc(make_split(rc_received, 8, 8));
+        if (scb.pending_requests.exists(rc_key) || scb.cpl_trackers.exists(rc_key) ||
+            !scb.pending_requests.exists(ep_key) || !scb.cpl_trackers.exists(ep_key))
+            `uvm_error("BRIDGE_SCB_SPLIT", "closing RC request also closed EP request")
+        scb.write_ep(make_split(ep_received, 4, 8));
+        if ((scb.pending_requests.size() != 0) || (scb.cpl_trackers.size() != 0))
+            `uvm_error("BRIDGE_SCB_SPLIT", "completed split requests leaked state")
+
+        scb.pending_imp.write(rc_req);
+        scb.write_ep(rc_req);
+        cpl = make_split(rc_req, 0, 4);
+        // Completion 本身经过 pending_imp 必须无副作用，随后正常进入接收检查。
+        scb.pending_imp.write(cpl);
+        scb.write_rc(cpl);
+        if ((scb.matched != 4) || (scb.total_requests != 4) ||
+            (scb.total_completions != 6) || (scb.mismatched != 0) ||
+            (scb.unexpected != 0) || (scb.pending_requests.size() != 0) ||
+            (scb.cpl_trackers.size() != 0))
+            `uvm_error("BRIDGE_SCB_TOTAL", "request reuse or exact-once accounting failed")
+    endfunction
+
+    // 在一个测试阶段完成全部定向检查；任何异常均保留 UVM_ERROR，便于批量回归判定。
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+        check_snapshot_metadata();
+        check_requester_splits();
         phase.drop_objection(this);
     endtask
 endclass

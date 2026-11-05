@@ -1,5 +1,7 @@
 //-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - Base Driver
+// src/agent：公共 TLP 发送流水线，依赖共享 Tag/FC/codec 与注入的 adapter。
+// driver 拥有发送观察口和 read-back 表；共享组件归 env 所有，请求句柄归 sequence。
+// tx_ap 在最终 Tag 已确定、adapter 尚未发送时同步发布，观察者不得修改请求。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
@@ -16,6 +18,10 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
     //--- Adapter reference ---
     pcie_tl_if_adapter         adapter;
 
+    // 发送观察口覆盖 requester 和 responder；env 在 bridge 模式接入 SCB，
+    // 避免把本应属于公共环境的 pending 登记硬编码在后端或测试中。
+    uvm_analysis_port #(pcie_tl_tlp)	tx_ap;
+
     //--- Read-back capture (private outstanding map, independent of the shared
     //--- tag_mgr which env may free early). Maps tag -> requesting TLP handle
     //--- so returning Completions can be written back onto the seq's object. ---
@@ -24,20 +30,24 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
     protected int              rb_total[bit [9:0]];  // enabled bytes expected
     protected int              rb_wire[bit [9:0]];   // padded wire bytes consumed
 
+    // 创建 driver 及其发送观察口；共享组件由 agent 在 connect 阶段注入。
     function new(string name = "pcie_tl_base_driver", uvm_component parent = null);
         super.new(name, parent);
+        tx_ap = new("tx_ap", this);
     endfunction
 
     // Called synchronously after a non-posted request receives its VIP tag and
     // before any ordering/flow-control wait or adapter send. Derived bridges
     // can publish an external-to-VIP tag mapping without racing a fast DUT
     // Completion. The base implementation intentionally does nothing.
+    // 派生桥可在此登记 Tag 映射；不能用它替代所有 driver 都执行的 tx_ap 发布。
     virtual function void on_tag_assigned(pcie_tl_tlp tlp);
     endfunction
 
     //=========================================================================
     // Main run phase
     //=========================================================================
+    // 从 sequencer 顺序取请求并发送；item_done 表示 adapter.send 已返回。
     task run_phase(uvm_phase phase);
         pcie_tl_tlp tlp;
         forever begin
@@ -50,6 +60,7 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
     //=========================================================================
     // Core send pipeline (virtual - overridden by RC/EP)
     //=========================================================================
+    // 分配 Tag、等待资源并发送一个 TLP；发送前同步通知观察者，防止快速响应抢先到达。
     virtual task send_tlp(pcie_tl_tlp tlp);
         bit [7:0] bytes[];
 
@@ -83,7 +94,9 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
         // 4. Encode
         codec.encode(tlp, bytes);
 
-        // 5. Send via adapter
+        // 5. 最终 Tag 已分配，发送权限与编码已完成。必须先同步通知 SCB，
+        // 再进入可能阻塞且允许对端立即响应的 adapter.send；TLM 无连接时无副作用。
+        tx_ap.write(tlp);
         adapter.send(tlp);
 
         // 6. Consume FC credit
@@ -103,6 +116,7 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
     // the original request TLP (the same handle the sequence holds), and sets
     // rb_done once all requested bytes have arrived or an error status is seen.
     //=========================================================================
+    // 把有效 Completion 字节折叠到原请求；终止响应置 rb_done 并回收私有跟踪项。
     function void rb_note_completion(pcie_tl_cpl_tlp cpl);
         pcie_tl_tlp req;
         bit last;
@@ -166,6 +180,7 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
     //=========================================================================
     // Wait for FC credit and BW shaper permission
     //=========================================================================
+    // 等待 FC credit 与带宽 token；组件未注入时跳过对应约束，不改变请求内容。
     virtual task wait_for_send_permission(pcie_tl_tlp tlp);
         // Wait for FC credit
         if (fc_mgr != null) begin

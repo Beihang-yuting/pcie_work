@@ -1,5 +1,8 @@
 //-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - Scoreboard
+// src/env：基于 Requester ID + Tag 的请求/Completion、数据与顺序检查。
+// 依赖公共 TLP 类型及有效字节辅助函数；env 注入观察流，SCB 拥有 pending 深拷贝
+// 和分片跟踪表，终止响应回收两者。TLM 沿用直接调用，bridge 另提供发送前预登记。
+// 一个请求只在接收观察流计数；pending_imp 不计数，双 BFM 不重复检查 Completion。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_scoreboard extends uvm_scoreboard;
@@ -8,12 +11,17 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //--- Analysis imports ---
     `uvm_analysis_imp_decl(_rc)
     `uvm_analysis_imp_decl(_ep)
+    `uvm_analysis_imp_decl(_pending)
 
     uvm_analysis_imp_rc #(pcie_tl_tlp, pcie_tl_scoreboard) rc_imp;
     uvm_analysis_imp_ep #(pcie_tl_tlp, pcie_tl_scoreboard) ep_imp;
 
-    //--- Pending requests: tag -> request ---
-    pcie_tl_tlp pending_requests[bit [9:0]];
+    // 发送前只建立期望，不把 TX 与 RX 两次观察算作两笔事务。
+    uvm_analysis_imp_pending #(pcie_tl_tlp, pcie_tl_scoreboard)	pending_imp;
+
+    // PCIe Tag 仅在同一 Requester 内唯一；双向请求可合法使用同一个 Tag。
+    typedef bit [25:0]	request_key_t;
+    pcie_tl_tlp	pending_requests[request_key_t];
 
     //--- Multi-completion tracking ---
     typedef struct {
@@ -25,7 +33,11 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         int            cpl_count;
     } cpl_tracker_t;
 
-    cpl_tracker_t cpl_trackers[bit [9:0]];
+    cpl_tracker_t	cpl_trackers[request_key_t];
+
+    // 独立 SCB 默认在 EP RX 建立期望；env 的旧 TLM 路径会关闭它，因 loopback
+    // 已预登记且可能在 EP monitor 消费请求前完成响应，RX 不得复活已结束的事务。
+    bit	ep_rx_pending_enable = 1'b1;
 
     //--- Check enables ---
     bit ordering_check_enable   = 1;
@@ -58,25 +70,29 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //--- Dedup: completions already processed via env direct call ---
     bit cpl_processed[pcie_tl_tlp];  // TLP handle -> seen
 
+    // 构造 SCB；观察口在 build 创建，pending 快照由本组件持有直到终止响应。
     function new(string name = "pcie_tl_scoreboard", uvm_component parent = null);
         super.new(name, parent);
     endfunction
 
+    // 创建接收和预登记入口；未连接的预登记口不改变旧 TLM 调用行为。
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
         rc_imp = new("rc_imp", this);
         ep_imp = new("ep_imp", this);
+        pending_imp = new("pending_imp", this);
     endfunction
 
     //=========================================================================
-    // RC side: TLPs sent by RC (requests) or received by RC (completions from EP)
+    // RC 接收侧观察流；只有对端 monitor 缺失时，env 用 EP TX 补足同一观察边界。
     //=========================================================================
+    // RC 收到的请求计数并登记，Completion 匹配；保留旧 TLM 直接调用的句柄去重。
     function void write_rc(pcie_tl_tlp tlp);
         case (tlp.get_category())
             TLP_CAT_NON_POSTED: begin
                 // RC received a non-posted from EP (e.g. EP DMA read)
                 total_requests++;
-                pending_requests[tlp.tag] = tlp;
+                register_pending(tlp);
             end
             TLP_CAT_POSTED: begin
                 // RC received a posted (EP DMA write or Memory Write)
@@ -109,8 +125,9 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     endfunction
 
     //=========================================================================
-    // EP side: TLPs sent by EP (completions) or received by EP
+    // EP 接收侧观察流；只有对端 monitor 缺失时，env 用 RC TX 补足同一观察边界。
     //=========================================================================
+    // EP 收到的请求计数，按模式登记并匹配 Completion；旧 TLM 禁止晚到 RX 复活 pending。
     function void write_ep(pcie_tl_tlp tlp);
         case (tlp.get_category())
             TLP_CAT_COMPLETION: begin
@@ -119,8 +136,11 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                     check_completion(tlp);
             end
             TLP_CAT_NON_POSTED: begin
-                // EP received non-posted from RC — count only (pending already registered by env)
+                // bridge 预登记保留发送端元数据；仅有 EP 时则在首次 RX 建立快照。
+                // TLM 由 env 提前登记，晚到的 monitor 请求不能重新打开已终止的键。
                 total_requests++;
+                if (ep_rx_pending_enable)
+                    register_pending(tlp);
             end
             TLP_CAT_POSTED: begin
                 // EP received posted from RC (e.g. MEM_WR) or EP sent DMA
@@ -139,27 +159,51 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             void'(ep_sent_history.pop_front());
     endfunction
 
-    //=========================================================================
-    // Register pending request (called by env before delay, ensures timing)
-    //=========================================================================
+    // 组合键供产品代码和定向测试共用；调用者必须传入非空请求或 Completion。
+    function request_key_t request_key(pcie_tl_tlp tlp);
+        return {tlp.requester_id, tlp.tag};
+    endfunction
+
+    // TX analysis 入口只预登记 NP；posted/Completion 不产生 pending 和统计副作用。
+    function void write_pending(pcie_tl_tlp tlp);
+        register_pending(tlp);
+    endfunction
+
+    // 首次观察时深拷贝请求，防止 sequence 复用/修改原对象污染分片检查。
+    // 同一键的 RX 副本不得覆盖 TX 快照：expected_cpl_status 等期望不在线上传输。
+    // 已存在的键保持不变；终止 Completion 会释放键，使合法 Tag 重用重新登记。
     function void register_pending(pcie_tl_tlp tlp);
-        if (tlp.requires_completion())
-            pending_requests[tlp.tag] = tlp;
+        request_key_t	key;
+        pcie_tl_tlp	snapshot;
+
+        if ((tlp == null) || !tlp.requires_completion())
+            return;
+        key = request_key(tlp);
+        if (pending_requests.exists(key))
+            return;
+        if (!$cast(snapshot, tlp.clone())) begin
+            `uvm_fatal("SCB_SNAPSHOT", "Cannot clone pending request")
+            return;
+        end
+        pending_requests[key] = snapshot;
     endfunction
 
     //=========================================================================
     // Check 1: Request-Completion matching (multi-completion tracking)
     //=========================================================================
+    // 按复合键匹配分片，验证状态、地址和有效字节；成功或终止错误均清理跟踪项。
     protected function void check_completion(pcie_tl_tlp tlp);
         pcie_tl_cpl_tlp cpl;
-        cpl_tracker_t tracker;
+        cpl_tracker_t	tracker;
+        request_key_t	key;
 
         if (!$cast(cpl, tlp)) return;
+        key = request_key(cpl);
 
-        // First completion for this tag: create tracker from pending_requests
-        if (!cpl_trackers.exists(cpl.tag)) begin
-            if (pending_requests.exists(cpl.tag)) begin
-                pcie_tl_tlp req = pending_requests[cpl.tag];
+        // 该 Requester/Tag 的首片响应：从发送前保存的请求快照建立累计状态。
+        if (!cpl_trackers.exists(key)) begin
+            if (pending_requests.exists(key)) begin
+                pcie_tl_tlp req = pending_requests[key];
                 pcie_tl_mem_tlp mem_req;
                 tracker.orig_req       = req;
                 // AtomicOp CAS: 请求 payload=compare||swap=2*sz，但 CplD 只回 sz(旧值)；
@@ -177,7 +221,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                     tracker.expected_addr = pcie_tl_mem_wire_addr(mem_req);
                 else
                     tracker.expected_addr = 0;
-                cpl_trackers[cpl.tag] = tracker;
+                cpl_trackers[key] = tracker;
             end else begin
                 `uvm_warning("SCB", $sformatf(
                     "Unexpected Completion: tag=0x%03h req_id=0x%04h",
@@ -187,7 +231,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             end
         end
 
-        tracker = cpl_trackers[cpl.tag];
+        tracker = cpl_trackers[key];
 
         // Verify requester_id match
         if (tracker.orig_req.requester_id != cpl.requester_id) begin
@@ -207,8 +251,8 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                 cpl.tag, tracker.orig_req.expected_cpl_status.name(),
                 cpl.cpl_status.name(), tracker.orig_req.kind.name()))
             mismatched++;
-            cpl_trackers.delete(cpl.tag);
-            pending_requests.delete(cpl.tag);
+            cpl_trackers.delete(key);
+            pending_requests.delete(key);
             return;
         end
 
@@ -217,8 +261,8 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         // it completes the request successfully from the test's perspective.
         if (cpl.cpl_status != CPL_STATUS_SC) begin
             matched++;
-            cpl_trackers.delete(cpl.tag);
-            pending_requests.delete(cpl.tag);
+            cpl_trackers.delete(key);
+            pending_requests.delete(key);
             return;
         end
 
@@ -236,8 +280,8 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                     cpl.tag, tracker.orig_req.kind.name()))
                 mismatched++;
             end
-            cpl_trackers.delete(cpl.tag);
-            pending_requests.delete(cpl.tag);
+            cpl_trackers.delete(key);
+            pending_requests.delete(key);
             return;
         end
 
@@ -307,19 +351,20 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
 
         tracker.expected_addr  += cpl.payload.size();
         tracker.cpl_count++;
-        cpl_trackers[cpl.tag] = tracker;
+        cpl_trackers[key] = tracker;
 
         // Check if all bytes received
         if (tracker.received_bytes >= tracker.total_bytes) begin
             matched++;
-            cpl_trackers.delete(cpl.tag);
-            pending_requests.delete(cpl.tag);
+            cpl_trackers.delete(key);
+            pending_requests.delete(key);
         end
     endfunction
 
     //=========================================================================
     // Check 2: Data integrity (with byte offset for split completions)
     //=========================================================================
+    // 只比较请求启用的字节；byte_offset 为已消耗的线上跨度，无已知写数据则跳过。
     protected function void check_data_integrity(pcie_tl_tlp req, pcie_tl_cpl_tlp cpl, int byte_offset = 0);
         pcie_tl_mem_tlp mem_req;
         if (!$cast(mem_req, req)) return;
@@ -342,6 +387,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // Check 3: Ordering compliance
     //=========================================================================
+    // 使用同侧有限历史输出简化顺序诊断；不改变事务状态或阻塞传输。
     protected function void check_ordering(pcie_tl_tlp tlp, ref pcie_tl_tlp history[$]);
         tlp_category_e new_cat;
         tlp_category_e prev_cat;
@@ -363,6 +409,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // Store write data for later comparison
     //=========================================================================
+    // 记录 Memory Write 启用的字节供后续读回比较；其他 posted 类型直接忽略。
     protected function void store_write_data(pcie_tl_tlp tlp);
         pcie_tl_mem_tlp mem;
         if (tlp.kind != TLP_MEM_WR) return;
@@ -378,6 +425,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // Check 5: Error response verification
     //=========================================================================
+    // 检查注入错误请求的响应状态；意外成功只输出诊断，不登记新事务。
     function void check_error_response(pcie_tl_tlp err_tlp, pcie_tl_cpl_tlp response);
         if (err_tlp.inject_poisoned || err_tlp.inject_ecrc_err) begin
             // Expect error response
@@ -392,6 +440,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // Check: TLP Prefix format legality
     //=========================================================================
+    // 启用时检查 Prefix 数量和 Local/E2E 顺序；违规累计格式错误。
     protected function void check_prefix_format(pcie_tl_tlp tlp);
         int local_count = 0;
         bit seen_e2e = 0;
@@ -431,6 +480,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // Check: E2E Prefix integrity (content unchanged after switch traversal)
     //=========================================================================
+    // 对比发送/接收 E2E Prefix 内容；Local Prefix 可变化，缺失或不匹配累计错误。
     function void check_prefix_integrity(pcie_tl_tlp sent, pcie_tl_tlp received);
         int sent_e2e = 0;
         int recv_e2e = 0;
@@ -470,6 +520,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // Report
     //=========================================================================
+    // 汇总检查结果并报告未完成分片；strict_check 决定不匹配/意外响应的最终严重度。
     function void report_phase(uvm_phase phase);
         `uvm_info("SCB", $sformatf("\n========== Scoreboard Report ==========\n  Requests:     %0d\n  Completions:  %0d\n  Matched:      %0d\n  Mismatched:   %0d\n  Unexpected:   %0d\n  Timed Out:    %0d\n========================================",
             total_requests, total_completions, matched, mismatched, unexpected, timed_out
@@ -481,15 +532,15 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
 
         // Check for incomplete multi-completion trackers
         if (cpl_trackers.size() > 0) begin
-            bit [9:0] tag;
-            if (cpl_trackers.first(tag)) begin
+            request_key_t	key;
+            if (cpl_trackers.first(key)) begin
                 do begin
                     `uvm_warning("SCB", $sformatf(
-                        "Incomplete completion: tag=0x%03h received=%0d/%0d bytes (%0d splits)",
-                        tag, cpl_trackers[tag].received_bytes,
-                        cpl_trackers[tag].total_bytes, cpl_trackers[tag].cpl_count))
+                        "Incomplete completion: req_id=0x%04h tag=0x%03h received=%0d/%0d bytes (%0d splits)",
+                        key[25:10], key[9:0], cpl_trackers[key].received_bytes,
+                        cpl_trackers[key].total_bytes, cpl_trackers[key].cpl_count))
                     timed_out++;
-                end while (cpl_trackers.next(tag));
+                end while (cpl_trackers.next(key));
             end
         end
 
