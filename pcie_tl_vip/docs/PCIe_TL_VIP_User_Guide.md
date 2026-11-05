@@ -425,7 +425,9 @@ Config/IO Write 的无数据 SC 则是合法完成。
 
 ```systemverilog
 // 基类约束
-constraint c_no_error_inject;       // LEGAL 模式禁止错误注入
+constraint c_no_inject;            // 五个错误注入字段分别 soft 默认 0，各模式均生效
+constraint c_legal_ep_bit;         // Poisoned 位 ep_bit soft 默认 0，可显式覆盖
+constraint c_default_mode;         // soft 默认 CONSTRAINT_LEGAL
 constraint c_max_payload;           // payload <= 4096 字节
 constraint c_no_data_no_payload;    // 无数据 TLP payload 为空
 
@@ -966,11 +968,16 @@ wr.start(env.rc_agent.sequencer);
 **使用方法:**
 
 ```systemverilog
-// 发送一个非法 TLP (用于错误注入测试)
+// 允许使用放宽后的约束；仅设置模式不代表选定某项错误注入。
 pcie_tl_mem_wr_seq wr = pcie_tl_mem_wr_seq::type_id::create("wr");
 wr.mode = CONSTRAINT_ILLEGAL;
 wr.start(env.rc_agent.sequencer);
 ```
+
+`constraint_mode_sel` 默认 soft 为 `CONSTRAINT_LEGAL`。错误注入字段和 `ep_bit`
+在三个模式下都分别 soft 默认 0；`ILLEGAL`/`CORNER_CASE` 仅选择结构约束的适用范围，
+不会自动随机开启这些错误标志。需要明确的 Poisoned 或字段翻转用例时，使用第 12.3
+节的专用 sequence，或在 `randomize() with` 中显式覆盖相应字段。
 
 ### 9.3 场景 Sequence (src/seq/scenario/)
 
@@ -1100,7 +1107,25 @@ env.cov.register_callback(my_cov);
 | `inject_poisoned` | `bit` | 设置 Poisoned 标志 (EP bit) |
 | `violate_ordering` | `bit` | 跳过排序引擎 |
 | `field_bitmask` | `bit [31:0]` | 对头字段按位翻转 |
+| `ep_bit` | `bit` | Header 的 Poisoned 位，默认 soft 为 0 |
 | `constraint_mode_sel` | `tlp_constraint_mode_e` | LEGAL / ILLEGAL / CORNER_CASE |
+
+五个错误注入字段与 `ep_bit` 均有独立的 `soft ... == 0` 默认约束，覆盖一项不会
+解除其他项的默认值。负例可直接指定目标错误，默认结构约束仍保持 LEGAL：
+
+```systemverilog
+pcie_tl_mem_tlp tlp = pcie_tl_mem_tlp::type_id::create("poison_write");
+if (!tlp.randomize() with {
+    kind == TLP_MEM_WR;
+    inject_poisoned == 1;
+})
+    `uvm_fatal("RANDOMIZE", "poison write randomization failed")
+// 其他错误注入字段和原始 ep_bit 仍为 0；codec 发送时根据 inject_poisoned 设置 EP 位。
+```
+
+`rand` 字段的声明初始化（例如 `= 0`）不能代替约束，后续 `randomize()` 会重新
+求值；上述默认值由 soft 约束维持，显式硬约束仍可覆盖。仅设置 `ILLEGAL` 模式也
+可能放松包长、BE 等结构约束，因此正常业务仍应使用默认 LEGAL 模式。
 
 错误物化取决于传输模式：`SV_IF_MODE` 总是经过字节编解码，ECRC、Poisoned
 和 header bitmask 会进入接口字节流；`TLM_MODE` 默认保留原 sequence item

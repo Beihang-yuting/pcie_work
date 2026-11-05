@@ -1,5 +1,8 @@
 //-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - TLP Transaction Classes
+// src/types：公共 TLP 事务、派生包型、有效字节辅助函数及 read-back 注册表。
+// 依赖 UVM、pcie_tl_types/Prefix；sequence 拥有请求，接收端与 SCB 需要独立副本时
+// 使用 clone/do_copy。read-back 表持有运行期请求句柄，完成后释放注册项。
+// 错误注入默认为独立 soft 0；显式负向约束可覆盖单项，不能顺带随机开启其他错误。
 //-----------------------------------------------------------------------------
 
 //=============================================================================
@@ -73,7 +76,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
     rand bit [2:0]              tc;
     rand bit                    th;
     rand bit                    td;
-    rand bit                    ep_bit;       // Poisoned (avoid name clash with 'ep')
+    rand bit				ep_bit;       // 线上 Poisoned 位；独立 soft 默认清零。
     rand bit [2:0]              attr;         // [0]=RO, [1]=IDO, [2]=NS
     rand bit [1:0]              at = 2'b00;    // Address Type: 00=untranslated,01=xlate-req,10=translated (ATS)
     rand bit [9:0]              length;       // in DW, 0 means 1024
@@ -87,13 +90,13 @@ class pcie_tl_tlp extends uvm_sequence_item;
     // distinguish an expected UR/CA from a real transaction failure.
     cpl_status_e                expected_cpl_status = CPL_STATUS_SC;
 
-    //--- Error injection metadata ---
-    rand bit                    inject_ecrc_err;
-    rand bit                    inject_lcrc_err;
-    rand bit                    inject_poisoned;
-    rand bit                    violate_ordering;
-    rand bit [31:0]             field_bitmask;
-    rand tlp_constraint_mode_e  constraint_mode_sel;
+    // 注入元数据仅表达测试意图；与线上 EP 位分开，所有模式都默认不主动注入。
+    rand bit				inject_ecrc_err;
+    rand bit				inject_lcrc_err;
+    rand bit				inject_poisoned;
+    rand bit				violate_ordering;
+    rand bit [31:0]			field_bitmask;
+    rand tlp_constraint_mode_e		constraint_mode_sel;
 
     // Set by the TLM adapter when Poisoned/header-bit error injection has been
     // applied and the receiver is observing the decoded header image. This
@@ -115,13 +118,15 @@ class pcie_tl_tlp extends uvm_sequence_item;
     //--- CQ routing metadata (non-rand, runtime only) ---
     pcie_tl_cq_route_t cq_route;
 
-    //--- Default constraints: no error injection (only in LEGAL mode) ---
+    // 保留块名供旧测试 constraint_mode() 控制。每项必须是独立 soft 默认，
+    // 不能合并为一个合取式：单项 inline 注入只应放弃该项默认，其余错误仍清零。
+    // 默认不依赖 LEGAL/ILLEGAL/CORNER_CASE；选择负向模式并不自动开启随机错误。
     constraint c_no_inject {
-        (constraint_mode_sel == CONSTRAINT_LEGAL) -> inject_ecrc_err  == 0;
-        (constraint_mode_sel == CONSTRAINT_LEGAL) -> inject_lcrc_err  == 0;
-        (constraint_mode_sel == CONSTRAINT_LEGAL) -> inject_poisoned  == 0;
-        (constraint_mode_sel == CONSTRAINT_LEGAL) -> violate_ordering == 0;
-        (constraint_mode_sel == CONSTRAINT_LEGAL) -> field_bitmask    == 0;
+        soft inject_ecrc_err  == 1'b0;
+        soft inject_lcrc_err  == 1'b0;
+        soft inject_poisoned  == 1'b0;
+        soft violate_ordering == 1'b0;
+        soft field_bitmask    == 32'b0;
     }
 
     constraint c_default_mode {
@@ -168,16 +173,14 @@ class pcie_tl_tlp extends uvm_sequence_item;
         soft ((constraint_mode_sel != CONSTRAINT_LEGAL) || (at == 2'b00));
     }
 
-    // The EP bit is the PCIe Poisoned bit.  A normal legal transaction must
-    // leave it clear; error-injection sequences explicitly select
-    // CONSTRAINT_ILLEGAL and set inject_poisoned/ep_bit as needed.  Leaving
-    // this field unconstrained made ordinary read requests randomly appear as
-    // poisoned TLPs to the SVT checker, which correctly rejected no-data
-    // requests carrying EP=1.
+    // EP 位在线上表示 Poisoned。保留历史块名，但改为无条件 soft 默认，
+    // 防止普通业务随机染毒；显式 ep_bit==1 也不应迫使默认模式离开 LEGAL。
+    // inject_poisoned 是独立元数据，由 adapter 物化，不在此强行关联两个字段。
     constraint c_legal_ep_bit {
-        (constraint_mode_sel == CONSTRAINT_LEGAL) -> ep_bit == 1'b0;
+        soft ep_bit == 1'b0;
     }
 
+    // 构造公共事务并初始化非随机 CQ 路由；随机默认由约束负责，不能只靠字段初值。
     function new(string name = "pcie_tl_tlp");
         super.new(name);
         cq_route = pcie_tl_cq_route_default();

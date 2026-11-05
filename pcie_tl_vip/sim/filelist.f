@@ -67,6 +67,7 @@ $HOST_MEM_ROOT/src/host_mem_manager.sv
 ../tests/pcie_global_cfg_unit_test.sv
 ../tests/pcie_tl_backend_provider_unit_test.sv
 ../tests/pcie_tl_sequence_contract_unit_test.sv
+../tests/pcie_tl_injection_defaults_unit_test.sv
 ../tests/pcie_tl_device_cfg_adapter_unit_test.sv
 
 // ---- testbench top module ----
