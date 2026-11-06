@@ -80,6 +80,7 @@ package pcie_tl_pkg;
     `include "seq/base/pcie_tl_mem_rd_seq.sv"
     `include "seq/base/pcie_tl_mem_wr_seq.sv"
     `include "seq/base/pcie_tl_rw_seq.sv"
+    `include "seq/base/pcie_tl_reg_seq.sv"
     `include "seq/base/pcie_tl_io_rd_seq.sv"
     `include "seq/base/pcie_tl_io_wr_seq.sv"
     `include "seq/base/pcie_tl_cfg_rd_seq.sv"
