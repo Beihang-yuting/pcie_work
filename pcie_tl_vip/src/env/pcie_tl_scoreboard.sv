@@ -75,7 +75,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
 
     // TLM 双向 direct/monitor 共享同一个 Completion 句柄，只检查一次；第二次观察
     // 回收标记。以句柄而非 Tag 去重，合法 Tag 重用及同一请求的多个分片仍分别检查。
-    // EP 只由明确承诺后续 monitor 观察的 direct 调用登记；legacy/bridge 单次观察不留标记。
+    // 双向均只由承诺后续 monitor 观察的 direct 调用登记；native/bridge 单次观察不留标记。
     bit	cpl_processed[pcie_tl_tlp];
 
     // 构造 SCB；观察口在 build 创建，pending 快照由本组件持有直到终止响应。
@@ -94,9 +94,11 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // RC 接收侧观察流；只有对端 monitor 缺失时，env 用 EP TX 补足同一观察边界。
     //=========================================================================
-    // RC 收到的请求计数并按模式登记，Completion 匹配；保留原 TLM 直接调用的句柄去重。
+    // RC 收到的请求计数并按模式登记，Completion 匹配；TLM 直接调用显式预留去重标记。
     // TLM 请求已预登记，迟到 RX 不得复活同步 Completion 已关闭的 pending。
-    function void write_rc(pcie_tl_tlp tlp);
+    // expect_monitor_duplicate 仅由接收 FIFO 入队前的 TLM 同步调用置 1；
+    // native/bridge 单次观察默认不留标记，防止句柄泄漏或下一代响应被误跳过。
+    function void write_rc(pcie_tl_tlp	tlp, bit	expect_monitor_duplicate = 0);
         case (tlp.get_category())
             TLP_CAT_NON_POSTED: begin
                 // RC received a non-posted from EP (e.g. EP DMA read)
@@ -117,8 +119,8 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                     cpl_processed.delete(tlp);
                     return;
                 end
-                // RC received completion from EP (TLM loopback mode)
-                cpl_processed[tlp] = 1;
+                if (expect_monitor_duplicate)
+                    cpl_processed[tlp] = 1;
                 total_completions++;
                 if (completion_check_enable)
                     check_completion(tlp);

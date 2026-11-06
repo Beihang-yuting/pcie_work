@@ -845,15 +845,10 @@ class pcie_tl_ltr_tlp extends pcie_tl_tlp;
 endclass
 
 //-----------------------------------------------------------------------------
-// Read-back registry (global) — used in SV_IF / interface-adapter mode.
-//
-// In adapter mode the env TLM loopback is idle and rc_driver.handle_completion
-// is NOT called (the adapter test's checker consumes completions off the RC
-// monitor). So the requester MONITOR is the only place that observes the
-// returning Completion. Driver registers each non-posted request here (keyed by
-// {requester_id, tag}); the monitor calls note() to fold the CplD payload/status
-// back onto the seq's request object (rb_done). Gated to SV_IF in the monitor so
-// TLM mode (which folds via the env/driver path) never double-folds.
+// 全局read-back registry按{requester_id,tag}持有请求，供没有实际driver回调的
+// passive接口monitor调用note()回填。活跃native/bridge接口把Completion同步交
+// requester driver，TLM由loopback回调同一driver；这些路径自行回填并调用complete()
+// 释放注册项。monitor仅在不存在driver消费者时使用note()，防止重复payload折叠。
 //-----------------------------------------------------------------------------
 class pcie_rb_registry;
     static pcie_tl_tlp reqs [bit [25:0]];   // {req_id[15:0], tag[9:0]} -> request obj
@@ -934,8 +929,8 @@ class pcie_rb_registry;
         end
     endfunction
 
-    // 外部 SVT bridge 由 RC driver 处理 Completion，不经过 note()；完成后
-    // 仍需删除注册表项，避免旧 tag 被后续迟到 Completion 误命中。
+    // 活跃RC/EP driver处理终片后调用，不经过note()；回收全局注册项，避免旧Tag
+    // 被后续迟到Completion误命中。native、bridge和TLM共用此终止清理。
     static function void complete(pcie_tl_cpl_tlp cpl);
         bit [25:0] k;
         if (cpl == null) return;

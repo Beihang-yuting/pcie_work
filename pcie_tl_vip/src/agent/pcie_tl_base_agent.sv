@@ -1,5 +1,6 @@
 //-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - Base Agent
+// src/agent：共享driver/monitor/sequencer组装层，依赖UVM及env注入的协议组件。
+// agent拥有子组件，共享manager/adapter由env持有；Completion消费选择随连接配置传给monitor。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_base_agent extends uvm_agent;
@@ -21,7 +22,8 @@ class pcie_tl_base_agent extends uvm_agent;
     //--- Adapter ---
     pcie_tl_if_adapter         adapter;
 
-    // 由环境在 SVT forward 模式下设置，传递给 monitor 的 Completion 路径。
+    // env在native/bridge接口且实际driver回调存在时置位，避免monitor重复registry回填。
+    // passive无driver时保持0，保留外部请求的registry观察回退。
     bit external_completion_driver_enable = 1'b0;
 
     function new(string name = "pcie_tl_base_agent", uvm_component parent = null);

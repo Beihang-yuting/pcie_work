@@ -1,5 +1,7 @@
 //-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - Base Monitor
+// src/agent：从注入 adapter 接收 TLP，执行协议检查并发布观察流。
+// 依赖 codec、共享检查组件及 read-back registry；monitor 借用资源，不拥有请求或 Tag。
+// 活跃接口 requester 由实际 driver 回填；无 driver 的 passive 观察保留 registry fallback。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_base_monitor extends uvm_monitor;
@@ -18,8 +20,8 @@ class pcie_tl_base_monitor extends uvm_monitor;
     //--- Adapter reference ---
     pcie_tl_if_adapter         adapter;
 
-    // 外部 SVT bridge 模式下，Completion 会通过 analysis imp 交回 RC driver；
-    // 此时禁止 monitor 同时写全局 registry，避免 read-back payload 重复折叠。
+    // native/bridge 活跃 requester 的 Completion 由 analysis imp 交实际 RC/EP driver；
+    // env 仅在该回调存在时置位，禁止重复 registry 回填。passive 默认保留 fallback。
     bit external_completion_driver_enable = 1'b0;
 
     //--- Protocol check switches ---
@@ -83,11 +85,9 @@ class pcie_tl_base_monitor extends uvm_monitor;
                 materialized_bitmask_tlps++;
         end
 
-        // Read-back fold (SV_IF / interface-adapter mode only): the env TLM
-        // loopback is idle and rc_driver.handle_completion is not called here, so
-        // the requester monitor is where the returning Completion is observed.
-        // Fold its payload/status onto the original request object via the global
-        // registry. TLM mode folds via the env/driver path, so this is gated off.
+        // 仅为没有实际 driver Completion 回调的接口观察保留 registry 回填。
+        // native/bridge 活跃 requester 在后面的 analysis 发布中交给唯一 driver，
+        // TLM 则由 loopback 处理；这里不能再次折叠同一 payload 或提前设置 rb_done。
         if (!external_completion_driver_enable &&
             adapter != null && adapter.mode == SV_IF_MODE &&
             tlp.get_category() == TLP_CAT_COMPLETION) begin

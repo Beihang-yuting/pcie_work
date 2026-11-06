@@ -1,5 +1,8 @@
 //-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - RC Driver
+// src/agent：PCIe RC requester/responder，依赖公共 driver、Tag 管理器和共享 Host 内存。
+// driver 拥有 pending/分片超时状态，sequence 拥有请求，env 注入的共享资源不转移所有权。
+// 接口模式通过 Completion analysis 入口统一回填和回收；TLM 由 loopback 同步调用。
+// 超时从发送返回后起算，按请求句柄及分配代次隔离同 Tag 的旧定时任务。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_rc_driver extends pcie_tl_base_driver;
@@ -38,12 +41,14 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     int mps_bytes = 256;
     int rcb_bytes = 64;
 
-    function new(string name = "pcie_tl_rc_driver", uvm_component parent = null);
+    // 构造只初始化组件与中断统计；端口在 build 创建，pending 随请求生命周期维护。
+    function new(string	name = "pcie_tl_rc_driver", uvm_component	parent = null);
         super.new(name, parent);
         foreach (intx_asserted[i]) intx_asserted[i] = 0;
     endfunction
 
-    virtual function void build_phase(uvm_phase phase);
+    // 创建接口 Completion 接收口，env 决定接线；本阶段不启动超时或分配 Tag。
+    virtual function void build_phase(uvm_phase	phase);
         super.build_phase(phase);
 
         completion_analysis_imp = new("completion_analysis_imp", this);
@@ -295,15 +300,20 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     //=========================================================================
     // Override send_tlp to add completion tracking
     //=========================================================================
-    virtual task send_tlp(pcie_tl_tlp tlp);
-        // Call base send pipeline
+    // 发送后只为尚未完成的 NP 请求启动超时，保持原先从 adapter.send 返回后起算。
+    // 接口可能在 send 返回前交回终片；此时 rb_done 已置位，不能重新创建旧 pending。
+    // 在 fork 外捕获 Tag/请求/分配代次，后续 sequence 重用句柄或 Tag 不影响旧 timer 身份。
+    virtual task send_tlp(pcie_tl_tlp	tlp);
         super.send_tlp(tlp);
 
-        // Start completion timeout for Non-Posted
-        if (tlp.requires_completion()) begin
-            pending_cpl[tlp.tag] = tlp;
+        if (tlp.requires_completion() && !tlp.rb_done) begin
+            automatic bit [9:0]	request_tag = tlp.tag;
+            automatic pcie_tl_tlp	request = tlp;
+            automatic longint unsigned	generation = tag_mgr.get_outstanding_generation(tlp.tag);
+
+            pending_cpl[request_tag] = request;
             fork
-                start_cpl_timeout(tlp.tag, tlp);
+                start_cpl_timeout(request_tag, request, generation);
             join_none
         end
     endtask
@@ -369,9 +379,14 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     //=========================================================================
     // Completion timeout monitor
     //=========================================================================
-    protected task start_cpl_timeout(bit [9:0] tag, pcie_tl_tlp req);
+    // 仅当前分配代次仍未完成时报告超时。句柄比较保护不同请求，generation 进一步
+    // 保护 sequence 重用同一个请求对象；旧 timer 不得删除或释放后续同 Tag 的新请求。
+    // 超时失败语义及原清理范围不变，不把未收到的响应伪造为成功回填。
+    protected task start_cpl_timeout(bit [9:0]	tag, pcie_tl_tlp	req,
+                                     longint unsigned	generation);
         #(cpl_timeout_ns * 1ns);
-        if (pending_cpl.exists(tag)) begin
+        if (pending_cpl.exists(tag) && pending_cpl[tag] == req &&
+            tag_mgr.get_outstanding_generation(tag) == generation) begin
             `uvm_error("RC_DRV", $sformatf("Completion Timeout: tag=0x%03h after %0dns req=%s",
                                             tag, cpl_timeout_ns, req.convert2string()))
             pending_cpl.delete(tag);

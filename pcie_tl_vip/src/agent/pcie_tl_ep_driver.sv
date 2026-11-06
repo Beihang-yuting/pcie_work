@@ -1,9 +1,14 @@
 //-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - EP Driver
+// src/agent：PCIe EP requester/responder，依赖 base driver、Tag/内存及 config proxy。
+// driver 拥有 read-back 状态和 Completion analysis 入口，共享资源由 env 注入并保有所有权。
+// TLM 由 loopback 回调；native/bridge 接口由 monitor 同步回调，不依赖 EP 自动应答开关。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_ep_driver extends pcie_tl_base_driver;
     `uvm_component_utils(pcie_tl_ep_driver)
+
+    // 接口接收的 Completion 必须交实际 requester driver，统一完成分片回填及 Tag 回收。
+    uvm_analysis_imp #(pcie_tl_tlp, pcie_tl_ep_driver)	completion_analysis_imp;
 
     //--- Auto-response ---
     bit  auto_response_enable = 1;
@@ -30,8 +35,27 @@ class pcie_tl_ep_driver extends pcie_tl_base_driver;
     host_mem_api          mem;             // null → sparse mem_space path (default OFF)
     bit                   use_unified_mem; // mirror of cfg.use_unified_mem; default 0
 
-    function new(string name = "pcie_tl_ep_driver", uvm_component parent = null);
+    // 构造只设置组件身份；analysis 端口在 build 创建，共享组件在 connect 注入。
+    function new(string	name = "pcie_tl_ep_driver", uvm_component	parent = null);
         super.new(name, parent);
+    endfunction
+
+    // 创建 monitor 的 Completion 接收口；不自行接线，不改变 requester/responder 选择。
+    virtual function void build_phase(uvm_phase	phase);
+        super.build_phase(phase);
+        completion_analysis_imp = new("completion_analysis_imp", this);
+    endfunction
+
+    // 接口模式仅处理 Completion；普通请求仍由 responder 路径决定是否自动响应。
+    // TLM 不通过此口回填，以免与 loopback 重复；空 adapter/TLP 安全忽略。
+    virtual function void write(pcie_tl_tlp	tlp);
+        pcie_tl_cpl_tlp	cpl;
+
+        if ((adapter == null) || (adapter.mode != SV_IF_MODE) ||
+            (tlp == null) || (tlp.get_category() != TLP_CAT_COMPLETION))
+            return;
+        if ($cast(cpl, tlp))
+            handle_completion(cpl);
     endfunction
 
     //=========================================================================

@@ -81,8 +81,8 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
             rb_recv.delete(t);
             rb_total.delete(t);
             rb_wire.delete(t);
-            // Global registry for SV_IF/adapter mode, where the monitor (not the
-            // env/driver completion path) folds the returning CplD.
+            // 全局registry供无driver的被动接口观察回退；活跃native/bridge与TLM
+            // 都由实际driver回填，并在终片后回收该注册项，不能由monitor再折叠一次。
             pcie_rb_registry::register(tlp);
             on_tag_assigned(tlp);
         end

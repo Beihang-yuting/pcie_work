@@ -4,7 +4,8 @@
 // 与注入 memory 的所有权由创建方保留。build 建对象、connect 接观察流、run 驱动响应。
 // bridge 与 TLM loopback 互斥；SCB 的发送预登记及单侧观察补足在 connect 集中处理。
 // TLM 双向 Completion 在 driver 回填/释放 Tag 前同步交 SCB，迟到 monitor 不重复检查。
-// EP 同步检查先于接收 FIFO 入队，仅该双观察路径持有待 monitor 回收的句柄标记。
+// 双向同步检查先于接收 FIFO 入队，仅该双观察路径持有待 monitor 回收的句柄标记。
+// 接口模式由实际 requester driver 唯一消费 Completion；passive monitor 保留 registry 回退。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_env extends uvm_env;
@@ -1009,8 +1010,8 @@ class pcie_tl_env extends uvm_env;
                 ep_agents[i].bw_shaper = bw_shaper;
                 ep_agents[i].codec     = codec;
                 ep_agents[i].adapter   = ep_adapters[i];
-                // Bridge 模式下，EP Completion 由环境 FIFO 交给 EP driver；
-                // 关闭 monitor 内置的全局 registry fold，避免 payload 重复。
+                // 注入阶段先保留后端模式；后面的统一Completion接线会按实际driver
+                // 是否存在确定native/bridge消费与passive registry回退，避免重复回填。
                 ep_agents[i].external_completion_driver_enable = bridge_required;
                 ep_agents[i].inject_shared_components();
                 if (ep_agents[i].ep_driver != null)
@@ -1087,15 +1088,17 @@ class pcie_tl_env extends uvm_env;
             if (scbs.size() > r && scbs[r] != null)
                 rc_agents[r].monitor.tlp_ap.connect(scbs[r].rc_imp);
             rc_agents[r].monitor.tlp_ap.connect(cov.analysis_export);
-            // 外部 SVT bridge 的 Completion 不经过 env loopback；将 monitor
-            // 观察到的 Completion 交回 RC driver，完成 pending/tag 清理。
-            if (bridge_required && (rc_agents[r].rc_driver != null))
+            // native 与 bridge 都不经过 TLM loopback，接口 Completion 必须交实际
+            // requester driver。仅连接成功的活跃 agent 禁止 monitor registry 回填；
+            // passive 无 driver 时保留旧 registry fallback，不丢弃外部请求的观察数据。
+            rc_agents[r].external_completion_driver_enable =
+                (bridge_required || cfg.if_mode == SV_IF_MODE) &&
+                (rc_agents[r].rc_driver != null);
+            rc_agents[r].monitor.external_completion_driver_enable =
+                rc_agents[r].external_completion_driver_enable;
+            if (rc_agents[r].external_completion_driver_enable)
                 rc_agents[r].monitor.tlp_ap.connect(
                     rc_agents[r].rc_driver.completion_analysis_imp);
-            if (bridge_required)
-                rc_agents[r].external_completion_driver_enable = 1'b1;
-            if (bridge_required)
-                rc_agents[r].monitor.external_completion_driver_enable = 1'b1;
             if (bridge_required && (bridge_rc_rx_fifos.size() > r) &&
                 (bridge_rc_rx_fifos[r] != null))
                 rc_agents[r].monitor.tlp_ap.connect(
@@ -1119,7 +1122,8 @@ class pcie_tl_env extends uvm_env;
                 if (scbs.size() > si && scbs[si] != null)
                     ep_agents[i].monitor.tlp_ap.connect(scbs[si].ep_imp);
                 ep_agents[i].monitor.tlp_ap.connect(cov.analysis_export);
-                if (bridge_required && (bridge_ep_rx_fifos.size() > i) &&
+                connect_ep_completion_driver(ep_agents[i]);
+                if (bridge_required && cfg.ep_auto_response && (bridge_ep_rx_fifos.size() > i) &&
                     (bridge_ep_rx_fifos[i] != null))
                     ep_agents[i].monitor.tlp_ap.connect(
                         bridge_ep_rx_fifos[i].analysis_export);
@@ -1136,7 +1140,8 @@ class pcie_tl_env extends uvm_env;
             if (scb != null)
                 ep_agent.monitor.tlp_ap.connect(scb.ep_imp);
             ep_agent.monitor.tlp_ap.connect(cov.analysis_export);
-            if (bridge_required && (bridge_ep_rx_fifos.size() > 0) &&
+            connect_ep_completion_driver(ep_agent);
+            if (bridge_required && cfg.ep_auto_response && (bridge_ep_rx_fifos.size() > 0) &&
                 (bridge_ep_rx_fifos[0] != null))
                 ep_agent.monitor.tlp_ap.connect(
                     bridge_ep_rx_fifos[0].analysis_export);
@@ -1213,7 +1218,8 @@ class pcie_tl_env extends uvm_env;
                 if (scbs.size() > owner && scbs[owner] != null)
                     ep_agents[i].monitor.tlp_ap.connect(scbs[owner].ep_imp);
                 ep_agents[i].monitor.tlp_ap.connect(cov.analysis_export);
-                if (bridge_required && (bridge_ep_rx_fifos.size() > i) &&
+                connect_ep_completion_driver(ep_agents[i]);
+                if (bridge_required && cfg.ep_auto_response && (bridge_ep_rx_fifos.size() > i) &&
                     (bridge_ep_rx_fifos[i] != null))
                     ep_agents[i].monitor.tlp_ap.connect(
                         bridge_ep_rx_fifos[i].analysis_export);
@@ -1351,6 +1357,22 @@ class pcie_tl_env extends uvm_env;
             end
         end
         connect_bridge_scoreboard_tx();
+    endfunction
+
+    // EP 业务 FIFO 只在自动应答 dispatcher 启动时订阅观察流，避免关闭应答后积累
+    // 无消费者的 Completion 副本；SCB/coverage/下述 requester 回调始终保持独立。
+    // 为一个已连接的 EP monitor 选择唯一的 Completion 消费者，供标量/pair/switch 共用。
+    // native/bridge 活跃 EP 直接同步回调 driver，与 ep_auto_response 无关；TLM 保留
+    // loopback，passive 保留 registry。调用方每个实际 agent 只调用一次，避免双连接。
+    protected function void connect_ep_completion_driver(pcie_tl_ep_agent	agent);
+        if ((agent == null) || (agent.monitor == null))
+            return;
+        agent.external_completion_driver_enable =
+            (bridge_required || cfg.if_mode == SV_IF_MODE) && (agent.ep_driver != null);
+        agent.monitor.external_completion_driver_enable =
+            agent.external_completion_driver_enable;
+        if (agent.external_completion_driver_enable)
+            agent.monitor.tlp_ap.connect(agent.ep_driver.completion_analysis_imp);
     endfunction
 
     // 返回 EP 实际接入的 SCB 索引，严格沿用 connect_phase 的直连 pair/标量及
@@ -1552,19 +1574,12 @@ class pcie_tl_env extends uvm_env;
         end
     endtask
 
-    // Direct/single-EP bridge request dispatcher.
+    // 单 EP bridge 仅派发业务请求；Completion 已由 monitor 同步交 requester driver，禁止重复回填。
     protected task bridge_ep_request_loop_single();
-        pcie_tl_tlp tlp;
+        pcie_tl_tlp	tlp;
         forever begin
             bridge_ep_rx_fifos[0].get(tlp);
             if ((ep_agent != null) && (ep_agent.ep_driver != null) &&
-                (tlp != null) &&
-                (tlp.get_category() == TLP_CAT_COMPLETION)) begin
-                pcie_tl_cpl_tlp cpl;
-                if ($cast(cpl, tlp))
-                    ep_agent.ep_driver.handle_completion(cpl);
-            end
-            else if ((ep_agent != null) && (ep_agent.ep_driver != null) &&
                      (tlp != null) &&
                      (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
                                         TLP_CFG_RD0, TLP_CFG_WR0,
@@ -1578,19 +1593,12 @@ class pcie_tl_env extends uvm_env;
         end
     endtask
 
-    // Indexed dispatcher used by non-switch multi-EP and switch DS ports.
-    protected task bridge_ep_request_loop_index(int idx);
-        pcie_tl_tlp tlp;
+    // pair/switch bridge 按索引派发业务请求；Completion 由独立 analysis 回调消费，与自动应答无关。
+    protected task bridge_ep_request_loop_index(int	idx);
+        pcie_tl_tlp	tlp;
         forever begin
             bridge_ep_rx_fifos[idx].get(tlp);
             if ((idx < ep_agents.size()) && (ep_agents[idx] != null) &&
-                (ep_agents[idx].ep_driver != null) && (tlp != null) &&
-                (tlp.get_category() == TLP_CAT_COMPLETION)) begin
-                pcie_tl_cpl_tlp cpl;
-                if ($cast(cpl, tlp))
-                    ep_agents[idx].ep_driver.handle_completion(cpl);
-            end
-            else if ((idx < ep_agents.size()) && (ep_agents[idx] != null) &&
                      (ep_agents[idx].ep_driver != null) && (tlp != null) &&
                      (tlp.kind inside {TLP_MEM_RD, TLP_MEM_RD_LK, TLP_MEM_WR,
                                         TLP_CFG_RD0, TLP_CFG_WR0,
@@ -1670,17 +1678,19 @@ class pcie_tl_env extends uvm_env;
     //=========================================================================
     // TLM Loopback: EP tx -> RC rx (completions and DMA)
     //=========================================================================
+    // RC Completion 在 monitor 可读之前同步检查并登记去重标记，随后交 driver 回收；
+    // EP 请求仍按原 unified/legacy responder 路径预登记并响应，不改变内存所有权。
     protected task tlm_loopback_ep_to_rc();
-        pcie_tl_tlp tlp;
+        pcie_tl_tlp	tlp;
         forever begin
             ep_adapter.tlm_tx_fifo.get(tlp);
             `uvm_info("ENV_LOOP", $sformatf("EP->RC: %s", tlp.convert2string()), UVM_HIGH)
+            // 同步检查早于 RX FIFO，保证 monitor 仅消费已登记的同句柄去重标记。
+            if (tlp.get_category() == TLP_CAT_COMPLETION && scb != null)
+                scb.write_rc(tlp, 1'b1);
             rc_adapter.tlm_rx_fifo.put(tlp);
             replenish_credits(tlp);
             if (tlp.get_category() == TLP_CAT_COMPLETION) begin
-                // Write completion to scoreboard IMMEDIATELY (before tag is freed/reused)
-                if (scb != null)
-                    scb.write_rc(tlp);
                 // Then handle in RC driver (may free tag)
                 if (rc_agent.rc_driver != null) begin
                     pcie_tl_cpl_tlp cpl;
@@ -1752,16 +1762,18 @@ class pcie_tl_env extends uvm_env;
     //=========================================================================
     // Non-switch pair loopback: EP[i] tx -> RC[i] rx (completions + unified DMA)
     //=========================================================================
-    protected task tlm_loopback_ep_to_rc_pair(int i);
-        pcie_tl_tlp tlp;
-        int mi = (i < fc_mgrs.size()) ? i : 0;
+    // 独立 pair 的 RC 回程与标量路径同序：SCB 同步检查、FIFO 入队、driver 回收。
+    // 采用本 pair 的 SCB 和 manager，不跨 Root 登记或消费。
+    protected task tlm_loopback_ep_to_rc_pair(int	i);
+        pcie_tl_tlp	tlp;
+        int	mi = (i < fc_mgrs.size()) ? i : 0;
         forever begin
             ep_adapters[i].tlm_tx_fifo.get(tlp);
+            if (tlp.get_category() == TLP_CAT_COMPLETION && scbs.size() > i && scbs[i] != null)
+                scbs[i].write_rc(tlp, 1'b1);
             rc_adapters[i].tlm_rx_fifo.put(tlp);
             replenish_port_credits(fc_mgrs[mi], tlp);
             if (tlp.get_category() == TLP_CAT_COMPLETION) begin
-                if (scbs.size() > i && scbs[i] != null)
-                    scbs[i].write_rc(tlp);
                 if (rc_agents[i].rc_driver != null) begin
                     pcie_tl_cpl_tlp cpl;
                     if ($cast(cpl, tlp))
@@ -1937,16 +1949,17 @@ class pcie_tl_env extends uvm_env;
         end
     endtask
 
-    // Switch USP[r] tx -> RC[r] rx
-    protected task switch_to_rc_loopback(int r);
-        pcie_tl_tlp tlp;
+    // Switch USP 输出投递给所属 RC；Completion 先同步交该 Root 的 SCB，再入
+    // 接收 FIFO 并由 driver 回收 Tag。请求仍走该 Root 的既有 responder。
+    protected task switch_to_rc_loopback(int	r);
+        pcie_tl_tlp	tlp;
         forever begin
             sw.usps[r].tx_fifo.get(tlp);
+            if (tlp.get_category() == TLP_CAT_COMPLETION && scbs[r] != null)
+                scbs[r].write_rc(tlp, 1'b1);
             rc_adapters[r].tlm_rx_fifo.put(tlp);
             replenish_credits(tlp);
             if (tlp.get_category() == TLP_CAT_COMPLETION) begin
-                if (scbs[r] != null)
-                    scbs[r].write_rc(tlp);
                 if (rc_agents[r].rc_driver != null) begin
                     pcie_tl_cpl_tlp cpl;
                     if ($cast(cpl, tlp))
@@ -2118,9 +2131,9 @@ class pcie_tl_env extends uvm_env;
         foreach (scbs[r]) begin
             if (scbs[r] == null) continue;
             // TLM 双向请求由 loopback 在响应前预登记，Completion 又先于 Tag 释放
-            // 同步检查；迟到 RX 只计数，不能复活旧请求。新 RC 开关必须保留
-            // 原生 SV_IF_MODE 和 backend bridge 的 RX 登记，不能把非bridge等同TLM。
-            scbs[r].ep_rx_pending_enable    = bridge_required;
+            // 同步检查；迟到 RX 只计数，不能复活旧请求。双向均保留原生
+            // SV_IF_MODE 和 backend bridge 的 RX 登记，不能把非bridge等同TLM。
+            scbs[r].ep_rx_pending_enable    = bridge_required || (cfg.if_mode != TLM_MODE);
             scbs[r].rc_rx_pending_enable    = bridge_required || (cfg.if_mode != TLM_MODE);
             scbs[r].ordering_check_enable   = cfg.ordering_check_enable;
             scbs[r].completion_check_enable = cfg.completion_check_enable;

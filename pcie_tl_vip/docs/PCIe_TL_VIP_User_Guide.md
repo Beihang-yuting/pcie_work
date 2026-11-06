@@ -209,6 +209,36 @@ $VCS_HOME/bin/vcs -full64 -sverilog -ntb_opts uvm-1.2 \
 ./simv +UVM_TESTNAME=pcie_tl_stress_test +UVM_VERBOSITY=UVM_LOW
 ```
 
+原生 `SV_IF_MODE` 的双向 Completion 生命周期有独立严格回归。在 VCS 主机加载工具环境、
+设置 `HOST_MEM_ROOT` 后，从仓库根目录执行：
+
+```bash
+export HOST_MEM_ROOT=/path/to/host_mem
+pcie_tl_vip/sim/run_native_sv_if.sh
+# 可选：真实provider构建路径的中性合同测试，不依赖Synopsys SVT安装。
+BRIDGE_CONTRACT=1 pcie_tl_vip/sim/run_native_sv_if.sh
+```
+
+默认 runner 一次编译运行 RC/EP 各一笔 4B 请求，再分别运行 41 笔请求，其中 40 笔采用两片
+32B CplD 返回。32-Tag 池必须发生合法重用；首片必须保留 pending/Tag/registry，终片必须
+准确回填且清空 SCB、driver、Tag 和 registry 跟踪。RC 还复用同一个请求句柄与 Tag，刻意让
+旧一代 timeout 在新请求首片与终片之间到期，验证分配代次隔离；最后等待全部 timer 窗口结束。
+编译与运行均要求 warning/error/fatal 为零，并要求 `NATIVE_SV_IF_PASS`，失败时脚本返回非零。
+可用 `BUILD_DIR` 指定独立产物目录；默认产物在 `sim/build/native_sv_if`。
+
+专用 top 提供两条单向 `pcie_tl_if`，RC/EP driver 使用原生 adapter 发送，对端 monitor
+交叉接到该发送 adapter 的接口。peer 只根据真实 monitor 解码的请求，通过另一方向 adapter
+返回 Completion。测试没有补 SCB 登记或 driver 回调，不能据此认为默认单接口 top 自动完成了
+双向接线，也不代表真实 DUT 验证。active native/bridge requester 的 Completion 由实际 driver
+统一回填与释放；无 driver 的 passive monitor 保留 registry 回退。接口单次观察不会持有 TLM
+双观察路径才需要的 Completion 去重标记。
+
+`BRIDGE_CONTRACT=1` 复用已有 fake provider，经过 `global_cfg`、provider 构建和映射验证，
+运行 RC/EP 自动应答关闭及 EP 自动应答开启三个场景，检查无重复折叠且业务 FIFO 不积压。
+桥模式下，专用 top 通过 `pcie_tl_if.fc_update` 为每个已接受的单拍 MRd 归还一个 NPH，
+使有限信用的 switch EP 端口可持续发送；生产 FC 检查仍然启用。
+这只验证中性 bridge 合同及真实 TL 接口，不验证 Synopsys Serial/PIPE 或 RTL switch。
+
 ### 3.3 编写第一个测试
 
 ```systemverilog

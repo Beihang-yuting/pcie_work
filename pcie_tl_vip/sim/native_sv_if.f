@@ -1,0 +1,23 @@
+// 原生SV_IF专用回归；两条单向接口由专用top提供，不混入默认TLM top。
++incdir+$HOST_MEM_ROOT/src
+$HOST_MEM_ROOT/src/host_mem_pkg.sv
+$HOST_MEM_ROOT/src/host_mem_manager.sv
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/types
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/shared
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/agent
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/env
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/adapter
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/seq/base
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/seq/constraints
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/seq/scenario
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/seq/virtual
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/switch
++incdir+$PCIE_WORK_ROOT/pcie_tl_vip/src/topology
+$PCIE_WORK_ROOT/pcie_tl_vip/src/pcie_tl_if.sv
+$PCIE_WORK_ROOT/pcie_tl_vip/src/shared/pcie_tl_bdf_utils_pkg.sv
+$PCIE_WORK_ROOT/pcie_tl_vip/src/shared/pcie_tl_device_profile_pkg.sv
+$PCIE_WORK_ROOT/pcie_tl_vip/src/topology/pcie_topology_pkg.sv
+$PCIE_WORK_ROOT/pcie_tl_vip/src/pcie_tl_pkg.sv
+$PCIE_WORK_ROOT/pcie_tl_vip/tests/pcie_tl_native_sv_if_test.sv
+$PCIE_WORK_ROOT/pcie_tl_vip/tests/pcie_tl_native_sv_if_tb_top.sv
