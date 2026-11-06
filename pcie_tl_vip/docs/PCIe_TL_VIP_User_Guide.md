@@ -974,10 +974,11 @@ wr.mode = CONSTRAINT_ILLEGAL;
 wr.start(env.rc_agent.sequencer);
 ```
 
-`constraint_mode_sel` 默认 soft 为 `CONSTRAINT_LEGAL`。错误注入字段和 `ep_bit`
-在三个模式下都分别 soft 默认 0；`ILLEGAL`/`CORNER_CASE` 仅选择结构约束的适用范围，
-不会自动随机开启这些错误标志。需要明确的 Poisoned 或字段翻转用例时，使用第 12.3
-节的专用 sequence，或在 `randomize() with` 中显式覆盖相应字段。
+`constraint_mode_sel` 默认 soft 为 `CONSTRAINT_LEGAL`。错误注入字段、`ep_bit` 和
+`td` 在三个模式下都分别 soft 默认 0；`td=1` 才表示线上携带 ECRC Digest。`ILLEGAL`/
+`CORNER_CASE` 仅选择结构约束的适用范围，不会自动随机开启错误标志或 ECRC。需要明确
+的 Poisoned、字段翻转或 ECRC 用例时，使用第 12.3 节的专用 sequence，或在
+`randomize() with` 中显式覆盖相应字段。
 
 ### 9.3 场景 Sequence (src/seq/scenario/)
 
@@ -1108,9 +1109,10 @@ env.cov.register_callback(my_cov);
 | `violate_ordering` | `bit` | 跳过排序引擎 |
 | `field_bitmask` | `bit [31:0]` | 对头字段按位翻转 |
 | `ep_bit` | `bit` | Header 的 Poisoned 位，默认 soft 为 0 |
+| `td` | `bit` | TLP Digest/ECRC 存在标志，默认 soft 为 0 |
 | `constraint_mode_sel` | `tlp_constraint_mode_e` | LEGAL / ILLEGAL / CORNER_CASE |
 
-五个错误注入字段与 `ep_bit` 均有独立的 `soft ... == 0` 默认约束，覆盖一项不会
+五个错误注入字段、`ep_bit` 与 `td` 均有独立的 `soft ... == 0` 默认约束，覆盖一项不会
 解除其他项的默认值。负例可直接指定目标错误，默认结构约束仍保持 LEGAL：
 
 ```systemverilog
@@ -1120,7 +1122,8 @@ if (!tlp.randomize() with {
     inject_poisoned == 1;
 })
     `uvm_fatal("RANDOMIZE", "poison write randomization failed")
-// 其他错误注入字段和原始 ep_bit 仍为 0；codec 发送时根据 inject_poisoned 设置 EP 位。
+// 其他错误注入字段、原始 ep_bit 和 td 仍为 0；codec 发送时根据 inject_poisoned
+// 设置 EP 位。需要 ECRC 时显式指定 td == 1。
 ```
 
 `rand` 字段的声明初始化（例如 `= 0`）不能代替约束，后续 `randomize()` 会重新

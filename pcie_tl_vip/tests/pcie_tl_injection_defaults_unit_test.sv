@@ -90,7 +90,8 @@ class pcie_tl_injection_defaults_unit_test extends uvm_test;
         return base;
     endfunction
 
-    // 将五个单比特与 32-bit mask 打包比较，确保未选中的每一项都必须为零。
+    // 将五个注入单比特与 32-bit mask 打包比较，确保未选中的每一项都必须为零。
+    // TD 另行检查：普通随机事务默认不携带 ECRC，但它仍可被显式覆盖。
     // [36:32]={EP,ordering,poison,LCRC,ECRC}，[31:0]=field_bitmask；模式也精确匹配。
     function void check_fields(pcie_tl_tlp tlp,
                                tlp_constraint_mode_e expected_mode,
@@ -101,6 +102,10 @@ class pcie_tl_injection_defaults_unit_test extends uvm_test;
         actual_fields = {tlp.ep_bit, tlp.violate_ordering, tlp.inject_poisoned,
                          tlp.inject_lcrc_err, tlp.inject_ecrc_err, tlp.field_bitmask};
         checks++;
+        if (tlp.td !== 1'b0)
+            `uvm_error("INJECT_DEFAULTS", $sformatf(
+                "%s td=%0b expected=0 (ordinary traffic must not carry ECRC)",
+                label_text, tlp.td))
         if ((actual_fields !== expected_fields) ||
             (tlp.constraint_mode_sel != expected_mode))
             `uvm_error("INJECT_DEFAULTS", $sformatf(

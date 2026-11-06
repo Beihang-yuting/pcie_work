@@ -129,6 +129,13 @@ class pcie_tl_tlp extends uvm_sequence_item;
         soft field_bitmask    == 32'b0;
     }
 
+    // TD is the on-wire TLP Digest flag, not an error-injection control.
+    // Ordinary traffic does not carry an ECRC trailer; explicit ECRC/TD
+    // sequences may override this soft default with td == 1.
+    constraint c_default_no_ecrc {
+        soft td == 1'b0;
+    }
+
     constraint c_default_mode {
         soft constraint_mode_sel == CONSTRAINT_LEGAL;
     }
