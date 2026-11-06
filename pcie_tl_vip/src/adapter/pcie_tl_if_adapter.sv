@@ -25,6 +25,18 @@ class pcie_tl_if_adapter extends uvm_component;
         super.new(name, parent);
     endfunction
 
+    // 返回该适配器是否依赖旧式 virtual pcie_tl_if。FULL_VIP/SVT 等
+    // transport 适配器可以保持默认值 0，避免被误判为缺少旧式 VIF。
+    virtual function bit native_vif_required();
+        return 1'b0;
+    endfunction
+
+    // 返回适配器自己的物理接口是否已经完成绑定。该查询必须在子组件
+    // build_phase 之后使用；不能在父 env 的 build_phase 中提前读取。
+    virtual function bit native_vif_bound();
+        return (vif != null);
+    endfunction
+
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
         tlm_tx_fifo = new("tlm_tx_fifo", this, 256);

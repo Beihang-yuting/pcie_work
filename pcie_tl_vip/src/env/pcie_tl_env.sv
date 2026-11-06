@@ -919,8 +919,32 @@ class pcie_tl_env extends uvm_env;
     // Connect Phase
     //=========================================================================
     // 注入共享依赖并连接每个 root 的接收观察流，最后补 bridge 发送预登记与单侧观察。
+    // 子 adapter 的 build_phase 已在此阶段完成；native_vif 检查不能放在
+    // apply_config()，否则 Intel 的 avst_vif 尚未读取就会产生误报。
     function void connect_phase(uvm_phase phase);
         super.connect_phase(phase);
+
+        foreach (rc_adapters[r]) begin
+            if ((rc_adapters[r] != null) &&
+                rc_adapters[r].native_vif_required() &&
+                !rc_adapters[r].native_vif_bound())
+                `uvm_error("ENV_BRIDGE_DIAG", $sformatf(
+                    "%s RC adapter %0d requires a native VIF but it is not bound",
+                    get_full_name(), r))
+        end
+        if ((ep_adapter != null) && ep_adapter.native_vif_required() &&
+            !ep_adapter.native_vif_bound())
+            `uvm_error("ENV_BRIDGE_DIAG", $sformatf(
+                "%s scalar EP adapter requires a native VIF but it is not bound",
+                get_full_name()))
+        foreach (ep_adapters[i]) begin
+            if ((ep_adapters[i] != null) &&
+                ep_adapters[i].native_vif_required() &&
+                !ep_adapters[i].native_vif_bound())
+                `uvm_error("ENV_BRIDGE_DIAG", $sformatf(
+                    "%s EP adapter %0d requires a native VIF but it is not bound",
+                    get_full_name(), i))
+        end
 
         // 1. Inject shared components into RC agents (one per root, indexed managers/adapters)
         foreach (rc_agents[r]) begin
@@ -944,6 +968,8 @@ class pcie_tl_env extends uvm_env;
             rc_agents[r].codec     = codec;
             rc_agents[r].adapter   = rc_adapters[r];
             rc_agents[r].inject_shared_components();
+            if (rc_agents[r].rc_driver != null)
+                rc_agents[r].rc_driver.tx_delay_model = rc2ep_delay;
         end
 
         // 1b. EP injection: non-switch multi-EP wires every independent link
@@ -985,6 +1011,8 @@ class pcie_tl_env extends uvm_env;
                 // 关闭 monitor 内置的全局 registry fold，避免 payload 重复。
                 ep_agents[i].external_completion_driver_enable = bridge_required;
                 ep_agents[i].inject_shared_components();
+                if (ep_agents[i].ep_driver != null)
+                    ep_agents[i].ep_driver.tx_delay_model = ep2rc_delay;
                 if (ep_agents[i].ep_driver != null) begin
                     ep_agents[i].ep_driver.mps_bytes       = int'(cfg.max_payload_size);
                     ep_agents[i].ep_driver.rcb_bytes       = int'(cfg.read_completion_boundary);
@@ -1014,6 +1042,8 @@ class pcie_tl_env extends uvm_env;
             ep_agent.adapter   = ep_adapter;
             ep_agent.external_completion_driver_enable = bridge_required;
             ep_agent.inject_shared_components();
+            if (ep_agent.ep_driver != null)
+                ep_agent.ep_driver.tx_delay_model = ep2rc_delay;
             if (ep_agent.ep_driver != null) begin
                 ep_agent.ep_driver.mps_bytes = int'(cfg.max_payload_size);
                 ep_agent.ep_driver.rcb_bytes = int'(cfg.read_completion_boundary);
@@ -1160,6 +1190,8 @@ class pcie_tl_env extends uvm_env;
                 ep_agents[i].adapter   = ep_adapters[i];
                 ep_agents[i].external_completion_driver_enable = bridge_required;
                 ep_agents[i].inject_shared_components();
+                if (ep_agents[i].ep_driver != null)
+                    ep_agents[i].ep_driver.tx_delay_model = ep2rc_delay;
                 if (ep_agents[i].ep_driver != null) begin
                     ep_agents[i].ep_driver.mps_bytes        = int'(cfg.max_payload_size);
                     ep_agents[i].ep_driver.rcb_bytes        = int'(cfg.read_completion_boundary);
@@ -1608,7 +1640,9 @@ class pcie_tl_env extends uvm_env;
             if (scb != null && tlp.requires_completion())
                 scb.register_pending(tlp);
 
-            rc2ep_delay.forward(tlp, ep_adapter.tlm_rx_fifo);
+            // 链路延时已在 RC driver 进入 adapter 前统一应用；这里仅完成
+            // TLM 端点投递，避免同一 TLP 被延迟两次。
+            ep_adapter.tlm_rx_fifo.put(tlp);
             replenish_credits(tlp);
             if (ep_agent.ep_driver != null &&
                 tlp.get_category() == TLP_CAT_COMPLETION) begin
@@ -1634,7 +1668,7 @@ class pcie_tl_env extends uvm_env;
         forever begin
             ep_adapter.tlm_tx_fifo.get(tlp);
             `uvm_info("ENV_LOOP", $sformatf("EP->RC: %s", tlp.convert2string()), UVM_HIGH)
-            ep2rc_delay.forward(tlp, rc_adapter.tlm_rx_fifo);
+            rc_adapter.tlm_rx_fifo.put(tlp);
             replenish_credits(tlp);
             if (tlp.get_category() == TLP_CAT_COMPLETION) begin
                 // Write completion to scoreboard IMMEDIATELY (before tag is freed/reused)
@@ -1686,7 +1720,7 @@ class pcie_tl_env extends uvm_env;
             rc_adapters[i].tlm_tx_fifo.get(tlp);
             if (scbs.size() > i && scbs[i] != null && tlp.requires_completion())
                 scbs[i].register_pending(tlp);
-            rc2ep_delay.forward(tlp, ep_adapters[i].tlm_rx_fifo);
+            ep_adapters[i].tlm_rx_fifo.put(tlp);
             replenish_port_credits(fc_mgrs[mi], tlp);
             if (ep_agents[i].ep_driver != null &&
                 tlp.get_category() == TLP_CAT_COMPLETION) begin
@@ -1710,7 +1744,7 @@ class pcie_tl_env extends uvm_env;
         int mi = (i < fc_mgrs.size()) ? i : 0;
         forever begin
             ep_adapters[i].tlm_tx_fifo.get(tlp);
-            ep2rc_delay.forward(tlp, rc_adapters[i].tlm_rx_fifo);
+            rc_adapters[i].tlm_rx_fifo.put(tlp);
             replenish_port_credits(fc_mgrs[mi], tlp);
             if (tlp.get_category() == TLP_CAT_COMPLETION) begin
                 if (scbs.size() > i && scbs[i] != null)
@@ -2075,26 +2109,14 @@ class pcie_tl_env extends uvm_env;
                 // SVT forward 模式必须保持 SV_IF_MODE，monitor 才会把外部
                 // Completion 交回 RC driver；普通 TL-only 仍沿用 cfg.if_mode。
                 rc_adapters[r].mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
-                if (bridge_required && (rc_adapters[r].vif == null))
-                    `uvm_info("ENV_BRIDGE_DIAG", $sformatf(
-                        "%s RC adapter %0d entered SV_IF_MODE without vif",
-                        get_full_name(), r), UVM_NONE)
             end
         end
         if (ep_adapter != null) begin
             ep_adapter.mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
-            if (bridge_required && (ep_adapter.vif == null))
-                `uvm_info("ENV_BRIDGE_DIAG", $sformatf(
-                    "%s scalar EP adapter entered SV_IF_MODE without vif",
-                    get_full_name()), UVM_NONE)
         end
         foreach (ep_adapters[i]) begin
             if (ep_adapters[i] != null) begin
                 ep_adapters[i].mode = bridge_required ? SV_IF_MODE : cfg.if_mode;
-                if (bridge_required && (ep_adapters[i].vif == null))
-                    `uvm_info("ENV_BRIDGE_DIAG", $sformatf(
-                        "%s EP adapter %0d entered SV_IF_MODE without vif",
-                        get_full_name(), i), UVM_NONE)
             end
         end
 
@@ -2108,14 +2130,14 @@ class pcie_tl_env extends uvm_env;
 
         // Link Delay
         rc2ep_delay.enable          = cfg.link_delay_enable;
-        rc2ep_delay.latency_min_ns  = cfg.rc2ep_latency_min_ns;
-        rc2ep_delay.latency_max_ns  = cfg.rc2ep_latency_max_ns;
-        rc2ep_delay.update_interval = cfg.link_delay_update_interval;
+        rc2ep_delay.set_update_interval(cfg.link_delay_update_interval);
+        rc2ep_delay.set_latency(cfg.rc2ep_latency_min_ns,
+                                cfg.rc2ep_latency_max_ns);
 
         ep2rc_delay.enable          = cfg.link_delay_enable;
-        ep2rc_delay.latency_min_ns  = cfg.ep2rc_latency_min_ns;
-        ep2rc_delay.latency_max_ns  = cfg.ep2rc_latency_max_ns;
-        ep2rc_delay.update_interval = cfg.link_delay_update_interval;
+        ep2rc_delay.set_update_interval(cfg.link_delay_update_interval);
+        ep2rc_delay.set_latency(cfg.ep2rc_latency_min_ns,
+                                 cfg.ep2rc_latency_max_ns);
 
     endfunction
 

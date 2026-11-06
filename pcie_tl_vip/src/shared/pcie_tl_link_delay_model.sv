@@ -85,6 +85,37 @@ class pcie_tl_link_delay_model extends uvm_component;
         end
     endtask
 
+    // 在发送端同步等待一个 TLP 的链路延时。该入口供 pcie_tl_env
+    // 注入到公共 driver，adapter 只负责具体传输接口，不再重复实现延时。
+    // driver 对同一端口串行调用本 task，因此自然保持 TLP 顺序。
+    task wait_delay();
+        int this_latency_ns;
+
+        if (!enable) begin
+            total_forwarded++;
+            return;
+        end
+
+        tlp_count++;
+        if ((update_interval > 0) && (tlp_count >= update_interval)) begin
+            update_latency();
+            tlp_count = 0;
+        end
+
+        this_latency_ns = current_latency_ns;
+        total_forwarded++;
+        if (this_latency_ns > 0)
+            total_delayed++;
+        if ((total_delayed == 1) ||
+            ((this_latency_ns > 0) && (this_latency_ns < min_applied_ns)))
+            min_applied_ns = this_latency_ns;
+        if (this_latency_ns > max_applied_ns)
+            max_applied_ns = this_latency_ns;
+
+        if (this_latency_ns > 0)
+            #(this_latency_ns * 1ns);
+    endtask
+
     //=========================================================================
     // Randomize delay value
     //=========================================================================

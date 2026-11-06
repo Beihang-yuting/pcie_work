@@ -15,6 +15,10 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
     pcie_tl_bw_shaper          bw_shaper;
     pcie_tl_codec              codec;
 
+    // 发送方向的链路延时由 pcie_tl_env 按 RC/EP 方向注入；driver 不依赖
+    // 任何具体的 Intel、Xilinx 或 SVT 接口类型。
+    pcie_tl_link_delay_model   tx_delay_model;
+
     //--- Adapter reference ---
     pcie_tl_if_adapter         adapter;
 
@@ -95,8 +99,11 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
         codec.encode(tlp, bytes);
 
         // 5. 最终 Tag 已分配，发送权限与编码已完成。必须先同步通知 SCB，
-        // 再进入可能阻塞且允许对端立即响应的 adapter.send；TLM 无连接时无副作用。
+        // 再等待链路延时，最后进入具体 adapter.send；这样延时期间 pending
+        // 和 Tag 仍然有效，Completion 不会被误判为 unexpected。
         tx_ap.write(tlp);
+        if (tx_delay_model != null)
+            tx_delay_model.wait_delay();
         adapter.send(tlp);
 
         // 6. Consume FC credit
