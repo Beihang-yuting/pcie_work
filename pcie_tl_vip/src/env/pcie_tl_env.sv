@@ -3,6 +3,8 @@
 // 依赖 env_config/backend provider 和公共 adapter；env 拥有本地组件，外部 provider
 // 与注入 memory 的所有权由创建方保留。build 建对象、connect 接观察流、run 驱动响应。
 // bridge 与 TLM loopback 互斥；SCB 的发送预登记及单侧观察补足在 connect 集中处理。
+// TLM 双向 Completion 在 driver 回填/释放 Tag 前同步交 SCB，迟到 monitor 不重复检查。
+// EP 同步检查先于接收 FIFO 入队，仅该双观察路径持有待 monitor 回收的句柄标记。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_env extends uvm_env;
@@ -1629,8 +1631,10 @@ class pcie_tl_env extends uvm_env;
     //=========================================================================
     // TLM Loopback: RC tx -> EP rx, then EP auto-responds
     //=========================================================================
+    // 投递单链路请求；EP DMA Completion 先同步交 SCB，再回填并释放 Tag。
+    // monitor 随后观察同一句柄时由 SCB 去重，避免短 Tag 池零时间重用丢失 pending。
     protected task tlm_loopback_rc_to_ep();
-        pcie_tl_tlp tlp;
+        pcie_tl_tlp	tlp;
         forever begin
             rc_adapter.tlm_tx_fifo.get(tlp);
             `uvm_info("ENV_LOOP", $sformatf("RC->EP: %s", tlp.convert2string()), UVM_HIGH)
@@ -1642,13 +1646,16 @@ class pcie_tl_env extends uvm_env;
 
             // 链路延时已在 RC driver 进入 adapter 前统一应用；这里仅完成
             // TLM 端点投递，避免同一 TLP 被延迟两次。
+            // 先完成同步观察再入接收 FIFO，保证 monitor 不能抢先消费并建立相反顺序。
+            if (ep_agent.ep_driver != null &&
+                tlp.get_category() == TLP_CAT_COMPLETION && scb != null)
+                scb.write_ep(tlp, 1'b1);
             ep_adapter.tlm_rx_fifo.put(tlp);
             replenish_credits(tlp);
             if (ep_agent.ep_driver != null &&
                 tlp.get_category() == TLP_CAT_COMPLETION) begin
-                // CplD for an EP-originated request (e.g. DMA read): fold
-                // read-back data onto the request object so the EP seq can read it.
-                pcie_tl_cpl_tlp cpl;
+                pcie_tl_cpl_tlp	cpl;
+
                 if ($cast(cpl, tlp)) ep_agent.ep_driver.handle_completion(cpl);
             end
             else if (cfg.ep_auto_response && ep_agent.ep_driver != null) begin
@@ -1713,20 +1720,26 @@ class pcie_tl_env extends uvm_env;
     //=========================================================================
     // Non-switch pair loopback: RC[i] tx -> EP[i] rx (+ EP auto-response)
     //=========================================================================
-    protected task tlm_loopback_rc_to_ep_pair(int i);
-        pcie_tl_tlp tlp;
-        int mi = (i < fc_mgrs.size()) ? i : 0;
+    // 独立链路 pair 与标量路径保持相同时序：所属 SCB 先消费 Completion，
+    // 再让 EP driver 结束该请求；禁用 SCB 时仅跳过检查，不改变传输或回填。
+    protected task tlm_loopback_rc_to_ep_pair(int	i);
+        pcie_tl_tlp	tlp;
+        int	mi = (i < fc_mgrs.size()) ? i : 0;
         forever begin
             rc_adapters[i].tlm_tx_fifo.get(tlp);
             if (scbs.size() > i && scbs[i] != null && tlp.requires_completion())
                 scbs[i].register_pending(tlp);
+            // 标记只为即将进入同一接收 FIFO 的 Completion 保留，monitor 消费后回收。
+            if (ep_agents[i].ep_driver != null &&
+                tlp.get_category() == TLP_CAT_COMPLETION &&
+                scbs.size() > i && scbs[i] != null)
+                scbs[i].write_ep(tlp, 1'b1);
             ep_adapters[i].tlm_rx_fifo.put(tlp);
             replenish_port_credits(fc_mgrs[mi], tlp);
             if (ep_agents[i].ep_driver != null &&
                 tlp.get_category() == TLP_CAT_COMPLETION) begin
-                // CplD for an EP-originated request: fold read-back data onto
-                // the request object so the EP seq can read it.
-                pcie_tl_cpl_tlp cpl;
+                pcie_tl_cpl_tlp	cpl;
+
                 if ($cast(cpl, tlp)) ep_agents[i].ep_driver.handle_completion(cpl);
             end
             else if (cfg.ep_auto_response && ep_agents[i].ep_driver != null) begin
@@ -1966,18 +1979,26 @@ class pcie_tl_env extends uvm_env;
         end
     endtask
 
-    // Switch DSP[i] tx -> EP[i] rx (+ EP auto-response)
-    protected task switch_to_ep_loopback(int idx);
-        pcie_tl_tlp tlp;
+    // 将 Switch DSP 输出投递到 EP；Completion 在 EP 释放 Tag 前同步交所属 Root
+    // 的 SCB，沿用 monitor 的 DSP owner/显式 Root 映射，不把多 Root 统计混到 Root0。
+    protected task switch_to_ep_loopback(int	idx);
+        pcie_tl_tlp	tlp;
         forever begin
             sw.dsp[idx].tx_fifo.get(tlp);
+            if (ep_agents[idx].ep_driver != null &&
+                tlp.get_category() == TLP_CAT_COMPLETION) begin
+                int	owner;
+
+                owner = bridge_ep_scoreboard_index(idx);
+                if (owner >= 0 && owner < scbs.size() && scbs[owner] != null)
+                    scbs[owner].write_ep(tlp, 1'b1);
+            end
             ep_adapters[idx].tlm_rx_fifo.put(tlp);
             replenish_credits(tlp);
             if (ep_agents[idx].ep_driver != null &&
                 tlp.get_category() == TLP_CAT_COMPLETION) begin
-                // CplD for an EP-originated request: fold read-back data onto
-                // the request object so the EP seq can read it.
-                pcie_tl_cpl_tlp cpl;
+                pcie_tl_cpl_tlp	cpl;
+
                 if ($cast(cpl, tlp)) ep_agents[idx].ep_driver.handle_completion(cpl);
             end
             else if (cfg.ep_auto_response && ep_agents[idx].ep_driver != null) begin
@@ -2051,6 +2072,8 @@ class pcie_tl_env extends uvm_env;
     //=========================================================================
     // Apply configuration to all components
     //=========================================================================
+    // 将已确定的行为策略传给现有组件，不重建拓扑或重载参数；SCB 的观察模式
+    // 必须区分 TLM 预登记与接口 RX 登记，避免同步完成后迟到 monitor 复活请求。
     function void apply_config();
         // FC (per-root)
         foreach (fc_mgrs[r]) begin
@@ -2094,8 +2117,11 @@ class pcie_tl_env extends uvm_env;
         // Scoreboard (per-root)
         foreach (scbs[r]) begin
             if (scbs[r] == null) continue;
-            // TLM EP 请求由 loopback 在转发前登记；bridge 则允许仅有 EP 的 RX 登记。
+            // TLM 双向请求由 loopback 在响应前预登记，Completion 又先于 Tag 释放
+            // 同步检查；迟到 RX 只计数，不能复活旧请求。新 RC 开关必须保留
+            // 原生 SV_IF_MODE 和 backend bridge 的 RX 登记，不能把非bridge等同TLM。
             scbs[r].ep_rx_pending_enable    = bridge_required;
+            scbs[r].rc_rx_pending_enable    = bridge_required || (cfg.if_mode != TLM_MODE);
             scbs[r].ordering_check_enable   = cfg.ordering_check_enable;
             scbs[r].completion_check_enable = cfg.completion_check_enable;
             scbs[r].data_integrity_enable   = cfg.data_integrity_enable;

@@ -1,12 +1,20 @@
-//-----------------------------------------------------------------------------
-// PCIe Transaction Layer VIP - Top-level Package
-//-----------------------------------------------------------------------------
+/*
+ * 所属层次：pcie_tl_vip/src；PCIe TL VIP 的公共 package 聚合入口。
+ * 文件职责：按依赖顺序汇集类型、组件、配置和 sequence，保持唯一类型定义。
+ * 主要依赖：UVM、PCIe topology/BDF/device profile 及 host_mem；不依赖 DPU package。
+ * 所有权与生命周期：package 只定义类型，配置和组件由调用方/UVM 管理；不自动读取参数。
+ * 可选 AIP 必须先编译 aip_core_pkg；其 AIP_CMDLINE_SV guard 决定是否启用显式加载接口。
+ */
 
 package pcie_tl_pkg;
 
     import uvm_pkg::*;
     import pcie_topology_pkg::*;
     import host_mem_pkg::*;
+`ifdef AIP_CMDLINE_SV
+    // 只借用已经编译的统一 AIP 类型，不直接 include 其实现，避免重复静态状态。
+    import aip_core_pkg::*;
+`endif
     import pcie_tl_bdf_utils_pkg::*;
     import pcie_tl_device_profile_pkg::*;
     `include "uvm_macros.svh"

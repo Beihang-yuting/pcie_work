@@ -3,6 +3,7 @@
 // 依赖公共 TLP 类型及有效字节辅助函数；env 注入观察流，SCB 拥有 pending 深拷贝
 // 和分片跟踪表，终止响应回收两者。TLM 沿用直接调用，bridge 另提供发送前预登记。
 // 一个请求只在接收观察流计数；pending_imp 不计数，双 BFM 不重复检查 Completion。
+// TLM 双向完成先同步检查再释放 Tag；迟到 monitor 仅去重/计数，不能复活已终止请求。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_scoreboard extends uvm_scoreboard;
@@ -39,6 +40,11 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     // 已预登记且可能在 EP monitor 消费请求前完成响应，RX 不得复活已结束的事务。
     bit	ep_rx_pending_enable = 1'b1;
 
+    // EP DMA 在 TLM 同样先由 env 预登记。同步 Completion 可能早于 RC monitor
+    // 的请求观察，因此 RC RX 也必须能只计数、不重新打开已经完成的 Requester/Tag。
+    // 独立 SCB 和 bridge 保持接收时登记的原行为；环境只在 TLM 关闭此开关。
+    bit	rc_rx_pending_enable = 1'b1;
+
     //--- Check enables ---
     bit ordering_check_enable   = 1;
     bit completion_check_enable = 1;
@@ -67,8 +73,10 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     pcie_tl_tlp rc_sent_history[$];
     pcie_tl_tlp ep_sent_history[$];
 
-    //--- Dedup: completions already processed via env direct call ---
-    bit cpl_processed[pcie_tl_tlp];  // TLP handle -> seen
+    // TLM 双向 direct/monitor 共享同一个 Completion 句柄，只检查一次；第二次观察
+    // 回收标记。以句柄而非 Tag 去重，合法 Tag 重用及同一请求的多个分片仍分别检查。
+    // EP 只由明确承诺后续 monitor 观察的 direct 调用登记；legacy/bridge 单次观察不留标记。
+    bit	cpl_processed[pcie_tl_tlp];
 
     // 构造 SCB；观察口在 build 创建，pending 快照由本组件持有直到终止响应。
     function new(string name = "pcie_tl_scoreboard", uvm_component parent = null);
@@ -86,13 +94,15 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // RC 接收侧观察流；只有对端 monitor 缺失时，env 用 EP TX 补足同一观察边界。
     //=========================================================================
-    // RC 收到的请求计数并登记，Completion 匹配；保留旧 TLM 直接调用的句柄去重。
+    // RC 收到的请求计数并按模式登记，Completion 匹配；保留原 TLM 直接调用的句柄去重。
+    // TLM 请求已预登记，迟到 RX 不得复活同步 Completion 已关闭的 pending。
     function void write_rc(pcie_tl_tlp tlp);
         case (tlp.get_category())
             TLP_CAT_NON_POSTED: begin
                 // RC received a non-posted from EP (e.g. EP DMA read)
                 total_requests++;
-                register_pending(tlp);
+                if (rc_rx_pending_enable)
+                    register_pending(tlp);
             end
             TLP_CAT_POSTED: begin
                 // RC received a posted (EP DMA write or Memory Write)
@@ -127,10 +137,19 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //=========================================================================
     // EP 接收侧观察流；只有对端 monitor 缺失时，env 用 RC TX 补足同一观察边界。
     //=========================================================================
-    // EP 收到的请求计数，按模式登记并匹配 Completion；旧 TLM 禁止晚到 RX 复活 pending。
-    function void write_ep(pcie_tl_tlp tlp);
+    // EP 收到的请求计数，按模式登记并匹配 Completion；TLM 禁止晚到 RX 复活 pending。
+    // Completion 在 env 释放 EP Tag 前同步检查；随后 monitor 同句柄观察只回收去重标记。
+    // expect_monitor_duplicate 仅由 TLM 同步入口置 1，且调用必须早于接收 FIFO 入队；
+    // 默认 monitor/legacy/bridge 调用不登记新标记，避免单次观察永久持有 Completion。
+    function void write_ep(pcie_tl_tlp	tlp, bit	expect_monitor_duplicate = 0);
         case (tlp.get_category())
             TLP_CAT_COMPLETION: begin
+                if (cpl_processed.exists(tlp)) begin
+                    cpl_processed.delete(tlp);
+                    return;
+                end
+                if (expect_monitor_duplicate)
+                    cpl_processed[tlp] = 1;
                 total_completions++;
                 if (completion_check_enable)
                     check_completion(tlp);
