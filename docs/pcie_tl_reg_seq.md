@@ -107,3 +107,24 @@ if {[aip_check_status] != 0} { error [aip_read_result] }
 - AIP `make test_reg_wide`：位置参数、128 位整数、旧类兼容、溢出和错误回传。
 
 所有 VCS 仿真在指定验证主机运行。测试结果由对应执行日志判定。
+
+## 状态寄存器读与顺序
+
+`pcie_tl_reg_seq.check_read_data` 默认1，逐请求传给底层RW/TLP和SCB。
+读取AF等状态寄存器时可设0，仅跳过SCB按历史Memory Write保存值进行的RAM数据比较；
+Completion状态、tag、长度和超时检查保持开启，调用方仍应校验寄存器期望状态。
+该位是验证元数据，不改变线上TLP编码；复制、错误注入重编码与TX快照均保留它。
+
+寄存器seq固定底层`strict_order=1`，约束TC=0、attr=0（RO/IDO关闭），
+保证posted写后发起的状态读遵循PCIe顺序。普通`pcie_tl_rw_seq`默认`strict_order=0`，
+保留原有通用流量随机化行为。AIP注册要暴露逐命令策略时使用第五参数：
+
+```systemverilog
+`aip_cmd_reg(reg_acc, pcie_tl_reg_seq, rc_sqr, seq.error_msg, seq.check_read_data)
+```
+
+```tcl
+reg_acc read 0x80001010 check_read_data=0
+```
+
+上述原生seq使用绝对地址；Virtio的`project_pcie_reg_seq`包装类使用PF0 BAR0内偏移。

@@ -4,6 +4,7 @@
 // 和分片跟踪表，终止响应回收两者。TLM 沿用直接调用，bridge 另提供发送前预登记。
 // 一个请求只在接收观察流计数；pending_imp 不计数，双 BFM 不重复检查 Completion。
 // TLM 双向完成先同步检查再释放 Tag；迟到 monitor 仅去重/计数，不能复活已终止请求。
+// check_read_data 逐请求选择 RAM 写值比较；即使关闭，Completion 状态/匹配/长度检查仍执行。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_scoreboard extends uvm_scoreboard;
@@ -191,7 +192,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     endfunction
 
     // 首次观察时深拷贝请求，防止 sequence 复用/修改原对象污染分片检查。
-    // 同一键的 RX 副本不得覆盖 TX 快照：expected_cpl_status 等期望不在线上传输。
+    // 同一键的 RX 副本不得覆盖 TX 快照：expected_cpl_status/check_read_data 不在线上传输。
     // 已存在的键保持不变；终止 Completion 会释放键，使合法 Tag 重用重新登记。
     function void register_pending(pcie_tl_tlp tlp);
         request_key_t	key;
@@ -355,7 +356,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             wire_payload_bytes = (cpl.length == 0) ? 4096 : cpl.length * 4;
             if (wire_payload_bytes > cpl.payload.size())
                 wire_payload_bytes = cpl.payload.size();
-            if (data_integrity_enable && cpl.kind == TLP_CPLD)
+            if (data_integrity_enable && tracker.orig_req.check_read_data && cpl.kind == TLP_CPLD)
                 check_data_integrity(tracker.orig_req, cpl, tracker.wire_bytes);
 
             if ($cast(mem_req, tracker.orig_req))

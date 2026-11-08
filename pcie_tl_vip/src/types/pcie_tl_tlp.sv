@@ -2,6 +2,7 @@
 // src/types：公共 TLP 事务、派生包型、有效字节辅助函数及 read-back 注册表。
 // 依赖 UVM、pcie_tl_types/Prefix；sequence 拥有请求，接收端与 SCB 需要独立副本时
 // 使用 clone/do_copy。read-back 表持有运行期请求句柄，完成后释放注册项。
+// Completion 期望和 check_read_data 是本地检查元数据，由发送前快照保留，不进入线上编码。
 // 错误注入默认为独立 soft 0；显式负向约束可覆盖单项，不能顺带随机开启其他错误。
 //-----------------------------------------------------------------------------
 
@@ -89,6 +90,8 @@ class pcie_tl_tlp extends uvm_sequence_item;
     // declares another terminal status.  The scoreboard uses this contract to
     // distinguish an expected UR/CA from a real transaction failure.
     cpl_status_e                expected_cpl_status = CPL_STATUS_SC;
+    // 状态寄存器读可跳过历史写值比较；默认普通 Memory 读仍比较，协议检查不受影响。
+    bit	                       check_read_data = 1;
 
     // 注入元数据仅表达测试意图；与线上 EP 位分开，所有模式都默认不主动注入。
     rand bit				inject_ecrc_err;
@@ -284,6 +287,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
         this.requester_id        = rhs_.requester_id;
         this.tag                 = rhs_.tag;
         this.expected_cpl_status = rhs_.expected_cpl_status;
+        this.check_read_data = rhs_.check_read_data;
         // 深拷贝 payload 动态数组
         this.payload             = new[rhs_.payload.size()](rhs_.payload);
         // 拷贝错误注入元数据
@@ -321,6 +325,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
                 requester_id  == rhs_.requester_id  &&
                 tag           == rhs_.tag           &&
                 expected_cpl_status == rhs_.expected_cpl_status &&
+                check_read_data == rhs_.check_read_data &&
                 wire_error_materialized == rhs_.wire_error_materialized &&
                 payload.size() == rhs_.payload.size() &&
                 prefixes.size() == rhs_.prefixes.size());
@@ -336,6 +341,7 @@ class pcie_tl_tlp extends uvm_sequence_item;
         printer.print_field("requester_id",  requester_id, 16, UVM_HEX);
         printer.print_field("tag",           tag, 10, UVM_HEX);
         printer.print_string("expected_cpl_status", expected_cpl_status.name());
+        printer.print_field("check_read_data", check_read_data, 1, UVM_BIN);
         printer.print_field("attr",          attr, 3, UVM_BIN);
         printer.print_field("payload_size",  payload.size(), 32, UVM_DEC);
         if (cq_route.valid) begin

@@ -1,3 +1,5 @@
+// src/seq/base：公共 Memory 读写 sequence，借用调用方地址/数据，拥有本次发送的请求句柄。
+// check_read_data 只控制此请求在 SCB 的 RAM 写值比较，默认开启；不改变 Completion 等待或状态处理。
 // Unified memory read/write sequence.
 // User passes op (READ/WRITE), addr, and a REAL byte length; the sequence
 // auto-derives the DW length field and first_be/last_be per PCIe BE rules.
@@ -28,6 +30,9 @@ class pcie_tl_rw_seq extends uvm_sequence #(pcie_tl_tlp);
     bit [7:0]         rdata[];              // byte_len read-back bytes
     pcie_rw_status_e  status = PCIE_RW_OK;  // OK / ERR (UR/CA/...) / TIMEOUT
     int               rb_timeout_ns = 50000; // read-back wait budget (50us)
+    bit	              check_read_data = 1;
+    // 通用流量默认保留原属性；寄存器入口选择严格顺序，保证同 TC 写后读不能放宽重排。
+    bit	              strict_order = 0;
 
     function new(string name = "pcie_tl_rw_seq"); super.new(name); endfunction
 
@@ -72,6 +77,7 @@ class pcie_tl_rw_seq extends uvm_sequence #(pcie_tl_tlp);
         if (!tlp.randomize() with { tlp.kind == k; tlp.addr == local::addr;
                 tlp.length == len_dw; tlp.first_be == fbe; tlp.last_be == lbe;
                 tlp.is_64bit == local::is_64bit;
+                if (local::strict_order) { tlp.tc == 0; tlp.attr == 0; }
                 tlp.constraint_mode_sel == local::mode; })
             `uvm_fatal("RW_SEQ", "randomize() failed")
 
@@ -89,6 +95,8 @@ class pcie_tl_rw_seq extends uvm_sequence #(pcie_tl_tlp);
                 tlp.payload[off + i] = wdata[i];
         end
 
+        // 元数据在发送前固定，TX 快照保留它；该位不进入 PCIe 线上编码。
+        tlp.check_read_data = check_read_data;
         issued_tlp = tlp;
         finish_item(tlp);
 

@@ -6,6 +6,7 @@
 // 稀疏 mask 拆成连续区间，避免伪造 PCIe 无法表达的中间 DWORD byte enable；
 // 不进行读改写，未使能字节不访问，masked read 的未使能字节返回零。
 // 写操作为 posted：成功只表示发送完成；多区间访问不提供原子性或失败回滚。
+// check_read_data 默认启用 RAM 写值比较；状态寄存器可逐请求关闭，Completion 协议检查不变。
 class pcie_tl_reg_seq extends uvm_sequence #(pcie_tl_tlp);
     `uvm_object_utils(pcie_tl_reg_seq)
 
@@ -18,6 +19,7 @@ class pcie_tl_reg_seq extends uvm_sequence #(pcie_tl_tlp);
     pcie_rw_status_e	   status = PCIE_RW_OK;
     string	             error_msg;
     int	                rb_timeout_ns = 50000;
+    bit	                check_read_data = 1;
     pcie_tl_mem_tlp	    issued_tlps[$];
 
     // 工厂构造；输入均为非 rand 字段，命令赋值后直接 start，不会重新随机地址。
@@ -83,6 +85,9 @@ class pcie_tl_reg_seq extends uvm_sequence #(pcie_tl_tlp);
             rw.byte_len = count;
             rw.is_64bit = (rw.addr[63:32] != 0);
             rw.rb_timeout_ns = rb_timeout_ns;
+            rw.check_read_data = check_read_data;
+            // 寄存器写后读作为设备配置同步点：统一 TC0，禁止 Relaxed/ID-based Ordering。
+            rw.strict_order = 1;
             if (is_write) begin
                 rw.wdata = new[count];
                 foreach (rw.wdata[i]) rw.wdata[i] = wdata[(first + i)*8 +: 8];

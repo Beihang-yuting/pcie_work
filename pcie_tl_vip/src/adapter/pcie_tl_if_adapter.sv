@@ -100,6 +100,7 @@ class pcie_tl_if_adapter extends uvm_component;
         wire_tlp.field_bitmask        = tlp.field_bitmask;
         wire_tlp.constraint_mode_sel  = tlp.constraint_mode_sel;
         wire_tlp.expected_cpl_status  = tlp.expected_cpl_status;
+        wire_tlp.check_read_data      = tlp.check_read_data;
         wire_tlp.cq_route             = tlp.cq_route;
         wire_tlp.wire_error_materialized = 1;
         return wire_tlp;
