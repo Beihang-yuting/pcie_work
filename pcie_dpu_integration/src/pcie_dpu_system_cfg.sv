@@ -1,3 +1,5 @@
+// pcie_dpu_integration：物理链路/Root 配置，借用 DPU authoring 输入。
+// 当前 DUT 表由 dpu_pcie_pkg::dpu_cfg_seq 配置；本类不保存旧双 bank 寄存器策略。
 //------------------------------------------------------------------------------
 // DPU-aware system authoring configuration.
 //
@@ -23,10 +25,6 @@ class pcie_dpu_system_cfg extends uvm_object;
   string root_link_id;
   bit use_switch_routing;
 
-  bit enable_bootstrap_plan;
-  bit enable_vio_plan;
-  dpu_vio_register_plan_policy vio_policy;
-  dpu_vio_dataplane_plan_extension vio_dataplane_extension;
 
   function new(string name = "pcie_dpu_system_cfg");
     super.new(name);
@@ -39,11 +37,6 @@ class pcie_dpu_system_cfg extends uvm_object;
     rc_index = 0;
     root_link_id = "";
     use_switch_routing = 1'b0;
-    enable_bootstrap_plan = 1'b1;
-    enable_vio_plan = 1'b1;
-    vio_policy = dpu_vio_register_plan_policy::type_id::create(
-      {name, "_vio_policy"});
-    vio_dataplane_extension = null;
   endfunction
 
   function void validate(output string errors[$]);
