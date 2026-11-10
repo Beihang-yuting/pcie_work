@@ -4,7 +4,8 @@
 // 和分片跟踪表，终止响应回收两者。TLM 沿用直接调用，bridge 另提供发送前预登记。
 // 一个请求只在接收观察流计数；pending_imp 不计数，双 BFM 不重复检查 Completion。
 // TLM 双向完成先同步检查再释放 Tag；迟到 monitor 仅去重/计数，不能复活已终止请求。
-// check_read_data 逐请求选择 RAM 写值比较；即使关闭，Completion 状态/匹配/长度检查仍执行。
+// Host DMA 使用 RC 读内存时的字节快照，兼容 CPU 直接写和采样后的内存变化。
+// 其他读仍使用 PCIe 写历史；check_read_data 只选择数据比较，不关闭 Completion 协议检查。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_scoreboard extends uvm_scoreboard;
@@ -14,12 +15,16 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     `uvm_analysis_imp_decl(_rc)
     `uvm_analysis_imp_decl(_ep)
     `uvm_analysis_imp_decl(_pending)
+    `uvm_analysis_imp_decl(_host_read)
 
     uvm_analysis_imp_rc #(pcie_tl_tlp, pcie_tl_scoreboard) rc_imp;
     uvm_analysis_imp_ep #(pcie_tl_tlp, pcie_tl_scoreboard) ep_imp;
 
     // 发送前只建立期望，不把 TX 与 RX 两次观察算作两笔事务。
     uvm_analysis_imp_pending #(pcie_tl_tlp, pcie_tl_scoreboard)	pending_imp;
+
+    // RC responder 在任何发送等待前发布本次采样；只保留字节，不持有 driver 或内存句柄。
+    uvm_analysis_imp_host_read #(pcie_tl_cpl_tlp, pcie_tl_scoreboard)	host_read_imp;
 
     // PCIe Tag 仅在同一 Requester 内唯一；双向请求可合法使用同一个 Tag。
     typedef bit [25:0]	request_key_t;
@@ -70,6 +75,16 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     //--- Data integrity: store write data for read comparison ---
     bit [7:0] written_data[bit [63:0]];  // addr -> data
 
+    // 按请求累积 DWORD 对齐的分片字节，索引与 tracker.wire_bytes 相同；终止时统一回收。
+    // 每 Root 一个 SCB，Requester+Tag 再隔离各 Function，不能仅按 IOVA 缓存 DMA 期望。
+    local bit [7:0]	host_read_data[request_key_t][$];
+
+    // 在同步 analysis 回调内复制读快照；无 pending 表示接线/生命周期错误，不能静默漏检。
+    extern function void write_host_read(pcie_tl_cpl_tlp	sample);
+
+    // 回收一个请求全部检查状态，成功、错误状态及无数据终止共用同一出口。
+    extern protected function void retire_request(request_key_t	key);
+
     //--- Ordering history ---
     pcie_tl_tlp rc_sent_history[$];
     pcie_tl_tlp ep_sent_history[$];
@@ -90,6 +105,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         rc_imp = new("rc_imp", this);
         ep_imp = new("ep_imp", this);
         pending_imp = new("pending_imp", this);
+        host_read_imp = new("host_read_imp", this);
     endfunction
 
     //=========================================================================
@@ -273,8 +289,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                 cpl.tag, tracker.orig_req.expected_cpl_status.name(),
                 cpl.cpl_status.name(), tracker.orig_req.kind.name()))
             mismatched++;
-            cpl_trackers.delete(key);
-            pending_requests.delete(key);
+            retire_request(key);
             return;
         end
 
@@ -283,8 +298,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         // it completes the request successfully from the test's perspective.
         if (cpl.cpl_status != CPL_STATUS_SC) begin
             matched++;
-            cpl_trackers.delete(key);
-            pending_requests.delete(key);
+            retire_request(key);
             return;
         end
 
@@ -302,8 +316,7 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
                     cpl.tag, tracker.orig_req.kind.name()))
                 mismatched++;
             end
-            cpl_trackers.delete(key);
-            pending_requests.delete(key);
+            retire_request(key);
             return;
         end
 
@@ -356,7 +369,8 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
             wire_payload_bytes = (cpl.length == 0) ? 4096 : cpl.length * 4;
             if (wire_payload_bytes > cpl.payload.size())
                 wire_payload_bytes = cpl.payload.size();
-            if (data_integrity_enable && tracker.orig_req.check_read_data && cpl.kind == TLP_CPLD)
+            if (data_integrity_enable && tracker.orig_req.check_read_data &&
+                cpl.kind inside {TLP_CPLD, TLP_CPLD_LK})
                 check_data_integrity(tracker.orig_req, cpl, tracker.wire_bytes);
 
             if ($cast(mem_req, tracker.orig_req))
@@ -378,33 +392,19 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
         // Check if all bytes received
         if (tracker.received_bytes >= tracker.total_bytes) begin
             matched++;
-            cpl_trackers.delete(key);
-            pending_requests.delete(key);
+            retire_request(key);
         end
     endfunction
 
     //=========================================================================
     // Check 2: Data integrity (with byte offset for split completions)
     //=========================================================================
-    // 只比较请求启用的字节；byte_offset 为已消耗的线上跨度，无已知写数据则跳过。
-    protected function void check_data_integrity(pcie_tl_tlp req, pcie_tl_cpl_tlp cpl, int byte_offset = 0);
-        pcie_tl_mem_tlp mem_req;
-        if (!$cast(mem_req, req)) return;
-
-        foreach (cpl.payload[i]) begin
-            bit [63:0] addr = pcie_tl_mem_wire_addr(mem_req) + byte_offset + i;
-            if (pcie_tl_mem_lane_enabled(mem_req, byte_offset + i) &&
-                written_data.exists(addr)) begin
-                if (written_data[addr] != cpl.payload[i]) begin
-                    `uvm_error("SCB", $sformatf(
-                        "Data mismatch at addr=0x%016h: expected=0x%02h got=0x%02h",
-                        addr, written_data[addr], cpl.payload[i]))
-                    mismatched++;
-                    return;
-                end
-            end
-        end
-    endfunction
+    // Host 读优先使用源端快照；其他读保持历史写值比较。只检查启用的字节，不能将 padding 算作数据。
+    extern protected function void check_data_integrity(
+        pcie_tl_tlp		req,
+        pcie_tl_cpl_tlp	cpl,
+        int				byte_offset = 0
+    );
 
     //=========================================================================
     // Check 3: Ordering compliance
@@ -578,3 +578,65 @@ class pcie_tl_scoreboard extends uvm_scoreboard;
     endfunction
 
 endclass
+
+// 采样和发送之间允许时间推进，必须立即复制字节；不能在 Completion 到达时重读 backing。
+function void pcie_tl_scoreboard::write_host_read(pcie_tl_cpl_tlp	sample);
+    request_key_t	key;
+
+    if (!completion_check_enable || !data_integrity_enable) return;
+    key = request_key(sample);
+    if (!pending_requests.exists(key)) begin
+        `uvm_error("SCB_HOST_READ", "Host read sample has no pending request")
+        mismatched++;
+        return;
+    end
+    if (!pending_requests[key].check_read_data) return;
+    foreach (sample.payload[i]) host_read_data[key].push_back(sample.payload[i]);
+endfunction
+
+// 任一终止响应都释放快照，后续合法复用 Requester/Tag 不得继承上一笔数据。
+function void pcie_tl_scoreboard::retire_request(request_key_t	key);
+    cpl_trackers.delete(key);
+    pending_requests.delete(key);
+    host_read_data.delete(key);
+endfunction
+
+// 与本次读采样比较，避免 CPU 写/回绕污染期望；未接快照的普通 BAR 读保持原有历史值语义。
+// byte_offset 是已经完成的线上字节跨度，包含首尾 padding；数据比较仍严格按请求 BE 选 lane。
+function void pcie_tl_scoreboard::check_data_integrity(
+    pcie_tl_tlp		req,
+    pcie_tl_cpl_tlp	cpl,
+    int				byte_offset
+);
+    pcie_tl_mem_tlp	mem_req;
+    request_key_t	key;
+    bit				sampled;
+
+    if (!$cast(mem_req, req)) return;
+    key     = request_key(req);
+    sampled = host_read_data.exists(key);
+
+    if (sampled && host_read_data[key].size() < byte_offset + cpl.payload.size()) begin
+        `uvm_error("SCB_HOST_READ", "Completion exceeds the captured Host read data")
+        mismatched++;
+        return;
+    end
+
+    foreach (cpl.payload[i]) begin
+        bit [63:0]	addr;
+        bit [7:0]	expected;
+
+        addr = pcie_tl_mem_wire_addr(mem_req) + byte_offset + i;
+        if (!pcie_tl_mem_lane_enabled(mem_req, byte_offset + i)) continue;
+        if (!sampled && !written_data.exists(addr)) continue;
+
+        expected = sampled ? host_read_data[key][byte_offset + i] : written_data[addr];
+        if (expected != cpl.payload[i]) begin
+            `uvm_error("SCB", $sformatf(
+                "Data mismatch at addr=0x%016h: expected=0x%02h got=0x%02h",
+                addr, expected, cpl.payload[i]))
+            mismatched++;
+            return;
+        end
+    end
+endfunction

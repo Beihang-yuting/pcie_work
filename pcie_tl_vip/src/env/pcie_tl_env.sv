@@ -1085,8 +1085,12 @@ class pcie_tl_env extends uvm_env;
         // 3. RC monitor -> per-root scoreboard + coverage; v_seqr per-root arrays
         foreach (rc_agents[r]) begin
             if (rc_agents[r] == null) continue;
-            if (scbs.size() > r && scbs[r] != null)
+            if (scbs.size() > r && scbs[r] != null) begin
                 rc_agents[r].monitor.tlp_ap.connect(scbs[r].rc_imp);
+                // 每 Root 的源端内存快照与接收检查共用同一 SCB；不向 PCIe 层暴露 VIO/IOMMU。
+                if (rc_agents[r].rc_driver != null)
+                    rc_agents[r].rc_driver.host_read_ap.connect(scbs[r].host_read_imp);
+            end
             rc_agents[r].monitor.tlp_ap.connect(cov.analysis_export);
             // native 与 bridge 都不经过 TLM loopback，接口 Completion 必须交实际
             // requester driver。仅连接成功的活跃 agent 禁止 monitor registry 回填；

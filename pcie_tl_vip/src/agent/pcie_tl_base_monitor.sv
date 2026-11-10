@@ -2,6 +2,7 @@
 // src/agent：从注入 adapter 接收 TLP，执行协议检查并发布观察流。
 // 依赖 codec、共享检查组件及 read-back registry；monitor 借用资源，不拥有请求或 Tag。
 // 活跃接口 requester 由实际 driver 回填；无 driver 的 passive 观察保留 registry fallback。
+// 可选 AIP 只在收到完整 TLP 时记录活动；空轮询和接口时钟不会阻止 end_test 判断空闲。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_base_monitor extends uvm_monitor;
@@ -77,6 +78,11 @@ class pcie_tl_base_monitor extends uvm_monitor;
             #1ns;
             return;
         end
+
+`ifdef AIP_CMDLINE_SV
+        // DUT DMA、返回的 Completion 和其他真实 TLP 都重新开始 end_test 的 idle 等待。
+        aip_activity::tick();
+`endif
 
         if (tlp.wire_error_materialized) begin
             if (tlp.inject_poisoned && tlp.ep_bit)

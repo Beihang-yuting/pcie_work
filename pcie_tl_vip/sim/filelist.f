@@ -52,6 +52,7 @@ $HOST_MEM_ROOT/src/host_mem_manager.sv
 ../tests/pcie_tl_multipair_heavy_test.sv
 ../tests/pcie_tl_tag_bit_runtime_test.sv
 ../tests/pcie_tl_rw_readback_test.sv
+../tests/pcie_tl_host_read_scb_test.sv
 ../tests/pcie_tl_switch_rw_readback_test.sv
 ../tests/pcie_tl_dpu_501x_profile_test.sv
 ../tests/pcie_tl_route_metadata_test.sv

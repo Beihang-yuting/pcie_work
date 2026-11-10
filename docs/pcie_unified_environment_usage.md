@@ -395,6 +395,20 @@ VIO/DPU 初始化的 manager 也不会被 `pcie_tl_env` 重新 `init_region()`�
 绑定，则显式绑定优先。EP 的 `dev_mem[i]` 仍可独立通过
 `config_db("dev_mem_i")` 注入。
 
+Host Memory Read 的 SCB 数据期望来自 RC responder **实际读取时**的字节快照。
+`pcie_tl_env` 自动连接每个 Root 的 `rc_driver.host_read_ap` 与
+`scb.host_read_imp`，不需要 test 额外接线或关闭 `data_integrity_enable`。
+CPU/VIO 直接更新 backing 后，下一笔 DMA 读会采样新值；本笔采样之后的写入
+不改变已经生成的 Completion 期望。分片按线上字节跨度与 BE 比较，Requester/Tag
+隔离各请求，终止响应释放快照。普通 BAR 读仍采用已有 PCIe 写历史比较。
+该检查覆盖 RC 内存取数点到 SCB 观察点的数据一致性，不代替业务报文或 RTL 内部状态检查。
+
+接入 AIP 后，公共 driver 在 `adapter.send()` 返回时、monitor 在收到非空 TLP 时
+自动调用 `aip_activity::tick()`，请求和自动 Completion 均计入活动。
+`end_test idle=1us timeout=100us` 会等待一个完整的无活动窗口；新的 DMA/寄存器访问
+会延后退出。空轮询、时钟和发送等待不刷新计数，无需 project 接线或新增开关。
+未编译 AIP 的独立 TL 环境不引入 AIP 依赖；`end_test` 无参数仍按 AIP 原语义立即退出。
+
 `pcie_work` 可以完全脱离 `dpu_common` 使用：直接创建
 `pcie_tl_env_config`/`pcie_tl_env` 即可。集成 DPU 时只需额外编译
 `pcie_dpu_integration`，设置 `DPU_COMMON_ROOT` 指向独立仓库根目录，并在

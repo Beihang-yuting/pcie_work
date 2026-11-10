@@ -2,6 +2,7 @@
 // src/agent：公共 TLP 发送流水线，依赖共享 Tag/FC/codec 与注入的 adapter。
 // driver 拥有发送观察口和 read-back 表；共享组件归 env 所有，请求句柄归 sequence。
 // tx_ap 在最终 Tag 已确定、adapter 尚未发送时同步发布，观察者不得修改请求。
+// 可选 AIP 活动在 adapter.send 返回后更新，覆盖主动请求和自动 Completion，不把等待当进展。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
@@ -105,6 +106,11 @@ class pcie_tl_base_driver extends uvm_driver #(pcie_tl_tlp);
         if (tx_delay_model != null)
             tx_delay_model.wait_delay();
         adapter.send(tlp);
+
+`ifdef AIP_CMDLINE_SV
+        // 一笔实际发送结束后刷新 idle 窗口；FC/带宽/链路等待不产生虚假 tick。
+        aip_activity::tick();
+`endif
 
         // 6. Consume FC credit
         if (fc_mgr != null)

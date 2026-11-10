@@ -3,6 +3,7 @@
 // driver 拥有 pending/分片超时状态，sequence 拥有请求，env 注入的共享资源不转移所有权。
 // 接口模式通过 Completion analysis 入口统一回填和回收；TLM 由 loopback 同步调用。
 // 超时从发送返回后起算，按请求句柄及分配代次隔离同 Tag 的旧定时任务。
+// Host memory 读的数据在采样后、发送等待前同步发布；SCB 复制字节，不借用可变 backing。
 //-----------------------------------------------------------------------------
 
 class pcie_tl_rc_driver extends pcie_tl_base_driver;
@@ -37,6 +38,10 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
     bit           use_unified_mem = 0;     // mirror of cfg.use_unified_mem; default 0
     bit           auto_response_enable = 1;
 
+    // 源端读快照不经过线上编码；每个分片只发布一次，保留 Requester/Tag 的归属。
+    // 使用现有 Completion 容器传递本次采样字节，接收者必须在 write 回调中复制。
+    uvm_analysis_port #(pcie_tl_cpl_tlp)	host_read_ap;
+
     //--- Completion splitting config (injected by env) ---
     int mps_bytes = 256;
     int rcb_bytes = 64;
@@ -52,6 +57,7 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
         super.build_phase(phase);
 
         completion_analysis_imp = new("completion_analysis_imp", this);
+        host_read_ap = new("host_read_ap", this);
     endfunction
 
     // monitor.tlp_ap 的统一回调；仅在 SV_IF 模式处理 Completion，避免
@@ -197,6 +203,8 @@ class pcie_tl_rc_driver extends pcie_tl_base_driver;
                 end
             end
 
+            // 此时 payload 刚从当前 mem（含 IOVA proxy）读取，尚未等待 FC/链路或被发送钩子修改。
+            host_read_ap.write(cpl);
             send_tlp(cpl);
 
             cur_addr              += chunk;
