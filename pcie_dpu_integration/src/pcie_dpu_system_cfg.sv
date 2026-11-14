@@ -19,8 +19,6 @@ class pcie_dpu_system_cfg extends uvm_object;
   pcie_dpu_root_binding_cfg root_bindings;
   pcie_global_cfg pcie_policy;
 
-  // Optional register executor supplied by a project-specific TL test.
-  dpu_reg_executor executor;
   int unsigned rc_index;
   string root_link_id;
   bit use_switch_routing;
@@ -33,7 +31,6 @@ class pcie_dpu_system_cfg extends uvm_object;
     attachments = null;
     root_bindings = null;
     pcie_policy = null;
-    executor = null;
     rc_index = 0;
     root_link_id = "";
     use_switch_routing = 1'b0;
